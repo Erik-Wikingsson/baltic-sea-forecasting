@@ -207,7 +207,10 @@ class ARModel(pl.LightningModule):
         """
         Expand tensor with initial batch dimension
         """
-        return x.unsqueeze(0).expand(batch_size, -1, -1)
+        if x.ndim == 3:
+            return x
+        else:
+            return x.unsqueeze(0).expand(batch_size, -1, -1)
 
     def predict_step(self, prev_state, prev_prev_state, forcing):
         """

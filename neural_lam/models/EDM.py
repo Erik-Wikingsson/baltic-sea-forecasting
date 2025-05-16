@@ -10,7 +10,7 @@ import wandb
 import math 
 
 # First-party
-from neural_lam import constants, metrics, utils, vis
+from neural_lam import metrics, utils, vis
 from ..config import NeuralLAMConfig
 from ..datastore import BaseDatastore
 from neural_lam.models.graph_diff import GraphDiff
@@ -40,7 +40,7 @@ class EDM(ARModel):
 
         if args.diffusion_model == 'graph_diff':
             print("Using GraphDiff")
-            self.model = GraphDiff(args)
+            self.model = GraphDiff(args, config, datastore)
         else:
             raise NotImplementedError(f"Unknown diffusion model: {args.diffusion_model}")
 
@@ -89,7 +89,7 @@ class EDM(ARModel):
         """
         input_grid = torch.cat((prev_state, prev_prev_state, forcing), dim=-1) # (B, N_grid, d_input)
 
-        latents = torch.randn_like(input_grid[:, :, :self.grid_output_dim]) # (B, N_grid, d_state)
+        latents = torch.randn_like(prev_state) # (B, N_grid, d_state)
 
         # Run through sampler
         if self.sampler == "heun":
@@ -108,7 +108,7 @@ class EDM(ARModel):
 
         # Add residual if needed
         if self.pred_residual:
-            next_state = (next_state * self.step_diff_std[constants.USED_PARAMS]) + self.step_diff_mean[constants.USED_PARAMS] # Unormalize residual
+            next_state = (next_state * self.step_diff_std) + self.step_diff_mean # Unormalize residual
             next_state = prev_state + next_state
         
         return next_state
@@ -428,6 +428,8 @@ class EDM(ARModel):
         """
         Run validation on single batch
         """
+        # TODO: Validation step (calculate loss)
+        # TODO: Validation step batch 0, sample 1 trajectory for visual evaluation
         raise NotImplementedError("No validation step implemented!")
 
     

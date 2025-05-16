@@ -274,6 +274,12 @@ def main(input_args=None):
         "training and eval), or just mean prediction used "
         "(default: 0 (no))",
     )
+    parser.add_argument(
+        "--num_sanity_val_steps",
+        type=int,
+        default=4,
+        help="Number of sanity check steps to run before training (default: 4)",
+    )
 
     # Evaluation options
     parser.add_argument(
@@ -411,6 +417,8 @@ def main(input_args=None):
         )  # Allows using Tensor Cores on A100s
     else:
         device_name = "cpu"
+    
+    device_name = "cpu"
 
     # Set devices to use
     if args.devices == ["auto"]:
@@ -455,6 +463,10 @@ def main(input_args=None):
     # used at all in producing the loss. This is desired, but DDP complains.
     strategy = "ddp" if args.kl_beta > 0 else "ddp_find_unused_parameters_true"
 
+    # To enable no validation during training, set val_interval to None
+    if args.val_interval == 0:
+        args.val_interval = None
+
     trainer = pl.Trainer(
         max_epochs=args.epochs,
         deterministic=True,
@@ -467,6 +479,7 @@ def main(input_args=None):
         callbacks=callbacks,
         check_val_every_n_epoch=args.val_interval,
         precision=args.precision,
+        num_sanity_val_steps=args.num_sanity_val_steps,
     )
 
     # Only init once, on rank 0 only

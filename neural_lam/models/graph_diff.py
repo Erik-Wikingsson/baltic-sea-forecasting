@@ -27,6 +27,7 @@ class GraphDiff(ARModel):
         super().__init__(args, config=config, datastore=datastore)
         self.map_noise = NoiseEmbedding()
 
+        num_state_vars = datastore.get_num_data_vars(category="state")
         num_forcing_vars = datastore.get_num_data_vars(category="forcing")
         num_past_forcing_steps = args.num_past_forcing_steps
         num_future_forcing_steps = args.num_future_forcing_steps
@@ -36,6 +37,8 @@ class GraphDiff(ARModel):
             self.num_grid_nodes,
             grid_static_dim,
         ) = self.grid_static_features.shape
+
+        self.grid_output_dim = num_state_vars # We only output the denoised state
 
         self.grid_dim = (
             3 * self.grid_output_dim # prev_prev, prev, diffusion
@@ -655,10 +658,12 @@ class MLP(nn.Module):
         else:
             self.layer_norm = None
 
-    def forward(self, x, emb=0):
+    def forward(self, x, emb):
         x = self.mlp_layers(x)
+
         if self.layer_norm is not None:
             x = self.layer_norm(x, emb)
+
         return x
     
 def make_mlp(blueprint, layer_norm=True, noise_level_dim=16):

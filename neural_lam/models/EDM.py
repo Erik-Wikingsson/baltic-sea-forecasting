@@ -240,8 +240,6 @@ class EDM(ARModel):
         Plot ensemble forecast + mean and std
         (split argument should be unused, only for compatibility with ARModel)
         """
-        
-        print(f"self.current_epoch: {self.current_epoch}")
         init_states, target_states, forcing_features, _ = batch
         if prediction is not None:
             trajectories = prediction
@@ -453,7 +451,6 @@ class EDM(ARModel):
             and batch_idx == 0
             and self.n_example_pred > 0
         ):
-            print("Plotting examples")
             (
                 trajectories,
                 target_states,

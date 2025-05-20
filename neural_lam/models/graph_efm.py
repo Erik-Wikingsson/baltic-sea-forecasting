@@ -55,7 +55,7 @@ class GraphEFM(ARModel):
         # Specify dimensions of data
         # grid_dim from data + static
         grid_state_dim = self._datastore.get_num_data_vars("state")
-        grid_current_dim = self.grid_dim + grid_state_dim
+        grid_current_dim = self.grid_input_dim + grid_state_dim
         g2m_dim = self.g2m_features.shape[1]
         m2g_dim = self.m2g_features.shape[1]
 
@@ -63,7 +63,7 @@ class GraphEFM(ARModel):
         # Feature embedders for grid
         self.mlp_blueprint_end = [args.hidden_dim] * (args.hidden_layers + 1)
         self.grid_prev_embedder = utils.make_mlp(
-            [self.grid_dim] + self.mlp_blueprint_end
+            [self.grid_input_dim] + self.mlp_blueprint_end
         )  # For states up to t-1
         self.grid_current_embedder = utils.make_mlp(
             [grid_current_dim] + self.mlp_blueprint_end

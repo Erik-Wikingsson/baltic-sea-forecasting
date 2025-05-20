@@ -47,7 +47,7 @@ class BaseGraphModel(ARModel):
         # Feature embedders for grid
         self.mlp_blueprint_end = [args.hidden_dim] * (args.hidden_layers + 1)
         self.grid_embedder = utils.make_mlp(
-            [self.grid_dim] + self.mlp_blueprint_end
+            [self.grid_input_dim] + self.mlp_blueprint_end
         )
         self.g2m_embedder = utils.make_mlp([g2m_dim] + self.mlp_blueprint_end)
         self.m2g_embedder = utils.make_mlp([m2g_dim] + self.mlp_blueprint_end)

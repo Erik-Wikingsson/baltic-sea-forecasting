@@ -109,8 +109,8 @@ class ARModel(pl.LightningModule):
             grid_static_dim,
         ) = self.grid_static_features.shape
 
-        self.grid_dim = (
-            2 * self.grid_output_dim
+        self.grid_input_dim = (
+            2 * num_state_vars
             + grid_static_dim
             + num_forcing_vars
             * (num_past_forcing_steps + num_future_forcing_steps + 1)
@@ -221,9 +221,9 @@ class ARModel(pl.LightningModule):
     def unroll_prediction(self, init_states, forcing_features, true_states):
         """
         Roll out prediction taking multiple autoregressive steps with model
-        init_states: (B, 2, num_grid_nodes, d_f) forcing_features: (B,
-        pred_steps, num_grid_nodes, d_static_f) true_states: (B, pred_steps,
-        num_grid_nodes, d_f)
+        init_states: (B, 2, num_grid_nodes, d_f)
+        forcing_features: (B, pred_steps, num_grid_nodes, d_static_f)
+        true_states: (B, pred_steps,num_grid_nodes, d_f)
         """
         prev_prev_state = init_states[:, 0]
         prev_state = init_states[:, 1]

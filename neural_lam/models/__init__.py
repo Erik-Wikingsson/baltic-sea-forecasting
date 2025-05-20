@@ -4,3 +4,5 @@ from .base_hi_graph_model import BaseHiGraphModel
 from .graph_efm import GraphEFM
 from .graph_fm import GraphFM
 from .graphcast import GraphCast
+from .graph_diff import GraphDiff
+from .EDM import EDM

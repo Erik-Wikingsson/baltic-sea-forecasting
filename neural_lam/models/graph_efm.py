@@ -62,6 +62,7 @@ class GraphEFM(ARModel):
         # Define sub-models
         # Feature embedders for grid
         self.mlp_blueprint_end = [args.hidden_dim] * (args.hidden_layers + 1)
+
         self.grid_prev_embedder = utils.make_mlp(
             [self.grid_input_dim] + self.mlp_blueprint_end
         )  # For states up to t-1
@@ -332,6 +333,8 @@ class GraphEFM(ARModel):
             ),
             dim=-1,
         )  # (B, num_grid_nodes, grid_dim)
+
+        print(f"grid_features shape: {grid_features.shape}")
 
         grid_emb = self.grid_prev_embedder(grid_features)
         # (B, num_grid_nodes, d_h)

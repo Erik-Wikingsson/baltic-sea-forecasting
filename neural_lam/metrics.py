@@ -86,7 +86,7 @@ def wmse(pred, target, pred_std, mask=None, average_grid=True, sum_vars=True):
 
 # Allow for unused pred_std for consistent signature
 # pylint: disable-next=unused-argument
-def mse(pred, target, pred_std, mask=None, average_grid=True, sum_vars=True):
+def mse(pred, target, pred_std=None, mask=None, average_grid=True, sum_vars=True):
     """
     (Unweighted) Mean Squared Error
 

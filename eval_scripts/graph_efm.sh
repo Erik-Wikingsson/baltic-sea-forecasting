@@ -8,8 +8,8 @@ python -m neural_lam.train_model \
     --processor_layers 1\
     --prior_processor_layers 1\
     --encoder_processor_layers 1\
-    --output_std \
     --ensemble_size 100\
     --batch_size 1\
-    --eval test\
+    # --output_std \
+    # --eval test\
     # --load paper_checkpoints/graph_efm.ckpt\

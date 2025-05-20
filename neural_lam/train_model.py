@@ -418,8 +418,6 @@ def main(input_args=None):
     else:
         device_name = "cpu"
     
-    device_name = "cpu"
-
     # Set devices to use
     if args.devices == ["auto"]:
         devices = "auto"

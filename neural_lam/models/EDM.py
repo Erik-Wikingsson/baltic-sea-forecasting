@@ -113,7 +113,7 @@ class EDM(ARModel):
         
         return next_state
     
-    def unroll_prediction(self, init_states, forcing_features):
+    def unroll_prediction(self, init_states, forcing_features, true_states):
             """
             Roll out prediction taking multiple autoregressive steps with model
             init_states: (B, 2, num_grid_nodes, d_f)
@@ -129,8 +129,15 @@ class EDM(ARModel):
 
             for i in range(pred_steps):
                 forcing = forcing_features[:, i]
+                true_state = true_states[:, i]
                 pred_state = self.predict_step(
                     prev_state, prev_prev_state, forcing
+                )
+
+                # Overwrite border with true state
+                pred_state = (
+                    self.boundary_mask * true_state
+                    + self.interior_mask * pred_state
                 )
         
                 prediction_list.append(pred_state)
@@ -150,6 +157,7 @@ class EDM(ARModel):
         self,
         init_states,
         forcing_features,
+        target_states,
         num_traj,
     ):
         """
@@ -166,6 +174,7 @@ class EDM(ARModel):
             self.unroll_prediction(
                 init_states,
                 forcing_features,
+                target_states,
             )
             for _ in range(num_traj)
         ]
@@ -194,6 +203,7 @@ class EDM(ARModel):
         trajectories = self.sample_trajectories(
             init_states,
             forcing_features,
+            target_states,
             self.ensemble_size,
         )
         # (B, S, pred_steps, num_grid_nodes, d_f)
@@ -230,14 +240,18 @@ class EDM(ARModel):
         Plot ensemble forecast + mean and std
         (split argument should be unused, only for compatibility with ARModel)
         """
+        
+        print(f"self.current_epoch: {self.current_epoch}")
         init_states, target_states, forcing_features, _ = batch
-
-        trajectories, _ = self.sample_trajectories(
-            init_states,
-            forcing_features,
-            target_states,
-            self.ensemble_size,
-        )
+        if prediction is not None:
+            trajectories = prediction
+        else:
+            trajectories, _ = self.sample_trajectories(
+                init_states,
+                forcing_features,
+                target_states,
+                self.ensemble_size,
+            )
         # (B, S, pred_steps, num_grid_nodes, d_f)
 
         # Rescale to original data scale
@@ -293,6 +307,7 @@ class EDM(ARModel):
                 ),
                 start=1,
             ):
+                
                 time_title_part = (
                     f"t={t_i} ({self._datastore.step_length*t_i} h)"
                 )
@@ -428,9 +443,47 @@ class EDM(ARModel):
         """
         Run validation on single batch
         """
-        # TODO: Validation step (calculate loss)
-        # TODO: Validation step batch 0, sample 1 trajectory for visual evaluation
-        raise NotImplementedError("No validation step implemented!")
+        # TODO: Validation step (calculate loss), if it is meaningful?
+        # Validation step batch 0, sample 1 trajectory for visual evaluation
+        # Plot some example predictions using prior and encoder
+        val_log_dict = {"val_mean_loss": torch.tensor([0], device=batch[0].device)}
+        batch_idx = args[0]
+        if (
+            self.trainer.is_global_zero
+            and batch_idx == 0
+            and self.n_example_pred > 0
+        ):
+            print("Plotting examples")
+            (
+                trajectories,
+                target_states,
+                spread_squared_batch,
+                ens_mse_batch,
+            ) = self.ensemble_common_step(batch)
+            # We only take the statisics from the plotted samples as we will not sample for the whole validation set
+            # NOTE: This metric is not that useful, as we only sample 1 trajectory
+            val_log_dict["val_mean_loss"] = ens_mse_batch.mean()
+            self.plot_examples(
+                batch,
+                n_examples=self.n_example_pred,
+                split="val",
+                prediction=trajectories,
+            )
+        self.log_dict(
+            val_log_dict,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=batch[0].shape[0],
+        )
+    
+    def on_validation_epoch_end(self):
+        """
+        Compute val metrics at the end of val epoch
+        """
+        # Must log before super call, as metric lists are cleared at end of step
+        # super().on_validation_epoch_end()
+        print("End of validation epoch") # We don't save any validation metrics for now so we want to skip this step
 
     
     # Training
@@ -513,6 +566,12 @@ class EDM(ARModel):
 
             pred_state, loss = self.predict_step_train(
                 prev_state, prev_prev_state, forcing, true_state
+            )
+
+            # Overwrite border with true state
+            pred_state = (
+                self.boundary_mask * true_state
+                + self.interior_mask * pred_state
             )
  
             prediction_list.append(pred_state)

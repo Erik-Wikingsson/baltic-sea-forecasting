@@ -8,9 +8,7 @@ python -m neural_lam.train_model \
     --processor_layers 1 \
     --prior_processor_layers 1 \
     --encoder_processor_layers 1 \
-    --output_std \
     --ensemble_size 100 \
     --batch_size 1 \
-    --num_sanity_val_steps 0 \
-    --val_interval 0 \
-    --eval test \
+    # --eval test \
+    # --output_std \

@@ -1049,9 +1049,9 @@ class GraphEFM(ARModel):
             for example_i, (prior_ex_samples, vi_ex_samples) in enumerate(
                 zip(prior_samples, vi_samples), start=1
             ):
-                log_plot_dict[
-                    f"latent_samples_ex{example_i}"
-                ] = vis.plot_latent_samples(prior_ex_samples, vi_ex_samples)
+                log_plot_dict[f"latent_samples_ex{example_i}"] = (
+                    vis.plot_latent_samples(prior_ex_samples, vi_ex_samples)
+                )
 
             if not self.trainer.sanity_checking:
                 # Log all plots to wandb

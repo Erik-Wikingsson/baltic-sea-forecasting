@@ -14,7 +14,7 @@ from loguru import logger
 # Local
 from . import utils
 from .config import load_config_and_datastore
-from .models import GraphCast, GraphEFM, GraphFM, EDM
+from .models import EDM, GraphCast, GraphEFM, GraphFM
 from .weather_dataset import WeatherDataModule
 
 MODELS = {
@@ -243,10 +243,11 @@ def main(input_args=None):
     parser.add_argument(
         "--lr", type=float, default=1e-3, help="learning rate (default: 0.001)"
     )
-    # TODO: We don't want to do validation during training if we are training a diffusion model?
+    # TODO: We don't want to do validation during training
+    # if we are training a diffusion model?
     # Set to None?
     parser.add_argument(
-        "--val_interval", 
+        "--val_interval",
         type=int,
         default=1,
         help="Number of epochs training between each validation run "
@@ -417,7 +418,7 @@ def main(input_args=None):
         )  # Allows using Tensor Cores on A100s
     else:
         device_name = "cpu"
-    
+
     # Set devices to use
     if args.devices == ["auto"]:
         devices = "auto"

@@ -225,7 +225,7 @@ class MDPDatastore(BaseRegularGridDatastore):
         """
         Return the processed data (as a single `xr.DataArray`) for the given
         category of data and test/train/val-split that covers all the data (in
-        space and time) of a given category (state/forcin g/static). "state" is
+        space and time) of a given category (state/forcing/static). "state" is
         the only required category, for other categories, the method will
         return `None` if the category is not found in the datastore.
 
@@ -485,3 +485,46 @@ class MDPDatastore(BaseRegularGridDatastore):
             da_xy = da_xy.transpose(*dims)
 
         return da_xy.values
+
+    def get_mask(self, surface: bool, stacked: bool) -> ndarray:
+        """
+        Return the mask of the dataset.
+
+        Parameters
+        ----------
+        surface : bool
+            Whether to return only surface layer.
+        stacked : bool
+            Whether to stack the lat, lon coordinates.
+
+        Returns
+        -------
+        np.ndarray
+            The dataset mask, returned differently based on
+            the values of `surface` and `stacked`:
+            - `surface=True`, `stacked=True`: (N_lat*N_lon,)
+            - `surface=True`, `stacked=False`: (N_lat, N_lon)
+            - `surface=False`, `stacked=True`: (N_depth, N_lat*N_lon)
+            - `surface=False`, `stacked=False`: (N_depth, N_lat, N_lon)
+        """
+        # squeeze empty mask_feature dim
+        da_mask = self._ds["mask"].squeeze(dim="mask_feature")
+
+        if stacked:
+            if surface:
+                da_mask = da_mask.isel(depth=0)
+            else:
+                da_mask = da_mask.transpose("depth", "grid_index")
+        else:
+            # unstack grid_index -> (lat, lon)
+            da_mask = self.unstack_grid_coords(da_mask)
+
+            # select surface
+            if surface:
+                da_mask = da_mask.isel(depth=0).transpose(
+                    "latitude", "longitude"
+                )
+            else:
+                da_mask = da_mask.transpose("depth", "latitude", "longitude")
+
+        return da_mask.values

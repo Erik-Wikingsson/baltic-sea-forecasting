@@ -582,7 +582,7 @@ def create_graph_from_datastore(
     create_plot: bool = False,
 ):
     if isinstance(datastore, BaseRegularGridDatastore):
-        land_mask = datastore.get_mask(surface=True, stacked=False) == 0
+        land_mask = datastore.get_mask(surface=True, stacked=False, invert=True)
         y_idx, x_idx = np.indices(land_mask.shape)
         xy = np.stack([x_idx, y_idx], axis=0)
     else:

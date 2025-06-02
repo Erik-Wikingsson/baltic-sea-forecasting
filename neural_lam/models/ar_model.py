@@ -39,14 +39,18 @@ class ARModel(pl.LightningModule):
         self._datastore = datastore
         num_state_vars = datastore.get_num_data_vars(category="state")
         num_forcing_vars = datastore.get_num_data_vars(category="forcing")
+        # Load masks
+        self.surface_mask = datastore.get_mask(
+            surface=True, stacked=True, invert=False
+        )
         # Load static features standardized
         da_static_features = datastore.get_dataarray(
             category="static", split=None, standardize=True
-        )
+        )[self.surface_mask]
         da_state_stats = datastore.get_standardization_dataarray(
             category="state"
         )
-        da_boundary_mask = datastore.boundary_mask
+        da_boundary_mask = datastore.boundary_mask[self.surface_mask]
         num_past_forcing_steps = args.num_past_forcing_steps
         num_future_forcing_steps = args.num_future_forcing_steps
 
@@ -121,15 +125,13 @@ class ARModel(pl.LightningModule):
 
         boundary_mask = torch.tensor(
             da_boundary_mask.values, dtype=torch.float32
-        ).unsqueeze(
-            1
-        )  # add feature dim
+        )  # (num_grid_nodes, d_features)
 
         self.register_buffer("boundary_mask", boundary_mask, persistent=False)
         # Pre-compute interior mask for use in loss function
         self.register_buffer(
             "interior_mask", 1.0 - self.boundary_mask, persistent=False
-        )  # (num_grid_nodes, 1), 1 for non-border
+        )  # (num_grid_nodes, d_features), 1 for non-border
 
         self.val_metrics = {
             "mse": [],
@@ -198,9 +200,9 @@ class ARModel(pl.LightningModule):
     @property
     def interior_mask_bool(self):
         """
-        Get the interior mask as a boolean (N,) mask.
+        Get the interior mask as a boolean (N, d_features) mask.
         """
-        return self.interior_mask[:, 0].to(torch.bool)
+        return self.interior_mask.to(torch.bool)
 
     @staticmethod
     def expand_to_batch(x, batch_size):

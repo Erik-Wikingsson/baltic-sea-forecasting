@@ -334,8 +334,6 @@ class GraphEFM(ARModel):
             dim=-1,
         )  # (B, num_grid_nodes, grid_dim)
 
-        print(f"grid_features shape: {grid_features.shape}")
-
         grid_emb = self.grid_prev_embedder(grid_features)
         # (B, num_grid_nodes, d_h)
 

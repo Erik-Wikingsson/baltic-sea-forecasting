@@ -657,6 +657,7 @@ class EDM(ARModel):
             metrics.mse(
                 prediction,
                 target,
+                mask=self.interior_mask_bool,
             )
         )  # mean over unrolled times and batch
 

@@ -1,5 +1,5 @@
-python train_model.py\
-    --dataset meps\
+python -m neural_lam.train_model \
+    --config_path /proj/berzelius-2022-164/weather/neural_lam_datasets/baltic/data/baltic_nl_config_small.yaml \
     --model graph_efm\
     --n_example_pred 0\
     --graph hierarchical\

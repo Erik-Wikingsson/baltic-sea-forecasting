@@ -80,7 +80,6 @@ per-file-ignores = [
 
 [tool.codespell]
 skip = "requirements/*"
-ignore-words-list = ["THIRDPARTY"]
 
 # Pylint config
 [tool.pylint]

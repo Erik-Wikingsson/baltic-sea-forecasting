@@ -14,13 +14,14 @@ from loguru import logger
 # Local
 from . import utils
 from .config import load_config_and_datastore
-from .models import GraphCast, GraphEFM, GraphFM
+from .models import EDM, GraphCast, GraphEFM, GraphFM
 from .weather_dataset import WeatherDataModule
 
 MODELS = {
     "graphcast": GraphCast,
     "graph_fm": GraphFM,
     "graph_efm": GraphEFM,
+    "EDM": EDM,
 }
 
 
@@ -176,6 +177,55 @@ def main(input_args=None):
         "(default: 0 (no))",
     )
 
+    # EDM options
+    parser.add_argument(
+        "--sigma_min",
+        type=float,
+        default=0.002,
+        help="Minimum value for sigma in EDM (default: 0.002)",
+    )
+    parser.add_argument(
+        "--sigma_max",
+        type=float,
+        default=88,
+        help="Maximum value for sigma in EDM (default: 88)",
+    )
+    parser.add_argument(
+        "--sigma_data",
+        type=float,
+        default=1,
+        help="Expected standard deviation of the data in EDM (default: 1.0)",
+    )
+    parser.add_argument(
+        "--rho",
+        type=float,
+        default=7,
+        help="Rho parameter in EDM (default: 7)",
+    )
+    parser.add_argument(
+        "--sampler",
+        type=str,
+        default="heun",
+        help="Sampler to use in EDM (heun/edm/ddpm) (default: heun)",
+    )
+    parser.add_argument(
+        "--sampler_steps",
+        type=int,
+        default=20,
+        help="Number of steps to use in sampler (default: 20)",
+    )
+    parser.add_argument(
+        "--diffusion_model",
+        type=str,
+        default="graph_diff",
+        help="Diffusion model to use in EDM (graph_diff) (default: graph_diff)",
+    )
+    parser.add_argument(
+        "--pred_residual",
+        action="store_true",
+        help="If the model should predict residuals instead of the next state",
+    )
+
     # Training options
     parser.add_argument(
         "--ar_steps_train",
@@ -193,6 +243,9 @@ def main(input_args=None):
     parser.add_argument(
         "--lr", type=float, default=1e-3, help="learning rate (default: 0.001)"
     )
+    # TODO: We don't want to do validation during training
+    # if we are training a diffusion model?
+    # Set to None?
     parser.add_argument(
         "--val_interval",
         type=int,
@@ -221,6 +274,12 @@ def main(input_args=None):
         help="If observation noise should be sampled during rollouts (both "
         "training and eval), or just mean prediction used "
         "(default: 0 (no))",
+    )
+    parser.add_argument(
+        "--num_sanity_val_steps",
+        type=int,
+        default=4,
+        help="Number of sanity check steps to run before training (default: 4)",
     )
 
     # Evaluation options
@@ -269,7 +328,7 @@ def main(input_args=None):
         "--val_steps_to_log",
         nargs="+",
         type=int,
-        default=[1, 2, 3, 5, 10, 15, 19],
+        default=[1, 2, 3],
         help="Steps to log val loss for (default: 1 2 3 5 10 15 19)",
     )
     parser.add_argument(
@@ -403,6 +462,10 @@ def main(input_args=None):
     # used at all in producing the loss. This is desired, but DDP complains.
     strategy = "ddp" if args.kl_beta > 0 else "ddp_find_unused_parameters_true"
 
+    # To enable no validation during training, set val_interval to None
+    if args.val_interval == 0:
+        args.val_interval = None
+
     trainer = pl.Trainer(
         max_epochs=args.epochs,
         deterministic=True,
@@ -415,6 +478,7 @@ def main(input_args=None):
         callbacks=callbacks,
         check_val_every_n_epoch=args.val_interval,
         precision=args.precision,
+        num_sanity_val_steps=args.num_sanity_val_steps,
     )
 
     # Only init once, on rank 0 only

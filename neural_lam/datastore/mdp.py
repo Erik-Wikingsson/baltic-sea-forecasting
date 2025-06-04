@@ -74,7 +74,7 @@ class MDPDatastore(BaseRegularGridDatastore):
         self._n_boundary_points = n_boundary_points
 
         rank_zero_print("The loaded datastore contains the following features:")
-        for category in ["state", "forcing", "static"]:
+        for category in ["state", "forcing", "static", "mask"]:
             if len(self.get_vars_names(category)) > 0:
                 var_names = self.get_vars_names(category)
                 rank_zero_print(f" {category:<8s}: {' '.join(var_names)}")
@@ -225,7 +225,7 @@ class MDPDatastore(BaseRegularGridDatastore):
         """
         Return the processed data (as a single `xr.DataArray`) for the given
         category of data and test/train/val-split that covers all the data (in
-        space and time) of a given category (state/forcin g/static). "state" is
+        space and time) of a given category (state/forcing/static). "state" is
         the only required category, for other categories, the method will
         return `None` if the category is not found in the datastore.
 
@@ -265,9 +265,9 @@ class MDPDatastore(BaseRegularGridDatastore):
         da_category = self._ds[category]
 
         # set units on x y coordinates if missing
-        for coord in ["x", "y"]:
-            if "units" not in da_category[coord].attrs:
-                da_category[coord].attrs["units"] = "m"
+        # for coord in ["x", "y"]:
+        #     if "units" not in da_category[coord].attrs:
+        #         da_category[coord].attrs["units"] = "m"
 
         # set multi-index for grid-index
         da_category = da_category.set_index(grid_index=self.CARTESIAN_COORDS)
@@ -356,19 +356,27 @@ class MDPDatastore(BaseRegularGridDatastore):
             boundary point and 0 is not.
 
         """
-        ds_unstacked = self.unstack_grid_coords(da_or_ds=self._ds)
-        da_state_variable = (
-            ds_unstacked["state"].isel(time=0).isel(state_feature=0)
+        da_mask = self.unstack_grid_coords(self._ds["mask"])
+        land_mask = da_mask == 0  # (N_lat, N_lon, d_features)
+
+        lat = land_mask["latitude"]
+        lon = land_mask["longitude"]
+        d_features = land_mask["mask_feature"]
+
+        # Broadcast lon to match all features
+        _, lon2d = xr.broadcast(lat, lon)
+        lon3d = lon2d.expand_dims(mask_feature=d_features)
+
+        # Only set to 1 where original mask is 1 and lon < 10
+        boundary_mask = xr.where(lon3d < 10.0, 1, land_mask)
+
+        # Ensure type and dims
+        boundary_mask = boundary_mask.astype(int)
+        boundary_mask = boundary_mask.transpose(
+            "latitude", "longitude", "mask_feature"
         )
-        da_domain_allzero = xr.zeros_like(da_state_variable)
-        ds_unstacked["boundary_mask"] = da_domain_allzero.isel(
-            x=slice(self._n_boundary_points, -self._n_boundary_points),
-            y=slice(self._n_boundary_points, -self._n_boundary_points),
-        )
-        ds_unstacked["boundary_mask"] = ds_unstacked.boundary_mask.fillna(
-            1
-        ).astype(int)
-        return self.stack_grid_coords(da_or_ds=ds_unstacked.boundary_mask)
+
+        return self.stack_grid_coords(boundary_mask)
 
     @property
     def coords_projection(self) -> ccrs.Projection:
@@ -436,7 +444,7 @@ class MDPDatastore(BaseRegularGridDatastore):
 
         """
         ds_state = self.unstack_grid_coords(self._ds["state"])
-        da_x, da_y = ds_state.x, ds_state.y
+        da_x, da_y = ds_state.longitude, ds_state.latitude
         assert da_x.ndim == da_y.ndim == 1
         return CartesianGridShape(x=da_x.size, y=da_y.size)
 
@@ -463,8 +471,8 @@ class MDPDatastore(BaseRegularGridDatastore):
         # assume variables are stored in dimensions [grid_index, ...]
         ds_category = self.unstack_grid_coords(da_or_ds=self._ds[category])
 
-        da_xs = ds_category.x
-        da_ys = ds_category.y
+        da_xs = ds_category.longitude
+        da_ys = ds_category.latitude
 
         assert da_xs.ndim == da_ys.ndim == 1, "x and y coordinates must be 1D"
 
@@ -478,10 +486,62 @@ class MDPDatastore(BaseRegularGridDatastore):
             )
         else:
             dims = [
-                "x",
-                "y",
+                "longitude",
+                "latitude",
                 "grid_coord",
             ]
             da_xy = da_xy.transpose(*dims)
 
         return da_xy.values
+
+    def get_mask(self, surface: bool, stacked: bool, invert: bool) -> ndarray:
+        """
+        Return the mask of the dataset.
+
+        Parameters
+        ----------
+        surface : bool
+            Whether to return only surface layer.
+        stacked : bool
+            Whether to stack the lat, lon coordinates.
+        invert : bool
+            Whether to invert the mask.
+
+        Returns
+        -------
+        np.ndarray
+            The dataset mask, returned differently based on
+            the values of `surface` and `stacked`:
+            - `surface=True`, `stacked=True`: (N_lat*N_lon,)
+            - `surface=True`, `stacked=False`: (N_lat, N_lon)
+            - `surface=False`, `stacked=True`: (N_lat*N_lon, d_features)
+            - `surface=False`, `stacked=False`: (N_lat, N_lon, d_features)
+        """
+        da_mask = self._ds["mask"]
+
+        # make sure mask_feature order matches state_feature
+        da_mask = da_mask.sel(mask_feature=self.get_vars_names("state"))
+
+        if stacked:
+            if surface:
+                da_mask = da_mask.isel(mask_feature=0)
+            else:
+                da_mask = da_mask.transpose("grid_index", "mask_feature")
+        else:
+            # unstack grid_index -> (lat, lon)
+            da_mask = self.unstack_grid_coords(da_mask)
+
+            # select surface
+            if surface:
+                da_mask = da_mask.isel(mask_feature=0).transpose(
+                    "latitude", "longitude"
+                )
+            else:
+                da_mask = da_mask.transpose(
+                    "latitude", "longitude", "mask_feature"
+                )
+
+        if invert:
+            da_mask = da_mask == 0
+
+        return da_mask.values.astype(bool)

@@ -89,7 +89,9 @@ def plot_prediction(
     extent = datastore.get_xy_extent("state")
 
     # Set up masking of border region
-    da_mask = datastore.unstack_grid_coords(datastore.boundary_mask)
+    da_mask = datastore.unstack_grid_coords(datastore.boundary_mask).isel(
+        mask_feature=0
+    )
     mask_values = np.invert(da_mask.values.astype(bool)).astype(float)
     pixel_alpha = mask_values.clip(0.7, 1)  # Faded border region
 
@@ -106,9 +108,10 @@ def plot_prediction(
         da.plot.imshow(
             ax=ax,
             origin="lower",
-            x="x",
+            x="longitude",
+            y="latitude",
             extent=extent,
-            alpha=pixel_alpha.T,
+            alpha=pixel_alpha,
             vmin=vmin,
             vmax=vmax,
             cmap="plasma",
@@ -276,9 +279,15 @@ def plot_spatial_error(
     extent = datastore.get_xy_extent("state")
 
     # Set up masking of border region
-    da_mask = datastore.unstack_grid_coords(datastore.boundary_mask)
+    da_mask = datastore.unstack_grid_coords(datastore.boundary_mask).isel(
+        mask_feature=0
+    )
     mask_reshaped = da_mask.values
     pixel_alpha = mask_reshaped.clip(0.7, 1)  # Faded border region
+
+    surface_mask = datastore.get_mask(surface=True, stacked=True, invert=False)
+    full_error = np.full_like(surface_mask, np.nan)
+    full_error[surface_mask] = error.cpu().numpy()
 
     fig, ax = plt.subplots(
         figsize=(5, 4.8),
@@ -286,13 +295,9 @@ def plot_spatial_error(
     )
 
     ax.coastlines()  # Add coastline outlines
-    error_grid = (
-        error.reshape(
-            [datastore.grid_shape_state.x, datastore.grid_shape_state.y]
-        )
-        .T.cpu()
-        .numpy()
-    )
+    error_grid = full_error.reshape(
+        [datastore.grid_shape_state.x, datastore.grid_shape_state.y]
+    ).T
 
     im = ax.imshow(
         error_grid,

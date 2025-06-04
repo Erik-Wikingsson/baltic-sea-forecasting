@@ -55,15 +55,16 @@ class GraphEFM(ARModel):
         # Specify dimensions of data
         # grid_dim from data + static
         grid_state_dim = self._datastore.get_num_data_vars("state")
-        grid_current_dim = self.grid_dim + grid_state_dim
+        grid_current_dim = self.grid_input_dim + grid_state_dim
         g2m_dim = self.g2m_features.shape[1]
         m2g_dim = self.m2g_features.shape[1]
 
         # Define sub-models
         # Feature embedders for grid
         self.mlp_blueprint_end = [args.hidden_dim] * (args.hidden_layers + 1)
+
         self.grid_prev_embedder = utils.make_mlp(
-            [self.grid_dim] + self.mlp_blueprint_end
+            [self.grid_input_dim] + self.mlp_blueprint_end
         )  # For states up to t-1
         self.grid_current_embedder = utils.make_mlp(
             [grid_current_dim] + self.mlp_blueprint_end
@@ -332,6 +333,8 @@ class GraphEFM(ARModel):
             ),
             dim=-1,
         )  # (B, num_grid_nodes, grid_dim)
+
+        print(f"grid_features shape: {grid_features.shape}")
 
         grid_emb = self.grid_prev_embedder(grid_features)
         # (B, num_grid_nodes, d_h)
@@ -1046,9 +1049,9 @@ class GraphEFM(ARModel):
             for example_i, (prior_ex_samples, vi_ex_samples) in enumerate(
                 zip(prior_samples, vi_samples), start=1
             ):
-                log_plot_dict[
-                    f"latent_samples_ex{example_i}"
-                ] = vis.plot_latent_samples(prior_ex_samples, vi_ex_samples)
+                log_plot_dict[f"latent_samples_ex{example_i}"] = (
+                    vis.plot_latent_samples(prior_ex_samples, vi_ex_samples)
+                )
 
             if not self.trainer.sanity_checking:
                 # Log all plots to wandb

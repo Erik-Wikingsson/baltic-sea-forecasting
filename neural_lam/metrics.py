@@ -25,7 +25,7 @@ def mask_and_reduce_metric(metric_entry_vals, mask, average_grid, sum_vars):
     (...,) is any number of batch dimensions, potentially different
         but broadcastable
     metric_entry_vals: (..., N, d_state), prediction
-    mask: (N,), boolean mask describing which grid nodes to use in metric
+    mask: (N, d_state), mask describing which grid nodes to use in metric
     average_grid: boolean, if grid dimension -2 should be reduced (mean over N)
     sum_vars: boolean, if variable dimension -1 should be reduced (sum
         over d_state)
@@ -34,17 +34,13 @@ def mask_and_reduce_metric(metric_entry_vals, mask, average_grid, sum_vars):
     metric_val: One of (...,), (..., d_state), (..., N), (..., N, d_state),
     depending on reduction arguments.
     """
-    # Only keep grid nodes in mask
-    if mask is not None:
-        metric_entry_vals = metric_entry_vals[
-            ..., mask, :
-        ]  # (..., N', d_state)
 
     # Optionally reduce last two dimensions
     if average_grid:  # Reduce grid first
-        metric_entry_vals = torch.mean(
-            metric_entry_vals, dim=-2
-        )  # (..., d_state)
+        metric_entry_vals = torch.sum(
+            mask * metric_entry_vals, dim=-2
+        ) / torch.sum(mask, dim=-2)
+        # (..., d_state)
     if sum_vars:  # Reduce vars second
         metric_entry_vals = torch.sum(
             metric_entry_vals, dim=-1
@@ -86,7 +82,9 @@ def wmse(pred, target, pred_std, mask=None, average_grid=True, sum_vars=True):
 
 # Allow for unused pred_std for consistent signature
 # pylint: disable-next=unused-argument
-def mse(pred, target, pred_std, mask=None, average_grid=True, sum_vars=True):
+def mse(
+    pred, target, pred_std=None, mask=None, average_grid=True, sum_vars=True
+):
     """
     (Unweighted) Mean Squared Error
 

@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import xarray as xr
+from typing import List
 
 # Local
 from . import utils
@@ -130,10 +131,10 @@ def plot_prediction(
 
 @matplotlib.rc_context(utils.fractional_plot_bundle(1))
 def plot_ensemble_prediction(
-    samples,
-    target,
-    ens_mean,
-    ens_std,
+    samples: List[xr.DataArray],
+    target: xr.DataArray,
+    ens_mean: xr.DataArray,
+    ens_std: xr.DataArray,
     datastore: BaseRegularGridDatastore,
     title=None,
     vrange=None,
@@ -151,6 +152,10 @@ def plot_ensemble_prediction(
     (optional) vrange: tuple of length with common min and max of values
         (not for std.)
     """
+
+    # Convert tensors to dataarrays
+
+
     # Get common scale for values
     if vrange is None:
         vmin = min(vals.min().cpu().item() for vals in (samples, target))
@@ -159,7 +164,10 @@ def plot_ensemble_prediction(
         vmin, vmax = vrange
 
     # Set up masking of border region
-    da_mask = datastore.unstack_grid_coords(datastore.boundary_mask).T
+    # da_mask = datastore.unstack_grid_coords(datastore.boundary_mask).T
+    da_mask = datastore.unstack_grid_coords(datastore.boundary_mask).isel(
+        mask_feature=0
+    )
     mask_values = np.invert(da_mask.values.astype(bool)).astype(float)
     pixel_alpha = mask_values.clip(0.7, 1)  # Faded border region
 
@@ -209,7 +217,7 @@ def plot_ensemble_prediction(
         )
 
     # Turn off unused axes
-    for ax in axes[(3 + samples.shape[0]) :]:
+    for ax in axes[(3 + len(samples)) :]:
         ax.axis("off")
 
     # Add colorbars
@@ -228,7 +236,7 @@ def plot_ensemble_prediction(
 
 def plot_on_axis(
     ax,
-    data,
+    data: xr.DataArray,
     datastore: BaseRegularGridDatastore,
     alpha=None,
     vmin=None,
@@ -240,22 +248,19 @@ def plot_on_axis(
     """
     ax.coastlines()  # Add coastline outlines
     extent = datastore.get_xy_extent("state")
-    data_grid = (
-        data.reshape(
-            [datastore.grid_shape_state.x, datastore.grid_shape_state.y]
+
+    im = data.plot.imshow(
+            ax=ax,
+            origin="lower",
+            x="longitude",
+            y="latitude",
+            extent=extent,
+            alpha=alpha,
+            vmin=vmin,
+            vmax=vmax,
+            cmap="plasma",
+            transform=datastore.coords_projection,
         )
-        .T.cpu()
-        .numpy()
-    )
-    im = ax.imshow(
-        data_grid,
-        origin="lower",
-        extent=extent,
-        alpha=alpha,
-        vmin=vmin,
-        vmax=vmax,
-        cmap="plasma",
-    )
 
     if ax_title:
         ax.set_title(ax_title, size=15)

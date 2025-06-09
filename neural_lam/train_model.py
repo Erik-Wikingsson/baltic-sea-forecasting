@@ -321,7 +321,7 @@ def main(input_args=None):
     parser.add_argument(
         "--logger-project",
         type=str,
-        default="neural_lam",
+        default="baltic-sea-forecasting",
         help="Logger project name, for eg. Wandb (default: neural_lam)",
     )
     parser.add_argument(

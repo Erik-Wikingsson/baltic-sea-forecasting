@@ -433,7 +433,11 @@ class ARModel(pl.LightningModule):
 
         # Save per-sample spatial loss for specific times
         spatial_loss = self.loss(
-            prediction, target, pred_std, average_grid=False
+            prediction,
+            target,
+            pred_std,
+            mask=self.interior_mask_bool,
+            average_grid=False
         )  # (B, pred_steps, num_grid_nodes)
         log_spatial_losses = spatial_loss[
             :, [step - 1 for step in self.args.val_steps_to_log]

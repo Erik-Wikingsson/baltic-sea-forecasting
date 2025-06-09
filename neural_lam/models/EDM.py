@@ -51,12 +51,14 @@ class EDM(ARModel):
                 f"Unknown diffusion model: {args.diffusion_model}"
             )
 
-        self.test_metrics = {
-            "ens_mae": [],
-            "ens_mse": [],
-            "crps_ens": [],
-            "spread_squared": [],
-        }
+        self.test_metrics.update(
+            {
+                "ens_mae": [],
+                "ens_mse": [],
+                "crps_ens": [],
+                "spread_squared": [],
+            }
+        )
 
     # ----------------------------------------------------------------------------
     # EDM model methods
@@ -168,7 +170,7 @@ class EDM(ARModel):
             prediction_list, dim=1
         )  # (B, pred_steps, num_grid_nodes, d_f)
 
-        return prediction
+        return prediction, self.per_var_std
 
     def sample_trajectories(
         self,
@@ -196,7 +198,9 @@ class EDM(ARModel):
             for _ in range(num_traj)
         ]
 
-        traj_tensor = torch.stack(traj_list, dim=1)
+        traj_tensor = torch.stack(
+            [pred_pair[0] for pred_pair in traj_list], dim=1
+        )
 
         return traj_tensor
 
@@ -257,16 +261,14 @@ class EDM(ARModel):
         Plot ensemble forecast + mean and std
         (split argument should be unused, only for compatibility with ARModel)
         """
-        init_states, target_states, forcing_features, _ = batch
-        if prediction is not None:
-            trajectories = prediction
-        else:
-            trajectories, _ = self.sample_trajectories(
-                init_states,
-                forcing_features,
-                target_states,
-                self.ensemble_size,
-            )
+        init_states, target_states, forcing_features, time = batch
+
+        trajectories = self.sample_trajectories(
+            init_states,
+            forcing_features,
+            target_states,
+            self.ensemble_size,
+        )
         # (B, S, pred_steps, num_grid_nodes, d_f)
 
         # Rescale to original data scale
@@ -282,12 +284,42 @@ class EDM(ARModel):
         )  # (B, pred_steps, num_grid_nodes, d_f)
 
         # Iterate over the examples
-        for traj_slice, target_slice, ens_mean_slice, ens_std_slice in zip(
+        for traj_slice, target_slice, ens_mean_slice, ens_std_slice, time_slice in zip(
             traj_rescaled[:n_examples],
             target_rescaled[:n_examples],
             ens_mean[:n_examples],
             ens_std[:n_examples],
+            time[:n_examples],
         ):
+
+            # Create xarray for plotting
+            da_samples = [self._create_dataarray_from_tensor(
+                tensor=traj_slice[i, ...],
+                time=time_slice,
+                split=split,
+                category="state",
+            ).unstack("grid_index") for i in range(traj_slice.shape[0])]
+
+            da_target = self._create_dataarray_from_tensor(
+                tensor=target_slice,
+                time=time_slice,
+                split=split,
+                category="state",
+            ).unstack("grid_index")
+
+            da_ens_mean = self._create_dataarray_from_tensor(
+                tensor=ens_mean_slice,
+                time=time_slice,
+                split=split,
+                category="state",
+            ).unstack("grid_index")
+
+            da_ens_std = self._create_dataarray_from_tensor(
+                tensor=ens_std_slice,
+                time=time_slice,
+                split=split,
+                category="state",
+            ).unstack("grid_index")
             # traj_slice is (S, pred_steps, num_grid_nodes, d_f)
             # others are (pred_steps, num_grid_nodes, d_f)
             self.plotted_examples += 1  # Increment already here
@@ -322,17 +354,16 @@ class EDM(ARModel):
                 ),
                 start=1,
             ):
-
                 time_title_part = (
                     f"t={t_i} ({self._datastore.step_length*t_i} h)"
                 )
                 # Create one figure per variable at this time step
                 var_figs = [
                     vis.plot_ensemble_prediction(
-                        samples_t[:, :, var_i],
-                        target_t[:, var_i],
-                        ens_mean_t[:, var_i],
-                        ens_std_t[:, var_i],
+                        [da_samples[i].isel(state_feature=var_i, time=t_i-1) for i in range(traj_slice.shape[1])],
+                        da_target.isel(state_feature=var_i, time=t_i-1),
+                        da_ens_mean.isel(state_feature=var_i, time=t_i-1),
+                        da_ens_std.isel(state_feature=var_i, time=t_i-1),
                         self._datastore,
                         title=f"{var_name} ({var_unit}), {time_title_part}",
                         vrange=var_vrange,
@@ -408,7 +439,7 @@ class EDM(ARModel):
             _,
         ) = batch
 
-        # super().test_step(batch, batch_idx)
+        super().test_step(batch, batch_idx)
 
         (
             trajectories,
@@ -519,7 +550,7 @@ class EDM(ARModel):
 
         Returns:
         next_state: (B, N_grid, d_state), predicted weather state X_{t+1} at t+1
-        loss: (B, N_grid, d_state)
+        loss: (B)
         """
 
         # Sample from F inverse
@@ -558,9 +589,9 @@ class EDM(ARModel):
 
         # Calculate the loss
         # Weights for the loss function based on the noise level
-        weight = (sigma**2 + self.sigma_data**2) / (
+        weight = ((sigma**2 + self.sigma_data**2) / (
             sigma * self.sigma_data
-        ) ** 2
+        ) ** 2).squeeze() # (B)
 
         pred_std = self.per_var_std
 
@@ -569,9 +600,9 @@ class EDM(ARModel):
             target_state,
             pred_std,
             mask=self.interior_mask_bool,
-        )
+        ) # (B)
 
-        loss = loss * weight
+        loss = loss * weight.squeeze() # (B)
 
         return next_state, loss
 
@@ -621,7 +652,7 @@ class EDM(ARModel):
 
         loss_tensor = torch.stack(
             loss_list, dim=1
-        )  # (B, pred_steps, num_grid_nodes, d_f)
+        )  # (B)
 
         return prediction, loss_tensor
 

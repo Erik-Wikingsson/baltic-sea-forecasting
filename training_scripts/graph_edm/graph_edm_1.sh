@@ -14,7 +14,7 @@ python -m neural_lam.train_model \
     --processor_layers 1 \
     --pred_redidual \
     --vertical_propnets 1 \
-    --num_past_forcing_steps 2 \
+    --num_past_forcing_steps 1 \
     --num_future_forcing_steps 1 \
     --batch_size 1 \
     --epochs 600 \

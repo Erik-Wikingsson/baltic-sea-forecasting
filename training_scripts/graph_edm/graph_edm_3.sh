@@ -1,6 +1,6 @@
 # Stage 1 of training a Graph EDM model on Baltic Sea data
 
-# NOTE: 
+# NOTE:
 # Change the config_path to point to your dataset configuration file
 # Change the --num_workers and --batch_size according to your system's capabilities
 # Add the checkpoint path to the stage 1 model checkpoint

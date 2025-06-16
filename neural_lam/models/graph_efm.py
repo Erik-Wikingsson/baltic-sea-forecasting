@@ -786,7 +786,13 @@ class GraphEFM(ARModel):
         )  # (B, pred_steps, num_grid_nodes, d_f)
 
         # Iterate over the examples
-        for traj_slice, target_slice, ens_mean_slice, ens_std_slice, time_slice in zip(
+        for (
+            traj_slice,
+            target_slice,
+            ens_mean_slice,
+            ens_std_slice,
+            time_slice,
+        ) in zip(
             traj_rescaled[:n_examples],
             target_rescaled[:n_examples],
             ens_mean[:n_examples],
@@ -795,12 +801,15 @@ class GraphEFM(ARModel):
         ):
 
             # Create xarray for plotting
-            da_samples = [self._create_dataarray_from_tensor(
-                tensor=traj_slice[i, ...],
-                time=time_slice,
-                split=split,
-                category="state",
-            ).unstack("grid_index") for i in range(traj_slice.shape[0])]
+            da_samples = [
+                self._create_dataarray_from_tensor(
+                    tensor=traj_slice[i, ...],
+                    time=time_slice,
+                    split=split,
+                    category="state",
+                ).unstack("grid_index")
+                for i in range(traj_slice.shape[0])
+            ]
 
             da_target = self._create_dataarray_from_tensor(
                 tensor=target_slice,
@@ -862,10 +871,15 @@ class GraphEFM(ARModel):
                 # Create one figure per variable at this time step
                 var_figs = [
                     vis.plot_ensemble_prediction(
-                        [da_samples[i].isel(state_feature=var_i, time=t_i-1) for i in range(traj_slice.shape[1])],
-                        da_target.isel(state_feature=var_i, time=t_i-1),
-                        da_ens_mean.isel(state_feature=var_i, time=t_i-1),
-                        da_ens_std.isel(state_feature=var_i, time=t_i-1),
+                        [
+                            da_samples[i].isel(
+                                state_feature=var_i, time=t_i - 1
+                            )
+                            for i in range(traj_slice.shape[1])
+                        ],
+                        da_target.isel(state_feature=var_i, time=t_i - 1),
+                        da_ens_mean.isel(state_feature=var_i, time=t_i - 1),
+                        da_ens_std.isel(state_feature=var_i, time=t_i - 1),
                         self._datastore,
                         title=f"{var_name} ({var_unit}), {time_title_part}",
                         vrange=var_vrange,

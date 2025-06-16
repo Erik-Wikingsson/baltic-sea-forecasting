@@ -284,7 +284,13 @@ class EDM(ARModel):
         )  # (B, pred_steps, num_grid_nodes, d_f)
 
         # Iterate over the examples
-        for traj_slice, target_slice, ens_mean_slice, ens_std_slice, time_slice in zip(
+        for (
+            traj_slice,
+            target_slice,
+            ens_mean_slice,
+            ens_std_slice,
+            time_slice,
+        ) in zip(
             traj_rescaled[:n_examples],
             target_rescaled[:n_examples],
             ens_mean[:n_examples],
@@ -293,12 +299,15 @@ class EDM(ARModel):
         ):
 
             # Create xarray for plotting
-            da_samples = [self._create_dataarray_from_tensor(
-                tensor=traj_slice[i, ...],
-                time=time_slice,
-                split=split,
-                category="state",
-            ).unstack("grid_index") for i in range(traj_slice.shape[0])]
+            da_samples = [
+                self._create_dataarray_from_tensor(
+                    tensor=traj_slice[i, ...],
+                    time=time_slice,
+                    split=split,
+                    category="state",
+                ).unstack("grid_index")
+                for i in range(traj_slice.shape[0])
+            ]
 
             da_target = self._create_dataarray_from_tensor(
                 tensor=target_slice,
@@ -360,10 +369,15 @@ class EDM(ARModel):
                 # Create one figure per variable at this time step
                 var_figs = [
                     vis.plot_ensemble_prediction(
-                        [da_samples[i].isel(state_feature=var_i, time=t_i-1) for i in range(traj_slice.shape[1])],
-                        da_target.isel(state_feature=var_i, time=t_i-1),
-                        da_ens_mean.isel(state_feature=var_i, time=t_i-1),
-                        da_ens_std.isel(state_feature=var_i, time=t_i-1),
+                        [
+                            da_samples[i].isel(
+                                state_feature=var_i, time=t_i - 1
+                            )
+                            for i in range(traj_slice.shape[1])
+                        ],
+                        da_target.isel(state_feature=var_i, time=t_i - 1),
+                        da_ens_mean.isel(state_feature=var_i, time=t_i - 1),
+                        da_ens_std.isel(state_feature=var_i, time=t_i - 1),
                         self._datastore,
                         title=f"{var_name} ({var_unit}), {time_title_part}",
                         vrange=var_vrange,
@@ -589,9 +603,9 @@ class EDM(ARModel):
 
         # Calculate the loss
         # Weights for the loss function based on the noise level
-        weight = ((sigma**2 + self.sigma_data**2) / (
-            sigma * self.sigma_data
-        ) ** 2).squeeze() # (B)
+        weight = (
+            (sigma**2 + self.sigma_data**2) / (sigma * self.sigma_data) ** 2
+        ).squeeze()  # (B)
 
         pred_std = self.per_var_std
 
@@ -600,9 +614,9 @@ class EDM(ARModel):
             target_state,
             pred_std,
             mask=self.interior_mask_bool,
-        ) # (B)
+        )  # (B)
 
-        loss = loss * weight.squeeze() # (B)
+        loss = loss * weight.squeeze()  # (B)
 
         return next_state, loss
 
@@ -650,9 +664,7 @@ class EDM(ARModel):
             prediction_list, dim=1
         )  # (B, pred_steps, num_grid_nodes, d_f)
 
-        loss_tensor = torch.stack(
-            loss_list, dim=1
-        )  # (B)
+        loss_tensor = torch.stack(loss_list, dim=1)  # (B)
 
         return prediction, loss_tensor
 

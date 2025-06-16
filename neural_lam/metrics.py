@@ -39,9 +39,9 @@ def mask_and_reduce_metric(metric_entry_vals, mask, average_grid, sum_vars):
 
     # Optionally reduce last two dimensions
     if average_grid:  # Reduce grid first
-        metric_entry_vals = torch.sum(
-            metric_entry_vals, dim=-2
-        ) / torch.sum(mask, dim=-2)
+        metric_entry_vals = torch.sum(metric_entry_vals, dim=-2) / torch.sum(
+            mask, dim=-2
+        )
         # (..., d_state)
     if sum_vars:  # Reduce vars second
         metric_entry_vals = torch.sum(

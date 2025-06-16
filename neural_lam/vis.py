@@ -1,10 +1,12 @@
+# Standard library
+from typing import List
+
 # Third-party
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import xarray as xr
-from typing import List
 
 # Local
 from . import utils
@@ -155,7 +157,6 @@ def plot_ensemble_prediction(
 
     # Convert tensors to dataarrays
 
-
     # Get common scale for values
     if vrange is None:
         vmin = min(vals.min().cpu().item() for vals in (samples, target))
@@ -250,17 +251,17 @@ def plot_on_axis(
     extent = datastore.get_xy_extent("state")
 
     im = data.plot.imshow(
-            ax=ax,
-            origin="lower",
-            x="longitude",
-            y="latitude",
-            extent=extent,
-            alpha=alpha,
-            vmin=vmin,
-            vmax=vmax,
-            cmap="plasma",
-            transform=datastore.coords_projection,
-        )
+        ax=ax,
+        origin="lower",
+        x="longitude",
+        y="latitude",
+        extent=extent,
+        alpha=alpha,
+        vmin=vmin,
+        vmax=vmax,
+        cmap="plasma",
+        transform=datastore.coords_projection,
+    )
 
     if ax_title:
         ax.set_title(ax_title, size=15)

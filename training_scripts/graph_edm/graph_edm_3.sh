@@ -13,9 +13,11 @@ python -m neural_lam.train_model \
     --num_workers 16 \
     --hidden_dim 128 \
     --processor_layers 1 \
-    --num_past_forcing_steps 0 \
-    --num_future_forcing_steps 0 \
+    --pred_redidual \
+    --vertical_propnets 1 \
+    --num_past_forcing_steps 2 \
+    --num_future_forcing_steps 1 \
     --batch_size 1 \
-    --epochs 1000 \
-    --lr 0.0001 \
+    --epochs 1200 \
+    --lr 0.00001 \
     --load checkpoint_path

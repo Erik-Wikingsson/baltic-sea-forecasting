@@ -1,4 +1,4 @@
-# Stage 1 of training a Graph EDM model on Baltic Sea data
+# Stage 2 of training a Graph EDM model on Baltic Sea data
 
 # NOTE:
 # Change the config_path to point to your dataset configuration file

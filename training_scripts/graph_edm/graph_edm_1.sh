@@ -2,7 +2,7 @@
 
 # NOTE:
 # Change the config_path to point to your dataset configuration file
-# Change the --num_workers and --batch_size according to your system's capabilities
+# Change the --num_workers, --precision and --batch_size according to your system's capabilities
 
 python -m neural_lam.train_model \
     --config_path data/baltic_nl_config_small.yaml \
@@ -10,6 +10,7 @@ python -m neural_lam.train_model \
     --n_example_pred 0 \
     --graph hierarchical \
     --num_workers 16 \
+    --precision 32 \
     --hidden_dim 128 \
     --processor_layers 1 \
     --pred_redidual \

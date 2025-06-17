@@ -5,10 +5,16 @@
 # Change the --num_workers, --precision and --batch_size according to your system's capabilities
 # Add the checkpoint path to the stage 1 model checkpoint
 
+# TO ADJUST: Constants below
+BS=1
+#CKPT= # Don't load checkpoint for step 1
+PREC=32 # Change to bf16 if suitable
+
 python -m neural_lam.train_model \
     --config_path data/baltic_nl_config_small.yaml \
     --model EDM \
-    --n_example_pred 0 \
+    --n_example_pred 1 \
+    --precision $PREC\
     --graph hierarchical \
     --num_workers 16 \
     --precision 32 \
@@ -18,7 +24,10 @@ python -m neural_lam.train_model \
     --vertical_propnets 1 \
     --num_past_forcing_steps 1 \
     --num_future_forcing_steps 1 \
-    --batch_size 1 \
+    --ar_steps_train 1\
+    --batch_size $BS \
     --epochs 1200 \
     --lr 0.00001 \
+    --ensemble_size 5\
+    --val_interval 30\
     --load checkpoint_path

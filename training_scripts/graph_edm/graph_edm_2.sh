@@ -1,8 +1,8 @@
-# Stage 1 of training a Graph EDM model on Baltic Sea data
+# Stage 2 of training a Graph EDM model on Baltic Sea data
 
 # NOTE:
 # Change the config_path to point to your dataset configuration file
-# Change the --num_workers and --batch_size according to your system's capabilities
+# Change the --num_workers, --precision and --batch_size according to your system's capabilities
 # Add the checkpoint path to the stage 1 model checkpoint
 
 python -m neural_lam.train_model \
@@ -11,6 +11,7 @@ python -m neural_lam.train_model \
     --n_example_pred 0 \
     --graph hierarchical \
     --num_workers 16 \
+    --precision 32 \
     --hidden_dim 128 \
     --processor_layers 1 \
     --pred_redidual \

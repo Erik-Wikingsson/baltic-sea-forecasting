@@ -223,7 +223,8 @@ def main(input_args=None):
     parser.add_argument(
         "--pred_residual",
         action="store_true",
-        help="If the model should predict residuals instead of the next state",
+        help="If the EDM model should predict residuals instead of the "
+        "next state",
     )
 
     # Training options
@@ -322,7 +323,8 @@ def main(input_args=None):
         "--logger-project",
         type=str,
         default="baltic-sea-forecasting",
-        help="Logger project name, for eg. Wandb (default: neural_lam)",
+        help="Logger project name, for eg. Wandb "
+        "(default: baltic-sea-forecasting)",
     )
     parser.add_argument(
         "--val_steps_to_log",

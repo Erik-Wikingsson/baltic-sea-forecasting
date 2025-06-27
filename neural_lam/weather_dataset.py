@@ -44,7 +44,7 @@ class WeatherDataset(torch.utils.data.Dataset):
         self,
         datastore: BaseDatastore,
         split="train",
-        ar_steps=3,
+        ar_steps=1,
         num_past_forcing_steps=1,
         num_future_forcing_steps=1,
         standardize=True,

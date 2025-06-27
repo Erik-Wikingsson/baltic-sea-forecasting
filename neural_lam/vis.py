@@ -159,8 +159,9 @@ def plot_ensemble_prediction(
 
     # Get common scale for values
     if vrange is None:
-        vmin = min(vals.min().cpu().item() for vals in (samples, target))
-        vmax = max(vals.max().cpu().item() for vals in (samples, target))
+        vrange_vals = samples + [target]
+        vmin = min(vals.min().values for vals in vrange_vals)
+        vmax = max(vals.max().values for vals in vrange_vals)
     else:
         vmin, vmax = vrange
 
@@ -342,10 +343,15 @@ def plot_latent_samples(prior_samples, vi_samples, title=None):
     num_samples, num_mesh_nodes, latent_dim = prior_samples.shape
     plot_dims = min(latent_dim, 3)  # Plot first 3 dimensions
     img_side_size = int(np.sqrt(num_mesh_nodes))
-    assert img_side_size**2 == num_mesh_nodes, (
-        "Number of mesh nodes is not a "
-        "square number, can not plot latent samples as images"
-    )
+
+    # Check if number of nodes is a square
+    if img_side_size**2 != num_mesh_nodes:
+        # Number of mesh nodes is not a square number, can not directly plot
+        # latent samples as images"
+        # Fix this by not plotting all nodes (choose amount to work as image)
+        num_mesh_subset = img_side_size**2
+        prior_samples = prior_samples[:, :num_mesh_subset]
+        vi_samples = vi_samples[:, :num_mesh_subset]
 
     # Get common scale for values
     vmin = min(

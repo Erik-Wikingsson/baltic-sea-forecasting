@@ -588,13 +588,13 @@ class EDM(ARModel):
 
         # Make y residual if needed
         if self.pred_residual:
-            target_state = target_state - prev_state
-            target_state = (
+            y = target_state - prev_state
+            y = (
                 target_state - self.step_diff_mean
             ) / self.step_diff_std  # Normalize residual
 
-        n = torch.randn_like(target_state) * sigma
-        noisy_input = target_state + n
+        n = torch.randn_like(y) * sigma
+        noisy_input = y + n
 
         next_state = self.denoise(
             noisy_input, sigma, input_grid

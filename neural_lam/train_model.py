@@ -124,21 +124,21 @@ def main(input_args=None):
     parser.add_argument(
         "--processor_layers",
         type=int,
-        default=4,
+        default=3,
         help="Number of GNN layers in processor GNN (for prob. model: in "
-        "decoder) (default: 4)",
+        "decoder) (default: 3)",
     )
     parser.add_argument(
         "--encoder_processor_layers",
         type=int,
-        default=2,
-        help="Number of on-mesh GNN layers in encoder GNN (default: 2)",
+        default=1,
+        help="Number of on-mesh GNN layers in encoder GNN (default: 1)",
     )
     parser.add_argument(
         "--prior_processor_layers",
         type=int,
-        default=2,
-        help="Number of on-mesh GNN layers in prior GNN (default: 2)",
+        default=1,
+        help="Number of on-mesh GNN layers in prior GNN (default: 1)",
     )
     parser.add_argument(
         "--mesh_aggr",
@@ -171,10 +171,10 @@ def main(input_args=None):
     parser.add_argument(
         "--vertical_propnets",
         type=int,
-        default=0,
+        default=1,
         help="If PropagationNets should be used for all vertical message "
         "passing (g2m, m2g, up in hierarchy), in deterministic models."
-        "(default: 0 (no))",
+        "(default: 1 (yes))",
     )
 
     # EDM options

@@ -365,11 +365,12 @@ class MDPDatastore(BaseRegularGridDatastore):
         d_features = land_mask["mask_feature"]
 
         # Broadcast lon to match all features
-        _, lon2d = xr.broadcast(lat, lon)
+        lat2d, lon2d = xr.broadcast(lat, lon)
+        lat3d = lat2d.expand_dims(mask_feature=d_features)
         lon3d = lon2d.expand_dims(mask_feature=d_features)
 
         # Only set to 1 where original mask is 1 and lon < 10
-        boundary_mask = xr.where(lon3d < 10.0, 1, land_mask)
+        boundary_mask = xr.where((lon3d < 10.0) & (lat3d > 57.1), 1, land_mask)
 
         # Ensure type and dims
         boundary_mask = boundary_mask.astype(int)

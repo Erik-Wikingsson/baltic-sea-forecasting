@@ -129,8 +129,8 @@ class EDM(ARModel):
         # Add residual if needed
         if self.pred_residual:
             next_state = (
-                next_state * self.step_diff_std
-            ) + self.step_diff_mean  # Unormalize residual
+                next_state * self.diff_std
+            ) + self.diff_mean  # Unormalize residual
             next_state = prev_state + next_state
 
         return next_state
@@ -391,12 +391,17 @@ class EDM(ARModel):
                     )
                 ]
 
-                if self.trainer.is_global_zero and not self.trainer.sanity_checking:
+                if (
+                    self.trainer.is_global_zero
+                    and not self.trainer.sanity_checking
+                ):
                     current_epoch = self.trainer.current_epoch
                 else:
                     current_epoch = "NAN"
-                
-                example_title = f"example_{self.plotted_examples}_epoch_{current_epoch}"
+
+                example_title = (
+                    f"example_{self.plotted_examples}_epoch_{current_epoch}"
+                )
 
                 wandb.log(
                     {
@@ -513,7 +518,7 @@ class EDM(ARModel):
         # Validation step batch 0, sample 1 trajectory for visual evaluation
         # Plot some example predictions using prior and encoder
         val_log_dict = {
-            "val_mean_mse": torch.tensor([0], device=batch[0].device)
+            "val_mean_loss": torch.tensor([0], device=batch[0].device)
         }
         batch_idx = args[0]
         if (
@@ -531,7 +536,7 @@ class EDM(ARModel):
             # not sample for the whole validation set
             # NOTE: This metric is not that useful,
             # as we only sample 1 trajectory
-            val_log_dict["val_mean_mse"] = ens_mse_batch.mean()
+            val_log_dict["val_mean_loss"] = ens_mse_batch.mean()
             self.plot_examples(
                 batch,
                 n_examples=self.n_example_pred,
@@ -590,8 +595,8 @@ class EDM(ARModel):
         if self.pred_residual:
             y = target_state - prev_state
             y = (
-                target_state - self.step_diff_mean
-            ) / self.step_diff_std  # Normalize residual
+                target_state - self.diff_mean
+            ) / self.diff_std  # Normalize residual
 
         n = torch.randn_like(y) * sigma
         noisy_input = y + n
@@ -603,8 +608,8 @@ class EDM(ARModel):
         # Add residual if needed
         if self.pred_residual:
             next_state = (
-                next_state * self.step_diff_std
-            ) + self.step_diff_mean  # Unormalize residual
+                next_state * self.diff_std
+            ) + self.diff_mean  # Unormalize residual
             next_state = prev_state + next_state
 
         # Calculate the loss

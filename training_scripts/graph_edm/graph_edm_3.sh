@@ -20,7 +20,7 @@ python -m neural_lam.train_model \
     --precision 32 \
     --hidden_dim 128 \
     --processor_layers 1 \
-    --pred_redidual \
+    --pred_residual \
     --vertical_propnets 1 \
     --num_past_forcing_steps 1 \
     --num_future_forcing_steps 1 \

@@ -583,9 +583,7 @@ class EDM(ARModel):
         # Make y residual if needed
         if self.pred_residual:
             y = target_state - prev_state
-            y = (
-                target_state - self.step_diff_mean
-            ) / self.step_diff_std  # Normalize 
+            y = (y - self.diff_mean) / self.diff_std  # Normalize residual
         else:
             y = target_state
 

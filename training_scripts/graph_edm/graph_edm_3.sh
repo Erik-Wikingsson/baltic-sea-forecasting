@@ -30,4 +30,7 @@ python -m neural_lam.train_model \
     --lr 0.00001 \
     --ensemble_size 5\
     --val_interval 30\
+    --ar_steps_eval 4\
+    --val_steps_to_log 1 2 4\
+    --var_leads_val_plot '{"10":[1,4], "7":[1,4], "1":[1,4]}'\
     --load checkpoint_path

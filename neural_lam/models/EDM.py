@@ -391,18 +391,7 @@ class EDM(ARModel):
                     )
                 ]
 
-                if (
-                    self.trainer.is_global_zero
-                    and not self.trainer.sanity_checking
-                ):
-                    current_epoch = self.trainer.current_epoch
-                else:
-                    current_epoch = "NAN"
-
-                example_title = (
-                    f"example_{self.plotted_examples}_epoch_{current_epoch}"
-                )
-
+                example_title = f"example_{self.plotted_examples}"
                 wandb.log(
                     {
                         f"{var_name}_{example_title}": wandb.Image(fig)
@@ -557,7 +546,7 @@ class EDM(ARModel):
         """
         # Must log before super call, as metric lists are cleared at end of step
         # super().on_validation_epoch_end()
-        print("End of validation epoch")
+        # print("End of validation epoch")
         # We don't save any validation metrics for now so we want to skip this
 
     # Training
@@ -595,8 +584,10 @@ class EDM(ARModel):
         if self.pred_residual:
             y = target_state - prev_state
             y = (
-                target_state - self.diff_mean
-            ) / self.diff_std  # Normalize residual
+                target_state - self.step_diff_mean
+            ) / self.step_diff_std  # Normalize 
+        else:
+            y = target_state
 
         n = torch.randn_like(y) * sigma
         noisy_input = y + n

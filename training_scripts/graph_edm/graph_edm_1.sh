@@ -10,7 +10,7 @@ BS=1
 PREC=32 # Change to bf16 if suitable
 
 python -m neural_lam.train_model \
-    --config_path data/baltic_nl_config_small.yaml \
+    --config_path /proj/berzelius-2022-164/weather/neural_lam_datasets/baltic/10y-data/baltic_nl_config.yaml \
     --model EDM \
     --precision $PREC\
     --n_example_pred 1 \
@@ -18,7 +18,7 @@ python -m neural_lam.train_model \
     --num_workers 16 \
     --precision 32 \
     --hidden_dim 128 \
-    --processor_layers 1 \
+    --processor_layers 3 \
     --pred_residual \
     --vertical_propnets 1 \
     --num_past_forcing_steps 1 \
@@ -28,3 +28,9 @@ python -m neural_lam.train_model \
     --epochs 600 \
     --ensemble_size 5\
     --val_interval 30\
+    --ar_steps_eval 4\
+    --val_steps_to_log 1 2 4\
+    --var_leads_val_plot '{"10":[1,4], "7":[1,4], "1":[1,4]}'\
+    # --eval test \
+    # --load /proj/berzelius-2022-164/weather/neural_lam_datasets/baltic/10y-data/last.ckpt
+

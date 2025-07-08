@@ -33,4 +33,3 @@ python -m neural_lam.train_model \
     --var_leads_val_plot '{"10":[1,4], "7":[1,4], "1":[1,4]}'\
     # --eval test \
     # --load /proj/berzelius-2022-164/weather/neural_lam_datasets/baltic/10y-data/last.ckpt
-

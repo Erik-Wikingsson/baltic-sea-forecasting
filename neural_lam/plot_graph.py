@@ -47,7 +47,12 @@ def main():
         config_path=args.datastore_config_path
     )
 
-    xy = datastore.get_xy("state", stacked=True)  # (N_grid, 2)
+    mask = datastore.get_mask(surface=True, stacked=False, invert=False)
+    flat_mask = datastore.get_mask(surface=True, stacked=True, invert=False)
+    y_idx, x_idx = np.indices(mask.shape)
+    xy = np.stack([x_idx, y_idx], axis=-1)
+    xy = xy.reshape(-1, 2)[flat_mask]  # (N_grid, 2)
+
     pos_max = np.max(np.abs(xy))
     grid_pos = xy / pos_max  # Divide by maximum coordinate
 

@@ -292,13 +292,15 @@ class EDM(ARModel):
             ens_mean_slice,
             ens_std_slice,
             time_slice,
-        ) in enumerate(zip(
-            traj_rescaled[:n_examples],
-            target_rescaled[:n_examples],
-            ens_mean[:n_examples],
-            ens_std[:n_examples],
-            time[:n_examples],
-        )):
+        ) in enumerate(
+            zip(
+                traj_rescaled[:n_examples],
+                target_rescaled[:n_examples],
+                ens_mean[:n_examples],
+                ens_std[:n_examples],
+                time[:n_examples],
+            )
+        ):
 
             # Create xarray for plotting
             da_samples = [

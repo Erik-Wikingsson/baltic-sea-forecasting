@@ -372,6 +372,11 @@ class MDPDatastore(BaseRegularGridDatastore):
         # Only set to 1 where original mask is 1 and lon < 10
         boundary_mask = xr.where((lon3d < 10.0) & (lat3d > 57.1), 1, land_mask)
 
+        # Make sure mask variable order matches that of state
+        boundary_mask = boundary_mask.sel(
+            mask_feature=self.get_vars_names("state")
+        )
+
         # Ensure type and dims
         boundary_mask = boundary_mask.astype(int)
         boundary_mask = boundary_mask.transpose(
@@ -521,7 +526,7 @@ class MDPDatastore(BaseRegularGridDatastore):
         """
         da_mask = self._ds["mask"]
 
-        # make sure mask_feature order matches state_feature
+        # make sure mask_feature order matches
         da_mask = da_mask.sel(mask_feature=self.get_vars_names("state"))
 
         if stacked:

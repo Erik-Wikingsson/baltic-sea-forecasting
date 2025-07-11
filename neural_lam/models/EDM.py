@@ -404,6 +404,9 @@ class EDM(ARModel):
                     "all"
                 )  # Close all figs for this time step, saves memory
 
+
+
+
     def log_spsk_ratio(self, metric_vals, prefix):
         """
         Compute the mean spread-skill ratio for logging in evaluation
@@ -513,7 +516,7 @@ class EDM(ARModel):
         if (
             self.trainer.is_global_zero
             and batch_idx == 0
-            and self.n_example_pred > 0
+            and self.n_example_pred > self.plotted_examples
         ):
             (
                 trajectories,

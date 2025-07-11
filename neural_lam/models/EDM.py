@@ -549,6 +549,10 @@ class EDM(ARModel):
             trajectories = trajectories[: self.n_example_pred]
             # (n_example_pred, S, pred_steps, num_grid_nodes, d_f)
 
+            # Rescale to original data scale
+            traj_rescaled = trajectories * self.state_std + self.state_mean
+            target_rescaled = target_states * self.state_std + self.state_mean
+
             # Plot samples
             log_plot_dict = {}
             for example_i, (
@@ -556,10 +560,10 @@ class EDM(ARModel):
                 target_traj,
                 time_slice,
             ) in enumerate(
-                zip(trajectories, target_states, time),
+                zip(traj_rescaled, target_rescaled, time),
                 start=1,
             ):
-                # pred_traj and enc traj are
+                # pred_traj and target traj are
                 # (S, pred_steps, num_grid_nodes, d_f)
 
                 var_name_list = self._datastore.get_vars_names("state")

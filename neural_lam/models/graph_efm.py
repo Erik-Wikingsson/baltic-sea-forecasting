@@ -1004,6 +1004,13 @@ class GraphEFM(ARModel):
             # Only need n_example_pred prior trajectories
             prior_trajectories = prior_trajectories[: self.n_example_pred]
 
+            # Rescale to original data scale
+            prior_rescaled = (
+                prior_trajectories * self.state_std + self.state_mean
+            )
+            enc_rescaled = enc_trajectories * self.state_std + self.state_mean
+            target_rescaled = target_states * self.state_std + self.state_mean
+
             # Plot samples
             log_plot_dict = {}
             for example_i, (
@@ -1012,7 +1019,7 @@ class GraphEFM(ARModel):
                 target_traj,
                 time_slice,
             ) in enumerate(
-                zip(prior_trajectories, enc_trajectories, target_states, time),
+                zip(prior_rescaled, enc_rescaled, target_rescaled, time),
                 start=1,
             ):
                 # prior_traj and enc traj are

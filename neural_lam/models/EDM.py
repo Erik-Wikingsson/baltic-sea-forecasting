@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import wandb
+import xarray as xr
 
 # First-party
 from neural_lam import metrics, vis
@@ -39,6 +40,7 @@ class EDM(ARModel):
         self.sampler = args.sampler
         self.sampler_steps = args.sampler_steps
         self.ensemble_size = args.ensemble_size
+        self.var_leads_val_plot = args.var_leads_val_plot
         self.pred_residual = (
             args.pred_residual
         )  # Whether to predict the residual instead of the next state
@@ -517,8 +519,8 @@ class EDM(ARModel):
         ):
             (
                 trajectories,
-                target_states,
-                spread_squared_batch,
+                _,
+                _,
                 ens_mse_batch,
             ) = self.ensemble_common_step(batch)
             # We only take the statistics from the plotted samples as we will
@@ -526,19 +528,110 @@ class EDM(ARModel):
             # NOTE: This metric is not that useful,
             # as we only sample 1 trajectory
             val_log_dict["val_mean_loss"] = ens_mse_batch.mean()
-            self.plot_examples(
-                batch,
-                n_examples=self.n_example_pred,
-                split="val",
-                prediction=trajectories,
+
+            self.log_dict(
+                val_log_dict,
+                on_step=False,
+                on_epoch=True,
+                sync_dist=True,
+                batch_size=batch[0].shape[0],
             )
-        self.log_dict(
-            val_log_dict,
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
-            batch_size=batch[0].shape[0],
-        )
+
+            init_states, target_states, forcing_features, time = batch
+
+            # Only create ens. forecast for as many examples as needed
+            init_states = init_states[: self.n_example_pred]
+            target_states = target_states[: self.n_example_pred]
+            forcing_features = forcing_features[: self.n_example_pred]
+            time = time[: self.n_example_pred]
+
+            # Only need n_example_pred trajectories
+            trajectories = trajectories[: self.n_example_pred]
+            # (n_example_pred, S, pred_steps, num_grid_nodes, d_f)
+
+            # Plot samples
+            log_plot_dict = {}
+            for example_i, (
+                pred_traj,
+                target_traj,
+                time_slice,
+            ) in enumerate(
+                zip(trajectories, target_states, time),
+                start=1,
+            ):
+                # pred_traj and enc traj are
+                # (S, pred_steps, num_grid_nodes, d_f)
+
+                var_name_list = self._datastore.get_vars_names("state")
+                var_unit_list = self._datastore.get_vars_units("state")
+
+                # Make Xarray.DA
+                da_target = self._create_dataarray_from_tensor(
+                    tensor=target_traj,
+                    time=time_slice,
+                    split="val",
+                    category="state",
+                ).unstack("grid_index")
+                da_pred_traj = [
+                    self._create_dataarray_from_tensor(
+                        tensor=pred_traj[i],
+                        time=time_slice,
+                        split="val",
+                        category="state",
+                    ).unstack("grid_index")
+                    for i in range(pred_traj.shape[0])
+                ]
+
+                for var_i, timesteps in self.var_leads_val_plot.items():
+                    var_name = var_name_list[var_i]
+                    var_unit = var_unit_list[var_i]
+                    for step in timesteps:
+                        pred_states = [
+                            da_pred_sample.isel(
+                                state_feature=var_i, time=step - 1
+                            )
+                            for da_pred_sample in da_pred_traj
+                        ]  # (S, num_grid_nodes)
+
+                        target_state = da_target.isel(
+                            state_feature=var_i, time=step - 1
+                        )  # (num_grid_nodes,)
+
+                        # Concatenate along ens member dim for stats compute
+                        pred_states_cat = xr.concat(pred_states, dim="ensemble")
+
+                        plot_title = (
+                            f"{var_name} ({var_unit}), t={step} "
+                            f"({self._datastore.step_length*step} h)"
+                        )
+
+                        # Make plots
+                        with np.testing.suppress_warnings() as sup:
+                            # Numpy will complain when we do the .std
+                            # for dimensions only containing NaNs, and this is
+                            # very noisy. As we will anyhow filter out these
+                            # dimensions later we suppress them here.
+                            sup.filter(
+                                RuntimeWarning,
+                                "Degrees of freedom <= 0 for slice.",
+                            )
+
+                            log_plot_dict[
+                                f"pred_{var_name}_step_{step}_ex{example_i}"
+                            ] = vis.plot_ensemble_prediction(
+                                pred_states,
+                                target_state,
+                                pred_states_cat.mean(dim="ensemble"),
+                                pred_states_cat.std(dim="ensemble", ddof=1),
+                                self._datastore,
+                                title=plot_title,
+                            )
+
+            if not self.trainer.sanity_checking:
+                # Log all plots to wandb
+                wandb.log(log_plot_dict)
+
+            plt.close("all")
 
     def on_validation_epoch_end(self):
         """

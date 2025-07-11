@@ -286,19 +286,19 @@ class EDM(ARModel):
         )  # (B, pred_steps, num_grid_nodes, d_f)
 
         # Iterate over the examples
-        for (
+        for example_idx, (
             traj_slice,
             target_slice,
             ens_mean_slice,
             ens_std_slice,
             time_slice,
-        ) in zip(
+        ) in enumerate(zip(
             traj_rescaled[:n_examples],
             target_rescaled[:n_examples],
             ens_mean[:n_examples],
             ens_std[:n_examples],
             time[:n_examples],
-        ):
+        )):
 
             # Create xarray for plotting
             da_samples = [
@@ -393,7 +393,7 @@ class EDM(ARModel):
                     )
                 ]
 
-                example_title = f"example_{self.plotted_examples}"
+                example_title = f"example_{example_idx + 1}"
                 wandb.log(
                     {
                         f"{var_name}_{example_title}": wandb.Image(fig)

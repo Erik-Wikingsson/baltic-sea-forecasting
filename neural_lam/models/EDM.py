@@ -374,10 +374,8 @@ class EDM(ARModel):
                 var_figs = [
                     vis.plot_ensemble_prediction(
                         [
-                            da_samples[i].isel(
-                                state_feature=var_i, time=t_i - 1
-                            )
-                            for i in range(traj_slice.shape[1])
+                            da.isel(state_feature=var_i, time=t_i - 1)
+                            for da in da_samples
                         ],
                         da_target.isel(state_feature=var_i, time=t_i - 1),
                         da_ens_mean.isel(state_feature=var_i, time=t_i - 1),
@@ -531,14 +529,6 @@ class EDM(ARModel):
             # as we only sample 1 trajectory
             val_log_dict["val_mean_loss"] = ens_mse_batch.mean()
 
-            self.log_dict(
-                val_log_dict,
-                on_step=False,
-                on_epoch=True,
-                sync_dist=True,
-                batch_size=batch[0].shape[0],
-            )
-
             init_states, target_states, forcing_features, time = batch
 
             # Only create ens. forecast for as many examples as needed
@@ -638,6 +628,14 @@ class EDM(ARModel):
                 wandb.log(log_plot_dict)
 
             plt.close("all")
+
+        self.log_dict(
+            val_log_dict,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=batch[0].shape[0],
+        )
 
     def on_validation_epoch_end(self):
         """

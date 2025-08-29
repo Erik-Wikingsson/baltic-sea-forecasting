@@ -873,10 +873,8 @@ class GraphEFM(ARModel):
                 var_figs = [
                     vis.plot_ensemble_prediction(
                         [
-                            da_samples[i].isel(
-                                state_feature=var_i, time=t_i - 1
-                            )
-                            for i in range(traj_slice.shape[1])
+                            da.isel(state_feature=var_i, time=t_i - 1)
+                            for da in da_samples
                         ],
                         da_target.isel(state_feature=var_i, time=t_i - 1),
                         da_ens_mean.isel(state_feature=var_i, time=t_i - 1),

@@ -13,7 +13,7 @@ import torch_geometric as pyg
 from torch_geometric.utils.convert import from_networkx
 
 # Local
-from .config import load_config_and_datastore
+from .config import load_config_and_datastores
 from .datastore.base import BaseRegularGridDatastore
 
 
@@ -110,27 +110,34 @@ def from_networkx_with_start_index(nx_graph, start_index):
 
 
 def mk_2d_graph(xy, nx, ny, land_mask):
-    xm, xM = np.amin(xy[0][0, :]), np.amax(xy[0][0, :])
-    ym, yM = np.amin(xy[1][:, 0]), np.amax(xy[1][:, 0])
+    N_x, N_y, _ = xy.shape
 
-    # avoid nodes on border
-    dx = (xM - xm) / nx
-    dy = (yM - ym) / ny
-    lx = np.linspace(xm + dx / 2, xM - dx / 2, nx, dtype=np.float32)
-    ly = np.linspace(ym + dy / 2, yM - dy / 2, ny, dtype=np.float32)
+    # compute strides
+    stride_x = max(1, N_x // nx)
+    stride_y = max(1, N_y // ny)
 
-    mg = np.meshgrid(lx, ly)
-    g = networkx.grid_2d_graph(len(ly), len(lx))
+    # subsample xy grid
+    xy_coarse = xy[::stride_x, ::stride_y, :]
 
-    # kdtree for nearest neighbor search of land nodes
-    land_points = np.argwhere(land_mask.T).astype(np.float32)
+    nx_eff, ny_eff, _ = xy_coarse.shape
+
+    # build kdtree for land points
+    land_points = xy[land_mask]
     land_kdtree = scipy.spatial.KDTree(land_points)
 
-    # add nodes excluding land
+    # estimate spacing from subsampled grid to set threshold
+    dx = np.mean(np.diff(xy_coarse[:, 0, 0])) if nx_eff > 1 else 1.0
+    dy = np.mean(np.diff(xy_coarse[0, :, 1])) if ny_eff > 1 else 1.0
+    threshold = 0.5 * np.sqrt(dx**2 + dy**2)
+
+    # build base grid graph
+    g = networkx.grid_2d_graph(nx_eff, ny_eff)
+
     for node in list(g.nodes):
-        node_pos = np.array([mg[0][node], mg[1][node]], dtype=np.float32)
+        i, j = node
+        node_pos = xy_coarse[i, j, :]
         dist, _ = land_kdtree.query(node_pos, k=1)
-        if dist < np.sqrt(0.5):
+        if dist < threshold:
             g.remove_node(node)
         else:
             g.nodes[node]["pos"] = node_pos
@@ -257,7 +264,7 @@ def create_graph(
 
     # graph geometry
     nx = 3  # number of children = nx**2
-    nlev = int(np.log(max(xy.shape)) / np.log(nx))
+    nlev = int(np.log(max(xy.shape[:2])) / np.log(nx))
     nleaf = nx**nlev  # leaves at the bottom = nleaf**2
 
     mesh_levels = nlev - 1
@@ -450,24 +457,19 @@ def create_graph(
     vm = G_bottom_mesh.nodes
     vm_xy = np.array([xy for _, xy in vm.data("pos")])
 
-    # find consecutive nodes on the same row
-    vm_pos = {key: pos for key, pos in vm.data("pos")}
-    sorted_keys = sorted(vm_pos.keys(), key=lambda k: (k[0], k[1], k[2]))
-    key1, key2 = None, None
-    for i in range(len(sorted_keys) - 1):
-        k1, k2 = sorted_keys[i], sorted_keys[i + 1]
-        if k1[0] == k2[0] and k1[1] == k2[1] and k1[2] + 1 == k2[2]:
-            if np.array_equal(vm_pos[k1][1], vm_pos[k2][1]):
-                key1, key2 = k1, k2
-                break
-
-    # distance between mesh nodes
-    dm = np.sqrt(np.sum((vm.data("pos")[key1] - vm.data("pos")[key2]) ** 2))
+    # Compute dm as median edge length
+    edge_lengths = [
+        np.linalg.norm(
+            G_bottom_mesh.nodes[u]["pos"] - G_bottom_mesh.nodes[v]["pos"]
+        )
+        for u, v in G_bottom_mesh.edges
+    ]
+    dm = np.mean(edge_lengths)
 
     # grid nodes
-    Ny, Nx = xy.shape[1:]
+    Nx, Ny = xy.shape[:2]
 
-    G_grid = networkx.grid_2d_graph(Ny, Nx)
+    G_grid = networkx.grid_2d_graph(Nx, Ny)
     G_grid.clear_edges()
 
     # vg features (only pos introduced here)
@@ -478,7 +480,7 @@ def create_graph(
             nodes_to_remove.append(node)
         else:
             # pos is in feature but here explicit for convenience
-            G_grid.nodes[node]["pos"] = np.array([xy[0][node], xy[1][node]])
+            G_grid.nodes[node]["pos"] = xy[node[0], node[1]]
 
     for node in nodes_to_remove:
         G_grid.remove_node(node)
@@ -490,7 +492,7 @@ def create_graph(
     # build kd tree for grid point pos
     # order in vg_list should be same as in vg_xy
     vg_list = list(G_grid.nodes)
-    vg_xy = np.array([[xy[0][node[1:]], xy[1][node[1:]]] for node in vg_list])
+    vg_xy = np.array([G_grid.nodes[node]["pos"] for node in vg_list])
     kdt_g = scipy.spatial.KDTree(vg_xy)
 
     # now add (all) mesh nodes, include features (pos)
@@ -576,19 +578,24 @@ def create_graph(
 
 def create_graph_from_datastore(
     datastore: BaseRegularGridDatastore,
+    datastore_boundary: BaseRegularGridDatastore,
+    datastore_atmosphere: BaseRegularGridDatastore,
     output_root_path: str,
     n_max_levels: int = None,
     hierarchical: bool = False,
     create_plot: bool = False,
 ):
-    if isinstance(datastore, BaseRegularGridDatastore):
-        land_mask = datastore.get_mask(surface=True, stacked=False, invert=True)
-        y_idx, x_idx = np.indices(land_mask.shape)
-        xy = np.stack([x_idx, y_idx], axis=0)
-    else:
-        raise NotImplementedError(
-            "Only graph creation for BaseRegularGridDatastore is supported"
-        )
+    land_mask = datastore.get_mask(surface=True, stacked=False, invert=True)
+    xy = datastore.get_projected_xy("state", stacked=False)
+
+    # How to get boundary + mask and atmosphere xy
+    # boundary_mask = datastore_boundary.get_mask(
+    #     surface=True, stacked=False, invert=True
+    # )
+    # xy_boundary = datastore_boundary.get_projected_xy("forcing",stacked=False)
+    # xy_atmosphere = datastore_atmosphere.get_projected_xy(
+    #     "forcing", stacked=False
+    # )
 
     create_graph(
         graph_dir_path=output_root_path,
@@ -637,10 +644,14 @@ def cli(input_args=None):
     ), "Specify your config with --config_path"
 
     # Load neural-lam configuration and datastore to use
-    _, datastore = load_config_and_datastore(config_path=args.config_path)
+    _, datastore, datastore_boundary, datastore_atmosphere = (
+        load_config_and_datastores(config_path=args.config_path)
+    )
 
     create_graph_from_datastore(
         datastore=datastore,
+        datastore_boundary=datastore_boundary,
+        datastore_atmosphere=datastore_atmosphere,
         output_root_path=os.path.join(datastore.root_path, "graph", args.name),
         n_max_levels=args.levels,
         hierarchical=args.hierarchical,

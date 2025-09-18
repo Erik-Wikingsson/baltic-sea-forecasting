@@ -9,7 +9,7 @@ import torch_geometric as pyg
 
 # Local
 from . import utils
-from .config import load_config_and_datastore
+from .config import load_config_and_datastores
 
 MESH_HEIGHT = 0.1
 MESH_LEVEL_DIST = 0.2
@@ -43,16 +43,13 @@ def main():
     )
 
     args = parser.parse_args()
-    _, datastore = load_config_and_datastore(
+    _, datastore, _, _ = load_config_and_datastores(
         config_path=args.datastore_config_path
     )
 
-    mask = datastore.get_mask(surface=True, stacked=False, invert=False)
-    flat_mask = datastore.get_mask(surface=True, stacked=True, invert=False)
-    y_idx, x_idx = np.indices(mask.shape)
-    xy = np.stack([x_idx, y_idx], axis=-1)
-    xy = xy.reshape(-1, 2)[flat_mask]  # (N_grid, 2)
-
+    mask = datastore.get_mask(surface=True, stacked=True, invert=False)
+    xy = datastore.get_projected_xy("state", stacked=True)
+    xy = xy[mask]
     pos_max = np.max(np.abs(xy))
     grid_pos = xy / pos_max  # Divide by maximum coordinate
 

@@ -13,7 +13,7 @@ from loguru import logger
 
 # Local
 from . import utils
-from .config import load_config_and_datastore
+from .config import load_config_and_datastores
 from .models import EDM, GraphCast, GraphEFM, GraphFM
 from .weather_dataset import WeatherDataModule
 
@@ -366,6 +366,19 @@ def main(input_args=None):
         help="Number of future time steps to use as input for forcing data",
     )
     parser.add_argument(
+        "--num_past_boundary_steps",
+        type=int,
+        default=1,
+        help="Number of past time steps to use as boundary input (default: 1)",
+    )
+    parser.add_argument(
+        "--num_future_boundary_steps",
+        type=int,
+        default=1,
+        help="Number of future time steps to use as boundary input "
+        "(default: 1)",
+    )
+    parser.add_argument(
         "--ensemble_size",
         type=int,
         default=5,
@@ -398,16 +411,22 @@ def main(input_args=None):
     seed.seed_everything(args.seed)
 
     # Load neural-lam configuration and datastore to use
-    config, datastore = load_config_and_datastore(config_path=args.config_path)
+    config, datastore, datastore_boundary, datastore_atmosphere = (
+        load_config_and_datastores(config_path=args.config_path)
+    )
 
     # Create datamodule
     data_module = WeatherDataModule(
         datastore=datastore,
+        datastore_boundary=datastore_boundary,
+        datastore_atmosphere=datastore_atmosphere,
         ar_steps_train=args.ar_steps_train,
         ar_steps_eval=args.ar_steps_eval,
         standardize=True,
         num_past_forcing_steps=args.num_past_forcing_steps,
         num_future_forcing_steps=args.num_future_forcing_steps,
+        num_past_boundary_steps=args.num_past_boundary_steps,
+        num_future_boundary_steps=args.num_future_boundary_steps,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
     )

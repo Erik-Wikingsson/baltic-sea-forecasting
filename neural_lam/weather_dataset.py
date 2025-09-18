@@ -21,7 +21,11 @@ class WeatherDataset(torch.utils.data.Dataset):
     Parameters
     ----------
     datastore : BaseDatastore
-        The datastore to load the data from (e.g. mdp).
+        The datastore to load the data from.
+    datastore_boundary : BaseDatastore
+        The boundary datastore to load the data from.
+    datastore_atmosphere : BaseDatastore
+        The atmosphere datastore to load the data from.
     split : str, optional
         The data split to use ("train", "val" or "test"). Default is "train".
     ar_steps : int, optional
@@ -36,6 +40,16 @@ class WeatherDataset(torch.utils.data.Dataset):
         forcing from times t, t+1, ..., t+j-1, t+j (and potentially times before
         t, given num_past_forcing_steps) are included as forcing inputs at time
         t. Default is 1.
+    num_past_boundary_steps: int, optional
+        Number of past time steps to include in boundary input. If set to i,
+        boundary from times t-i, t-i+1, ..., t-1, t (and potentially beyond,
+        given num_future_boundary_steps) are included as boundary inputs at time
+        t Default is 1.
+    num_future_boundary_steps: int, optional
+        Number of future time steps to include in boundary input. If set to j,
+        boundary from times t, t+1, ..., t+j-1, t+j (and potentially times
+        before t, given num_past_boundary_steps) are included as boundary inputs
+        at time t. Default is 1.
     standardize : bool, optional
         Whether to standardize the data. Default is True.
     """
@@ -43,10 +57,14 @@ class WeatherDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         datastore: BaseDatastore,
+        datastore_boundary: BaseDatastore,
+        datastore_atmosphere: BaseDatastore,
         split="train",
         ar_steps=1,
         num_past_forcing_steps=1,
         num_future_forcing_steps=1,
+        num_past_boundary_steps=1,
+        num_future_boundary_steps=1,
         standardize=True,
     ):
         super().__init__()
@@ -54,8 +72,12 @@ class WeatherDataset(torch.utils.data.Dataset):
         self.split = split
         self.ar_steps = ar_steps
         self.datastore = datastore
+        self.datastore_boundary = datastore_boundary
+        self.datastore_atmosphere = datastore_atmosphere
         self.num_past_forcing_steps = num_past_forcing_steps
         self.num_future_forcing_steps = num_future_forcing_steps
+        self.num_past_boundary_steps = num_past_boundary_steps
+        self.num_future_boundary_steps = num_future_boundary_steps
 
         self.da_state = self.datastore.get_dataarray(
             category="state", split=self.split
@@ -671,7 +693,7 @@ class WeatherDataModule(pl.LightningDataModule):
         self.test_dataset = None
         if num_workers > 0:
             # default to spawn for now, as the default on linux "fork" hangs
-            # when using dask (which the npyfilesmeps datastore uses)
+            # when using dask
             self.multiprocessing_context = "spawn"
         else:
             self.multiprocessing_context = None

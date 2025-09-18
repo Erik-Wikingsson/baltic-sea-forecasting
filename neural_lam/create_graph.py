@@ -457,7 +457,7 @@ def create_graph(
     vm = G_bottom_mesh.nodes
     vm_xy = np.array([xy for _, xy in vm.data("pos")])
 
-    # Compute dm as median edge length
+    # compute dm as mean edge length
     edge_lengths = [
         np.linalg.norm(
             G_bottom_mesh.nodes[u]["pos"] - G_bottom_mesh.nodes[v]["pos"]

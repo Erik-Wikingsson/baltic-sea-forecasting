@@ -1,22 +1,19 @@
-python -m neural_lam.train_model \
-    --config_path data/baltic_nl_config_small.yaml \
+pdm run python -m neural_lam.train_model \
+    --config_path /monolith/global_data/ml_datasets/baltic_sea/data/baltic_nl_config_mlotst.yaml \
     --model EDM \
     --graph hierarchical \
-    --num_workers 2 \
-    --hidden_dim 128 \
-    --processor_layers 3 \
+    --precision bf16-mixed \
+    --num_workers 4 \
+    --hidden_dim 64 \
+    --processor_layers 2 \
+    --pred_residual \
     --num_past_forcing_steps 1 \
     --num_future_forcing_steps 1 \
     --ensemble_size 5 \
-    --batch_size 4 \
-    --epochs 200 \
+    --batch_size 1 \
     --num_sanity_val_steps 0 \
-    --val_interval 10\
-    --ar_steps_eval 1\
-    --val_steps_to_log 1\
-    --var_leads_val_plot '{"10":[1,4], "7":[1,4], "1":[1,4]}'\
+    --ar_steps_eval 15 \
     --n_example_pred 1 \
-    --ar_steps_eval 1\
-    # --eval test \
-    # --load /proj/berzelius-2022-164/weather/neural_lam_datasets/baltic/10y-data/last.ckpt
-    # --output_std \
+    --eval test \
+    --devices 4 \
+    --load saved_models/train-EDM-2x64-09_10_10-5649/last.ckpt

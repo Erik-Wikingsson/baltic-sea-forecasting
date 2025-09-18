@@ -12,33 +12,28 @@
 # However, the spread-skill-ratio is not crucial to be ~1 here, as that will be
 # helped by the CRPS in the last step.
 
-# TO ADJUST: Constants below
-BS=1
-CKPT=path_to.ckpt
-PREC=32 # Change to bf16 if suitable
-
-python -m neural_lam.train_model \
-    --config_path data/baltic_nl_config_small.yaml\
-    --num_workers 4\
-    --precision $PREC\
-    --model graph_efm\
-    --graph hierarchical\
-    --hidden_dim 128\
-    --processor_layers 1\
-    --prior_processor_layers 1\
-    --encoder_processor_layers 1\
-    --num_past_forcing_steps 1\
-    --num_future_forcing_steps 1\
-    --n_example_pred 1\
-    --ensemble_size 5\
-    --batch_size $BS\
-    --lr 0.001\
-    --kl_beta 1\
-    --crps_weight 0\
-    --ar_steps_train 1\
-    --epochs 100\
-    --val_interval 20\
-    --ar_steps_eval 4\
-    --val_steps_to_log 1 2 4\
-    --var_leads_val_plot '{"10":[1,4], "7":[1,4], "1":[1,4]}'\
-    --load $CKPT\
+pdm run python -m neural_lam.train_model \
+    --config_path /monolith/global_data/ml_datasets/baltic_sea/data/baltic_nl_config_small.yaml \
+    --num_workers 8 \
+    --precision bf16-mixed \
+    --model graph_efm \
+    --graph hierarchical \
+    --hidden_dim 64 \
+    --processor_layers 2 \
+    --num_past_forcing_steps 1 \
+    --num_future_forcing_steps 1 \
+    --n_example_pred 1 \
+    --ensemble_size 5 \
+    --batch_size 2 \
+    --lr 0.001 \
+    --kl_beta 1 \
+    --crps_weight 0 \
+    --ar_steps_train 1 \
+    --epochs 400 \
+    --val_interval 20 \
+    --ar_steps_eval 4 \
+    --num_sanity_val_steps 0 \
+    --val_steps_to_log 1 2 4 \
+    --var_leads_val_plot '{"0":[1,4], "1":[1,4], "2":[1,4], "3":[1,4], "4":[1,4]}' \
+    --devices 1 2 \
+    --load saved_models/train-graph_efm-2x64-08_29_10-7865/last.ckpt

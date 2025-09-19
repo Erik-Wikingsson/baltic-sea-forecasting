@@ -155,14 +155,18 @@ class FM(EDM):
         x_next = latents
         # 0, ..., N-1
         for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])):
+            t_cur = t_cur.reshape(-1, 1, 1).flatten()
+            t_next = t_next.reshape(-1, 1, 1).flatten()
+
+            # Euler step.
             x_cur = x_next
-            d_cur = self.model(x_cur, t_cur, class_labels=class_labels)
+            d_cur = self.model(x_cur, t_cur, class_labels)
             x_next = x_cur + (t_next - t_cur) * d_cur
 
             # Apply 2nd order correction.
             if i < num_steps - 1:
                 d_prime = self.model(
-                    x_next, t_next, class_labels=class_labels)
+                    x_next, t_next, class_labels)
                 x_next = x_cur + (t_next - t_cur) * \
                     (0.5 * d_cur + 0.5 * d_prime)
 
@@ -190,7 +194,7 @@ class FM(EDM):
             beta_dot_t = -1
             eps_t = eps * beta_t
 
-            b = self.model(zt, t, class_labels=class_labels)
+            b = self.model(zt, t, class_labels)
             s = (alpha_t * b - alpha_dot_t * zt) / \
                 (beta_t * gamma_t)  # s = (t * b - zt) / (1 - t)
             dz = b + eps_t * s

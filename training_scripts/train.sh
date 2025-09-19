@@ -9,7 +9,7 @@
 
 source ~/.bashrc
 module load Mambaforge/23.3.1-1-hpc1-bdist
-mamba activate bfs
+mamba activate bsf
 wandb online
 
 cd /proj/berzelius-2022-164/users/x_erila/baltic-sea-forecasting

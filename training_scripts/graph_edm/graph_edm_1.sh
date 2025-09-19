@@ -9,7 +9,7 @@ BS=1
 #CKPT= # Don't load checkpoint for step 1
 PREC=32 # Change to bf16 if suitable
 
-python -m neural_lam.train_model \
+srun python -m neural_lam.train_model \
     --config_path /proj/berzelius-2022-164/weather/neural_lam_datasets/baltic/10y-data/baltic_nl_config.yaml \
     --model EDM \
     --precision $PREC\
@@ -31,5 +31,6 @@ python -m neural_lam.train_model \
     --ar_steps_eval 1\
     --val_steps_to_log 1\
     --var_leads_val_plot '{"10":[1], "7":[1], "1":[1]}'\
+    --num_sanity_val_steps 1\
     # --eval test \
     # --load /proj/berzelius-2022-164/weather/neural_lam_datasets/baltic/10y-data/last.ckpt

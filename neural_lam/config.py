@@ -120,8 +120,8 @@ class NeuralLAMConfig(dataclass_wizard.JSONWizard, dataclass_wizard.YAMLWizard):
         The configuration for the boundary datastore to use, if any. If None,
         no boundary datastore is used.
     datastore_atmosphere : Union[DatastoreSelection, None]
-        The configuration for the atmospheric datastore to use, if any. If None,
-        no atmospheric datastore is used.
+        The configuration for the atmosphere datastore to use, if any. If None,
+        no atmosphere datastore is used.
     training : TrainingConfig
         The configuration for training the model.
     """

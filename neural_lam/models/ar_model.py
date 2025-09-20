@@ -32,17 +32,26 @@ class ARModel(pl.LightningModule):
         args,
         config: NeuralLAMConfig,
         datastore: BaseDatastore,
+        datastore_boundary: Union[BaseDatastore, None],
+        datastore_atmosphere: Union[BaseDatastore, None],
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["datastore"])
         self.args = args
         self._datastore = datastore
+        self._datastore_boundary = datastore_boundary
+        self._datastore_atmosphere = datastore_atmosphere
         num_state_vars = datastore.get_num_data_vars(category="state")
         num_forcing_vars = datastore.get_num_data_vars(category="forcing")
         # Load masks
         self.surface_mask = datastore.get_mask(
             surface=True, stacked=True, invert=False
         )
+        self.interior_mask = datastore.get_mask(
+            surface=False, stacked=True, invert=False
+        )[
+            self.surface_mask
+        ]  # (num_grid_nodes, d_features), 1 for non-land
         # Load static features standardized
         da_static_features = datastore.get_dataarray(
             category="static", split=None, standardize=True
@@ -50,7 +59,6 @@ class ARModel(pl.LightningModule):
         da_state_stats = datastore.get_standardization_dataarray(
             category="state"
         )
-        da_boundary_mask = datastore.boundary_mask[self.surface_mask]
         num_past_forcing_steps = args.num_past_forcing_steps
         num_future_forcing_steps = args.num_future_forcing_steps
 
@@ -112,6 +120,7 @@ class ARModel(pl.LightningModule):
             self.num_grid_nodes,
             grid_static_dim,
         ) = self.grid_static_features.shape
+        self.num_total_grid_nodes = self.num_grid_nodes
 
         self.grid_input_dim = (
             2 * num_state_vars
@@ -120,18 +129,86 @@ class ARModel(pl.LightningModule):
             * (num_past_forcing_steps + num_future_forcing_steps + 1)
         )
 
+        # If datastore_boundary is given, the model is forced from boundary
+        self.boundary_forced = datastore_boundary is not None
+
+        if self.boundary_forced:
+            # Load static features for boundary
+            da_boundary_static_features = datastore_boundary.get_dataarray(
+                category="static", split=None, standardize=True
+            )
+            self.register_buffer(
+                "boundary_static_features",
+                torch.tensor(
+                    da_boundary_static_features.values, dtype=torch.float32
+                ),
+                persistent=False,
+            )
+
+            # Compute dimensionalities (e.g. to instantiate MLPs)
+            (
+                self.num_boundary_nodes,
+                boundary_static_dim,
+            ) = self.boundary_static_features.shape
+
+            # Compute boundary input dim separately
+            num_boundary_forcing_vars = datastore_boundary.get_num_data_vars(
+                category="forcing"
+            )
+
+            num_past_boundary_steps = args.num_past_boundary_steps
+            num_future_boundary_steps = args.num_future_boundary_steps
+            self.boundary_dim = (
+                boundary_static_dim
+                + num_boundary_forcing_vars
+                * (num_past_boundary_steps + num_future_boundary_steps + 1)
+            )
+            self.num_total_grid_nodes += self.num_boundary_nodes
+
+        # If datastore_atmosphere is given, the model is forced from atmosphere
+        self.atmosphere_forced = datastore_atmosphere is not None
+
+        if self.atmosphere_forced:
+            # Load static features for atmosphere
+            da_atmosphere_static_features = datastore_atmosphere.get_dataarray(
+                category="static", split=None, standardize=True
+            )
+            self.register_buffer(
+                "atmosphere_static_features",
+                torch.tensor(
+                    da_atmosphere_static_features.values, dtype=torch.float32
+                ),
+                persistent=False,
+            )
+
+            # Compute dimensionalities (e.g. to instantiate MLPs)
+            (
+                self.num_atmosphere_nodes,
+                atmosphere_static_dim,
+            ) = self.boundary_static_features.shape
+
+            # Compute atmosphere input dim separately
+            num_atmosphere_forcing_vars = (
+                datastore_atmosphere.get_num_data_vars(category="forcing")
+            )
+
+            num_past_atmosphere_steps = args.num_past_atmosphere_steps
+            num_future_atmosphere_steps = args.num_future_atmosphere_steps
+            self.atmosphere_dim = (
+                atmosphere_static_dim
+                + num_atmosphere_forcing_vars
+                * (num_past_atmosphere_steps + num_future_atmosphere_steps + 1)
+            )
+            self.num_total_grid_nodes += self.num_atmosphere_nodes
+
         # Instantiate loss function
         self.loss = metrics.get_metric(args.loss)
 
-        boundary_mask = torch.tensor(
-            da_boundary_mask.values, dtype=torch.float32
-        )  # (num_grid_nodes, d_features)
-
-        self.register_buffer("boundary_mask", boundary_mask, persistent=False)
-        # Pre-compute interior mask for use in loss function
         self.register_buffer(
-            "interior_mask", 1.0 - self.boundary_mask, persistent=False
-        )  # (num_grid_nodes, d_features), 1 for non-border
+            "interior_mask_bool",
+            torch.as_tensor(self.interior_mask, dtype=torch.bool),
+            persistent=False,
+        )
 
         self.val_metrics = {
             "mse": [],
@@ -197,13 +274,6 @@ class ARModel(pl.LightningModule):
         )
         return opt
 
-    @property
-    def interior_mask_bool(self):
-        """
-        Get the interior mask as a boolean (N, d_features) mask.
-        """
-        return self.interior_mask.to(torch.bool)
-
     @staticmethod
     def expand_to_batch(x, batch_size):
         """
@@ -214,51 +284,70 @@ class ARModel(pl.LightningModule):
         else:
             return x.unsqueeze(0).expand(batch_size, -1, -1)
 
-    def predict_step(self, prev_state, prev_prev_state, forcing):
+    def predict_step(
+        self,
+        prev_state,
+        prev_prev_state,
+        forcing,
+        boundary_forcing,
+        atmosphere_forcing,
+    ):
         """
         Step state one step ahead using prediction model, X_{t-1}, X_t -> X_t+1
-        prev_state: (B, num_grid_nodes, feature_dim), X_t prev_prev_state: (B,
-        num_grid_nodes, feature_dim), X_{t-1} forcing: (B, num_grid_nodes,
-        forcing_dim)
+        prev_state: (B, num_grid_nodes, feature_dim), X_t
+        prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1}
+        forcing: (B, num_grid_nodes, forcing_dim)
+        boundary_forcing: (B, num_boundary_nodes, boundary_forcing_dim)
+        atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
         """
         raise NotImplementedError("No prediction step implemented")
 
-    def unroll_prediction(self, init_states, forcing_features, true_states):
+    def unroll_prediction(
+        self, init_states, forcing, boundary_forcing, atmosphere_forcing
+    ):
         """
         Roll out prediction taking multiple autoregressive steps with model
         init_states: (B, 2, num_grid_nodes, d_f)
-        forcing_features: (B, pred_steps, num_grid_nodes, d_static_f)
-        true_states: (B, pred_steps,num_grid_nodes, d_f)
+        forcing: (B, pred_steps, num_grid_nodes, d_static_f)
+        boundary_forcing: (B, pred_steps, num_boundary_nodes, d_boundary_f)
+        atmosphere_forcing:(B, pred_steps, num_atmosphere_nodes, d_atmosphere_f)
         """
         prev_prev_state = init_states[:, 0]
         prev_state = init_states[:, 1]
         prediction_list = []
         pred_std_list = []
-        pred_steps = forcing_features.shape[1]
+        pred_steps = forcing.shape[1]
 
         for i in range(pred_steps):
-            forcing = forcing_features[:, i]
-            border_state = true_states[:, i]
+            forcing_step = forcing[:, i]
+
+            if self.boundary_forced:
+                boundary_forcing_step = boundary_forcing[:, i]
+            else:
+                boundary_forcing_step = None
+
+            if self.atmosphere_forced:
+                atmosphere_forcing_step = atmosphere_forcing[:, i]
+            else:
+                atmosphere_forcing_step = None
 
             pred_state, pred_std = self.predict_step(
-                prev_state, prev_prev_state, forcing
+                prev_state,
+                prev_prev_state,
+                forcing_step,
+                boundary_forcing_step,
+                atmosphere_forcing_step,
             )
-            # state: (B, num_grid_nodes, d_f) pred_std: (B, num_grid_nodes,
-            # d_f) or None
+            # state: (B, num_grid_nodes, d_f)
+            # pred_std: (B, num_grid_nodes, d_f) or None
 
-            # Overwrite border with true state
-            new_state = (
-                self.boundary_mask * border_state
-                + self.interior_mask * pred_state
-            )
-
-            prediction_list.append(new_state)
+            prediction_list.append(pred_state)
             if self.output_std:
                 pred_std_list.append(pred_std)
 
             # Update conditioning states
             prev_prev_state = prev_state
-            prev_state = new_state
+            prev_state = pred_state
 
         prediction = torch.stack(
             prediction_list, dim=1
@@ -274,19 +363,30 @@ class ARModel(pl.LightningModule):
 
     def common_step(self, batch):
         """
-        Predict on single batch batch consists of: init_states: (B, 2,
-        num_grid_nodes, d_features) target_states: (B, pred_steps,
-        num_grid_nodes, d_features) forcing_features: (B, pred_steps,
-        num_grid_nodes, d_forcing),
-            where index 0 corresponds to index 1 of init_states
+        Predict on single batch batch consists of:
+        init_states: (B, 2, num_grid_nodes, d_features)
+        target_states: (B, pred_steps, num_grid_nodes, d_features)
+        forcing_features: (B, pred_steps, num_grid_nodes, d_forcing),
+        boundary_forcing:
+            (B, pred_steps, num_boundary_nodes, d_boundary_forcing),
+        atmosphere_forcing:
+            (B, pred_steps, num_atmosphere_nodes, d_atmosphere_forcing),
+        where index 0 corresponds to index 1 of init_states
         """
-        (init_states, target_states, forcing_features, batch_times) = batch
+        (
+            init_states,
+            target_states,
+            forcing,
+            boundary_forcing,
+            atmosphere_forcing,
+            batch_times,
+        ) = batch
 
         prediction, pred_std = self.unroll_prediction(
-            init_states, forcing_features, target_states
+            init_states, forcing, boundary_forcing, atmosphere_forcing
         )  # (B, pred_steps, num_grid_nodes, d_f)
-        # prediction: (B, pred_steps, num_grid_nodes, d_f) pred_std: (B,
-        # pred_steps, num_grid_nodes, d_f) or (d_f,)
+        # prediction: (B, pred_steps, num_grid_nodes, d_f)
+        # pred_std: (B, pred_steps, num_grid_nodes, d_f) or (d_f,)
 
         return prediction, target_states, pred_std, batch_times
 

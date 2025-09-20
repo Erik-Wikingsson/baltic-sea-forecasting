@@ -375,6 +375,20 @@ def main(input_args=None):
         "--num_future_boundary_steps",
         type=int,
         default=1,
+        help="Number of future time steps to use as atmosphere input "
+        "(default: 1)",
+    )
+    parser.add_argument(
+        "--num_past_atmosphere_steps",
+        type=int,
+        default=1,
+        help="Number of past time steps to use as atmosphere input "
+        "(default: 1)",
+    )
+    parser.add_argument(
+        "--num_future_atmosphere_steps",
+        type=int,
+        default=1,
         help="Number of future time steps to use as boundary input "
         "(default: 1)",
     )
@@ -427,6 +441,8 @@ def main(input_args=None):
         num_future_forcing_steps=args.num_future_forcing_steps,
         num_past_boundary_steps=args.num_past_boundary_steps,
         num_future_boundary_steps=args.num_future_boundary_steps,
+        num_past_atmosphere_steps=args.num_past_atmosphere_steps,
+        num_future_atmosphere_steps=args.num_future_atmosphere_steps,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
     )
@@ -451,7 +467,13 @@ def main(input_args=None):
 
     # Load model parameters Use new args for model
     ModelClass = MODELS[args.model]
-    model = ModelClass(args, config=config, datastore=datastore)
+    model = ModelClass(
+        args,
+        config=config,
+        datastore=datastore,
+        datastore_boundary=datastore_boundary,
+        datastore_atmosphere=datastore_atmosphere,
+    )
 
     if args.eval:
         prefix = f"eval-{args.eval}-"

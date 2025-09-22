@@ -275,11 +275,84 @@ class GraphEFM(ARModel):
 
         return pred_mean  # (B, num_grid_nodes, d_state)
 
+    def _add_optional_grid_embeddings(
+        self,
+        interior_emb,
+        boundary_forcing,
+        atmosphere_forcing,
+    ):
+        """
+        Build embedding of full grid, optionally adding embeddings of
+        boundary and atmosphere grid nodes.
+
+        interior_emb: (B, num_interior_nodes, d_h)
+        boundary_forcing: (B, num_boundary_nodes, boundary_dim)
+        atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_dim)
+
+        Returns:
+        grid_emb: (B, num_grid_nodes, d_h)
+        """
+        batch_size = interior_emb.shape[0]
+        # List of all grid node embeddings
+        grid_emb_list = [interior_emb]
+
+        if self.boundary_forced:
+            boundary_features = torch.cat(
+                (
+                    boundary_forcing,
+                    self.expand_to_batch(
+                        self.boundary_static_features, batch_size
+                    ),
+                ),
+                dim=-1,
+            )  # (B, num_boundary_nodes, interior_input_dim)
+            boundary_emb = self.boundary_embedder(
+                boundary_features
+            )  # (B, num_boundary_nodes, d_h)
+            grid_emb_list.append(boundary_emb)
+
+        if self.atmosphere_forced:
+            atmosphere_features = torch.cat(
+                (
+                    atmosphere_forcing,
+                    self.expand_to_batch(
+                        self.atmosphere_static_features, batch_size
+                    ),
+                ),
+                dim=-1,
+            )  # (B, num_atmosphere_nodes, interior_input_dim)
+
+            atmosphere_emb = self.atmosphere_embedder(
+                atmosphere_features
+            )  # (B, num_atmosphere_nodes, d_h)
+            grid_emb_list.append(atmosphere_emb)
+
+        if len(grid_emb_list) == 1:
+            # Only interior
+            grid_emb = grid_emb_list[0]
+        else:
+            # NOTE: We here assume the order of grid node index is 1) interior,
+            # 2) boundary, 3) atmosphere. This has to be followed also when
+            # constructing g2m.
+            grid_emb = torch.cat(
+                (
+                    interior_emb,
+                    boundary_emb,
+                    atmosphere_emb,
+                ),
+                dim=1,
+            )
+            # (B, num_grid_nodes, d_h)
+
+        return grid_emb
+
     def embedd_current(
         self,
         prev_state,
         prev_prev_state,
         forcing,
+        boundary_forcing,
+        atmosphere_forcing,
         current_state,
     ):
         """
@@ -289,6 +362,8 @@ class GraphEFM(ARModel):
         prev_state: (B, num_grid_nodes, feature_dim), X_t
         prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1}
         forcing: (B, num_grid_nodes, forcing_dim)
+        boundary_forcing: (B, num_boundary_nodes, boundary_dim)
+        atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_dim)
         current_state: (B, num_grid_nodes, feature_dim), X_{t+1}
 
         Returns:
@@ -296,47 +371,72 @@ class GraphEFM(ARModel):
         """
         batch_size = prev_state.shape[0]
 
-        grid_current_features = torch.cat(
+        # Create full interior node features of shape
+        # (B, num_interior_nodes, interior_dim)
+        interior_features = torch.cat(
             (
-                prev_prev_state,
                 prev_state,
+                prev_prev_state,
                 forcing,
-                self.expand_to_batch(self.grid_static_features, batch_size),
+                self.expand_to_batch(self.interior_static_features, batch_size),
                 current_state,
             ),
             dim=-1,
-        )  # (B, num_grid_nodes, grid_current_dim)
+        )
 
-        return self.grid_current_embedder(
-            grid_current_features
-        )  # (B, num_grid_nodes, d_h)
+        # Embed all features
+        interior_emb = self.interior_current_embedder(
+            interior_features
+        )  # (B, num_interior_nodes, d_h)
 
-    def embedd_all(self, prev_state, prev_prev_state, forcing):
+        return self._add_optional_grid_embeddings(
+            interior_emb, boundary_forcing, atmosphere_forcing
+        )
+
+    def embedd_all(
+        self,
+        prev_state,
+        prev_prev_state,
+        forcing,
+        boundary_forcing,
+        atmosphere_forcing,
+    ):
         """
         embed all node and edge representations
 
         prev_state: (B, num_grid_nodes, feature_dim), X_t
         prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1}
         forcing: (B, num_grid_nodes, forcing_dim)
+        boundary_forcing: (B, num_boundary_nodes, boundary_dim)
+        atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_dim)
 
         Returns:
         grid_emb: (B, num_grid_nodes, d_h)
+        interior_emb: (B, num_interior_nodes, d_h)
         graph_embedding: dict with entries of shape (B, *, d_h)
         """
         batch_size = prev_state.shape[0]
 
-        grid_features = torch.cat(
+        # Create full interior node features of shape
+        # (B, num_interior_nodes, interior_dim)
+        interior_features = torch.cat(
             (
-                prev_prev_state,
                 prev_state,
+                prev_prev_state,
                 forcing,
-                self.expand_to_batch(self.grid_static_features, batch_size),
+                self.expand_to_batch(self.interior_static_features, batch_size),
             ),
             dim=-1,
-        )  # (B, num_grid_nodes, grid_dim)
+        )
 
-        grid_emb = self.grid_prev_embedder(grid_features)
-        # (B, num_grid_nodes, d_h)
+        # Embed all features
+        interior_emb = self.interior_embedder(
+            interior_features
+        )  # (B, num_interior_nodes, d_h)
+
+        full_grid_emb = self._add_optional_grid_embeddings(
+            interior_emb, boundary_forcing, atmosphere_forcing
+        )
 
         # Graph embedding
         graph_emb = {
@@ -388,33 +488,39 @@ class GraphEFM(ARModel):
                 self.m2m_embedder(self.m2m_features), batch_size
             )  # (B, M_m2m, d_h)
 
-        return grid_emb, graph_emb
+        return full_grid_emb, interior_emb, graph_emb
 
     def compute_step_loss(
         self,
         prev_states,
         current_state,
-        forcing_features,
+        step_forcing,
+        step_boundary_forcing,
+        step_atmosphere_forcing,
     ):
         """
         Perform forward pass and compute loss for one time step
 
         prev_states: (B, 2, num_grid_nodes, d_features), X^{t-p}, ..., X^{t-1}
         current_state: (B, num_grid_nodes, d_features) X^t
-        forcing_features: (B, num_grid_nodes, d_forcing) corresponding to
+        step_forcing: (B, num_grid_nodes, d_forcing) corresponding to
             index 1 of prev_states
+        step_boundary_forcing: (B, num_boundary_nodes, d_boundary)
+        step_atmosphere_forcing: (B, num_atmosphere_nodes, d_atmosphere)
         """
         # embed all features
+        # TODO embed boundary/atmosphere
         grid_prev_emb, graph_emb = self.embedd_all(
             prev_states[:, 1],
             prev_states[:, 0],
-            forcing_features,
+            step_forcing,
         )
         # embed also including current grid state, for encoder
+        # TODO embed boundary/atmosphere
         grid_current_emb = self.embedd_current(
             prev_states[:, 1],
             prev_states[:, 0],
-            forcing_features,
+            step_forcing,
             current_state,
         )  # (B, num_grid_nodes, d_h)
 
@@ -503,17 +609,28 @@ class GraphEFM(ARModel):
         forcing_features: (B, pred_steps, num_grid_nodes, d_forcing), where
             index 0 corresponds to index 1 of init_states
         """
-        init_states, target_states, forcing_features, _ = batch
+        (
+            init_states,
+            target_states,
+            forcing,
+            boundary_forcing,
+            atmosphere_forcing,
+            _,
+        ) = batch
 
         prev_prev_state = init_states[:, 0]  # (B, num_grid_nodes, d_state)
         prev_state = init_states[:, 1]  # (B, num_grid_nodes, d_state)
-        pred_steps = forcing_features.shape[1]
+        pred_steps = forcing.shape[1]
 
         loss_like_list = []
         loss_kl_list = []
 
         for i in range(pred_steps):
-            forcing = forcing_features[:, i]  # (B, num_grid_nodes, d_forcing)
+            step_forcing = forcing[:, i]  # (B, num_grid_nodes, d_forcing)
+            step_boundary_forcing = boundary_forcing[:, i]
+            # (B, num_boundary_nodes, d_boundary)
+            step_atmosphere_forcing = atmosphere_forcing[:, i]
+            # (B, num_atmosphere_nodes, d_atmosphere)
             target_state = target_states[:, i]  # (B, num_grid_nodes, d_state)
 
             prev_states_stacked = torch.stack(
@@ -527,7 +644,9 @@ class GraphEFM(ARModel):
             ) = self.compute_step_loss(
                 prev_states_stacked,
                 target_state,
-                forcing,
+                step_forcing,
+                step_boundary_forcing,
+                step_atmosphere_forcing,
             )
             # (B,), (B,), (B, num_grid_nodes, d_state),
             # pred_std is (B, num_grid_nodes, d_state) or (d_state)
@@ -577,7 +696,7 @@ class GraphEFM(ARModel):
             # Sample trajectories using prior
             pred_traj_means, pred_traj_stds = self.sample_trajectories(
                 init_states,
-                forcing_features,
+                forcing,
                 target_states,
                 2,
             )
@@ -614,6 +733,7 @@ class GraphEFM(ARModel):
         new_state: (B, num_grid_nodes, feature_dim)
         """
         # embed all features
+        # TODO embed boundary/atmosphere
         grid_prev_emb, graph_emb = self.embedd_all(
             prev_state, prev_prev_state, forcing
         )
@@ -703,11 +823,13 @@ class GraphEFM(ARModel):
             current_state = true_states[:, i]
 
             # embed all features
+            # TODO embed boundary/atmosphere
             grid_prev_emb, graph_emb = self.embedd_all(
                 prev_state, prev_prev_state, forcing
             )
 
             # embed also including current grid state, for encoder
+            # TODO embed boundary/atmosphere
             grid_current_emb = self.embedd_current(
                 prev_state,
                 prev_prev_state,
@@ -1118,12 +1240,14 @@ class GraphEFM(ARModel):
 
             # Sample latent variable and plot
             # embed all features
+            # TODO embed boundary/atmosphere
             grid_prev_emb, graph_emb = self.embedd_all(
                 init_states[:, 1],
                 init_states[:, 0],
                 forcing_features[:, 0],
             )  # (B, num_grid_nodes, d_h)
             # embed also including current grid state, for encoder
+            # TODO embed boundary/atmosphere
             grid_current_emb = self.embedd_current(
                 init_states[:, 1],
                 init_states[:, 0],

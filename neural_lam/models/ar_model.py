@@ -122,7 +122,7 @@ class ARModel(pl.LightningModule):
         ) = self.grid_static_features.shape
         self.num_total_grid_nodes = self.num_grid_nodes
 
-        self.grid_input_dim = (
+        self.interior_input_dim = (
             2 * num_state_vars
             + grid_static_dim
             + num_forcing_vars
@@ -134,9 +134,14 @@ class ARModel(pl.LightningModule):
 
         if self.boundary_forced:
             # Load static features for boundary
+            surface_mask_boundary = datastore_boundary.get_mask(
+                surface=True, stacked=True, invert=False
+            )
             da_boundary_static_features = datastore_boundary.get_dataarray(
                 category="static", split=None, standardize=True
-            )
+            )[
+                surface_mask_boundary
+            ]  # mask static features
             self.register_buffer(
                 "boundary_static_features",
                 torch.tensor(

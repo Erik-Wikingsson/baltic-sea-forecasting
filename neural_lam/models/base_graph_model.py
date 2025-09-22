@@ -62,9 +62,17 @@ class BaseGraphModel(ARModel):
         # Define sub-models
         # Feature embedders for grid
         self.mlp_blueprint_end = [args.hidden_dim] * (args.hidden_layers + 1)
-        self.grid_embedder = utils.make_mlp(
-            [self.grid_input_dim] + self.mlp_blueprint_end
+        self.interior_embedder = utils.make_mlp(
+            [self.interior_input_dim] + self.mlp_blueprint_end
         )
+        if self.boundary_forced:
+            self.boundary_embedder = utils.make_mlp(
+                [self.boundary_dim] + self.mlp_blueprint_end
+            )
+        if self.atmosphere_forced:
+            self.atmosphere_embedder = utils.make_mlp(
+                [self.atmosphere_dim] + self.mlp_blueprint_end
+            )
         self.g2m_embedder = utils.make_mlp([g2m_dim] + self.mlp_blueprint_end)
         self.m2g_embedder = utils.make_mlp([m2g_dim] + self.mlp_blueprint_end)
 
@@ -324,8 +332,8 @@ class BaseGraphModel(ARModel):
         """
         batch_size = prev_state.shape[0]
 
-        # Create full grid node features of shape (B, num_grid_nodes, grid_dim)
-        grid_features = torch.cat(
+        # Create full interior grid input features
+        interior_features = torch.cat(
             (
                 prev_state,
                 prev_prev_state,
@@ -333,13 +341,64 @@ class BaseGraphModel(ARModel):
                 self.expand_to_batch(self.grid_static_features, batch_size),
             ),
             dim=-1,
-        )
+        )  # (B, num_interior_nodes, interior_input_dim)
 
         # Embed all features
-        grid_emb = self.grid_embedder(grid_features)  # (B, num_grid_nodes, d_h)
+        interior_emb = self.interior_embedder(
+            interior_features
+        )  # (B, num_interior_nodes, d_h)
         g2m_emb = self.g2m_embedder(self.g2m_features)  # (M_g2m, d_h)
         m2g_emb = self.m2g_embedder(self.m2g_features)  # (M_m2g, d_h)
         mesh_emb = self.embedd_mesh_nodes()
+        grid_emb_list = [interior_emb]
+
+        if self.boundary_forced:
+            boundary_features = torch.cat(
+                (
+                    boundary_forcing,
+                    self.expand_to_batch(
+                        self.boundary_static_features, batch_size
+                    ),
+                ),
+                dim=-1,
+            )  # (B, num_boundary_nodes, interior_input_dim)
+            boundary_emb = self.boundary_embedder(
+                boundary_features
+            )  # (B, num_boundary_nodes, d_h)
+            grid_emb_list.append(boundary_emb)
+
+        if self.atmosphere_forced:
+            atmosphere_features = torch.cat(
+                (
+                    atmosphere_forcing,
+                    self.expand_to_batch(
+                        self.atmosphere_static_features, batch_size
+                    ),
+                ),
+                dim=-1,
+            )  # (B, num_atmosphere_nodes, interior_input_dim)
+
+            atmosphere_emb = self.atmosphere_embedder(
+                atmosphere_features
+            )  # (B, num_atmosphere_nodes, d_h)
+            grid_emb_list.append(atmosphere_emb)
+
+        if len(grid_emb_list) == 1:
+            # Only interior
+            grid_emb = grid_emb_list[0]
+        else:
+            # NOTE: We here assume the order of grid node index is 1) interior,
+            # 2) boundary, 3) atmosphere. This has to be followed also when
+            # constructing g2m.
+            grid_emb = torch.cat(
+                (
+                    interior_emb,
+                    boundary_emb,
+                    atmosphere_emb,
+                ),
+                dim=1,
+            )
+            # (B, num_grid_nodes, d_h)
 
         # Map from grid to mesh
         mesh_emb_expanded = self.expand_to_batch(
@@ -352,9 +411,9 @@ class BaseGraphModel(ARModel):
             grid_emb, mesh_emb_expanded, g2m_emb_expanded
         )  # (B, num_mesh_nodes, d_h)
         # Also MLP with residual for grid representation
-        grid_rep = grid_emb + self.encoding_grid_mlp(
-            grid_emb
-        )  # (B, num_grid_nodes, d_h)
+        grid_rep = interior_emb + self.encoding_grid_mlp(
+            interior_emb
+        )  # (B, num_interior_nodes, d_h)
 
         # Run processor step
         mesh_rep = self.process_step(mesh_rep)
@@ -363,12 +422,12 @@ class BaseGraphModel(ARModel):
         m2g_emb_expanded = self.expand_to_batch(m2g_emb, batch_size)
         grid_rep = self.m2g_gnn(
             mesh_rep, grid_rep, m2g_emb_expanded
-        )  # (B, num_grid_nodes, d_h)
+        )  # (B, num_interior_nodes, d_h)
 
         # Map to output dimension, only for grid
         net_output = self.output_map(
             grid_rep
-        )  # (B, num_grid_nodes, d_grid_out)
+        )  # (B, num_interior_nodes, d_grid_out)
 
         if self.output_std:
             pred_delta_mean, pred_std_raw = net_output.chunk(

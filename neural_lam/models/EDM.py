@@ -78,8 +78,7 @@ class EDM(ARModel):
         sigma = sigma.reshape(-1, 1, 1)
 
         c_skip = self.sigma_data**2 / (sigma**2 + self.sigma_data**2)
-        c_out = sigma * self.sigma_data / \
-            (sigma**2 + self.sigma_data**2).sqrt()
+        c_out = sigma * self.sigma_data / (sigma**2 + self.sigma_data**2).sqrt()
         c_in = 1 / (self.sigma_data**2 + sigma**2).sqrt()
         c_noise = sigma.log() / 4
 
@@ -155,8 +154,7 @@ class EDM(ARModel):
         for i in range(pred_steps):
             forcing = forcing_features[:, i]
             true_state = true_states[:, i]
-            pred_state = self.predict_step(
-                prev_state, prev_prev_state, forcing)
+            pred_state = self.predict_step(prev_state, prev_prev_state, forcing)
 
             # Overwrite border with true state
             pred_state = (
@@ -596,8 +594,7 @@ class EDM(ARModel):
                         )  # (num_grid_nodes,)
 
                         # Concatenate along ens member dim for stats compute
-                        pred_states_cat = xr.concat(
-                            pred_states, dim="ensemble")
+                        pred_states_cat = xr.concat(pred_states, dim="ensemble")
 
                         plot_title = (
                             f"{var_name} ({var_unit}), t={step} "

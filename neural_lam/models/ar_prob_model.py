@@ -34,12 +34,14 @@ class ARProbModel(ARModel):
         config: NeuralLAMConfig,
         datastore: BaseDatastore,
         datastore_boundary: Union[BaseDatastore, None],
+        datastore_atmosphere: Union[BaseDatastore, None],
     ):
         super().__init__(
             args,
             config=config,
             datastore=datastore,
             datastore_boundary=datastore_boundary,
+            datastore_atmosphere=datastore_atmosphere,
         )
 
         self.ensemble_size = args.ensemble_size
@@ -60,176 +62,19 @@ class ARProbModel(ARModel):
             }
         )
 
-    # Training
-    def predict_step_train(
-        self,
-        prev_state,
-        prev_prev_state,
-        forcing,
-        boundary_forcing,
-        target_state,
-    ):
-        """
-        This method is used during training to predict the next state
-        and compute the loss.
-        Step state one step ahead using prediction model, X_{t-1}, X_t -> X_t+1
-
-        Inputs:
-        prev_state: (B, num_interior_nodes, feature_dim), X_t
-        prev_prev_state: (B, num_interior_nodes, feature_dim), X_{t-1}
-        forcing: (B, num_interior_nodes, forcing_dim)
-        boundary_forcing: (B, num_boundary_nodes, boundary_forcing_dim)
-
-        Returns:
-        pred_state: (B, num_interior_nodes, feature_dim)
-        pred_std: (B, num_interior_nodes, feature_dim) or None
-        loss: (B)
-        """
-        raise NotImplementedError("No prediction step implemented for training")
-
-    def unroll_prediction_train(
-        self, init_states, forcing, boundary_forcing, target_states
-    ):
-        """
-        Roll out prediction taking multiple autoregressive steps with model
-        init_states: (B, 2, num_interior_nodes, d_f)
-        forcing: (B, pred_steps, num_interior_nodes, d_static_f)
-        boundary_forcing: (B, pred_steps, num_boundary_nodes, d_boundary_f)
-
-        Returns:
-        prediction: (B, pred_steps, num_interior_nodes, d_f)
-        pred_std: (B, pred_steps, num_interior_nodes, d_f) or (d_f,)
-        loss: (B, pred_steps)
-        """
-        prev_prev_state = init_states[:, 0]
-        prev_state = init_states[:, 1]
-        prediction_list = []
-        pred_std_list = []
-        loss_list = []
-        pred_steps = forcing.shape[1]
-
-        for i in range(pred_steps):
-            forcing_step = forcing[:, i]
-
-            if self.boundary_forced:
-                boundary_forcing_step = boundary_forcing[:, i]
-            else:
-                boundary_forcing_step = None
-
-            target_state_step = target_states[:, i]
-
-            pred_state, pred_std, loss = self.unroll_ckpt_func(
-                self.predict_step_train,
-                prev_state,
-                prev_prev_state,
-                forcing_step,
-                boundary_forcing_step,
-                target_state_step,
-            )
-            # state: (B, num_interior_nodes, d_f)
-            # pred_std: (B, num_interior_nodes, d_f) or None
-
-            prediction_list.append(pred_state)
-
-            if self.output_std:
-                pred_std_list.append(pred_std)
-
-            loss_list.append(loss)
-
-            # Update conditioning states
-            prev_prev_state = prev_state
-            prev_state = pred_state
-
-        prediction = torch.stack(
-            prediction_list, dim=1
-        )  # (B, pred_steps, num_interior_nodes, d_f)
-        if self.output_std:
-            pred_std = torch.stack(
-                pred_std_list, dim=1
-            )  # (B, pred_steps, num_interior_nodes, d_f)
-        else:
-            pred_std = self.per_var_std  # (d_f,)
-
-        loss = torch.stack(
-            loss_list, dim=1
-        )  # (B, pred_steps, num_interior_nodes, d_f)
-
-        return prediction, pred_std, loss
-
-    def training_step(self, batch):
-        """
-        Train on single batch
-        batch consists of:
-        init_states: (B, 2, num_interior_nodes, d_features)
-        target_states: (B, pred_steps, num_interior_nodes, d_features)
-        forcing: (B, pred_steps, num_interior_nodes, d_forcing),
-        boundary_forcing:
-            (B, pred_steps, num_boundary_nodes, d_boundary_forcing),
-            where index 0 corresponds to index 1 of init_states
-        """
-        (
-            init_states,
-            target_states,
-            forcing,
-            boundary_forcing,
-            _,
-        ) = batch
-
-        _, _, loss = self.unroll_prediction_train(
-            init_states, forcing, boundary_forcing, target_states
-        )
-        # prediction: (B, pred_steps, num_interior_nodes, d_f)
-        # pred_std: (B, pred_steps, num_interior_nodes, d_f) or (d_f,)
-        # loss: (B, pred_steps)
-
-        # Compute loss - mean over unrolled times and batch
-        batch_loss = torch.mean(loss)
-
-        log_dict = {"train_loss": batch_loss}
-        self.log_dict(
-            log_dict,
-            prog_bar=True,
-            on_step=True,
-            on_epoch=True,
-            sync_dist=True,
-            batch_size=batch[0].shape[0],
-        )
-        return batch_loss
-
-    # Evaluation
-    def predict_step(
-        self, prev_state, prev_prev_state, forcing, boundary_forcing
-    ):
-        """
-        This method is used during inference to sample a
-        prediction of the next state.
-        Step state one step ahead using prediction model, X_{t-1}, X_t -> X_t+1
-
-        Inputs:
-        prev_state: (B, num_interior_nodes, feature_dim), X_t
-        prev_prev_state: (B, num_interior_nodes, feature_dim), X_{t-1}
-        forcing: (B, num_interior_nodes, forcing_dim)
-        boundary_forcing: (B, num_boundary_nodes, boundary_forcing_dim)
-
-        Returns:
-        pred_state: (B, num_interior_nodes, feature_dim)
-        pred_std: (B, num_interior_nodes, feature_dim) or None
-        """
-        raise NotImplementedError(
-            "No prediction step implemented for inference"
-        )
-
     def sample_trajectories(
         self,
         init_states: torch.Tensor,
         forcing: torch.Tensor,
         boundary_forcing: torch.Tensor,
+        atmosphere_forcing: torch.Tensor,
     ):
         """
         Sample trajectories from the model.
         init_states: (B, 2, num_interior_nodes, d_f)
         forcing: (B, num_interior_nodes, d_static_f)
         boundary_forcing: (B, num_boundary_nodes, d_boundary_f)
+        atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
 
         Returns:
         sampled_trajectories: (num_traj, B, pred_steps, num_interior_nodes, d_f)
@@ -240,6 +85,7 @@ class ARProbModel(ARModel):
                 init_states,
                 forcing,
                 boundary_forcing,
+                atmosphere_forcing,
             )
             for _ in range(self.ensemble_size)
         ]
@@ -249,62 +95,6 @@ class ARProbModel(ARModel):
         )
 
         return traj_tensor
-
-    def ensemble_step(self, batch):
-        """
-        Perform ensemble forecast and compute basic metrics.
-        Common step done during both evaluation and testing
-
-        batch: tuple of tensors, batch to perform ensemble forecast on
-
-        Returns:
-        trajectories: (B, S, pred_steps, num_grid_nodes, d_f)
-        traj_stds: (B, S, pred_steps, num_grid_nodes, d_f)
-        target_states: (B, pred_steps, num_grid_nodes, d_f)
-        spread_squared_batch: (B, pred_steps, d_f)
-        ens_mse_batch: (B, pred_steps, d_f)
-        """
-        # Compute and store metrics for ensemble forecast
-        (
-            init_states,
-            target_states,
-            forcing,
-            boundary_forcing,
-            _,
-        ) = batch
-
-        trajectories = self.sample_trajectories(
-            init_states,
-            forcing,
-            boundary_forcing,
-        )
-        # (B, S, pred_steps, num_grid_nodes, d_f)
-
-        spread_squared_batch = metrics.spread_squared(
-            trajectories,
-            target_states,
-            None,
-            sum_vars=False,
-        )
-        # (B, pred_steps, d_f)
-
-        ens_mean = torch.mean(
-            trajectories, dim=1
-        )  # (B, pred_steps, num_grid_nodes, d_f)
-
-        ens_mse_batch = metrics.mse(
-            ens_mean,
-            target_states,
-            None,
-            sum_vars=False,
-        )  # (B, pred_steps, d_f)
-
-        return (
-            trajectories,
-            target_states,
-            spread_squared_batch,
-            ens_mse_batch,
-        )
 
     # newer lightning versions requires batch_idx argument, even if unused
     # pylint: disable-next=unused-argument
@@ -497,6 +287,7 @@ class ARProbModel(ARModel):
             target_states,
             forcing,
             boundary_forcing,
+            atmosphere_forcing,
             time,
         ) = batch
 
@@ -505,6 +296,7 @@ class ARProbModel(ARModel):
                 init_states,
                 forcing,
                 boundary_forcing,
+                atmosphere_forcing,
             )
             # (B, S, pred_steps, num_grid_nodes, d_f)
         else:

@@ -31,12 +31,14 @@ class GraphEFM(ARProbModel):
         config: NeuralLAMConfig,
         datastore: BaseDatastore,
         datastore_boundary: Union[BaseDatastore, None],
+        datastore_atmosphere: Union[BaseDatastore, None],
     ):
         super().__init__(
             args,
             config=config,
             datastore=datastore,
             datastore_boundary=datastore_boundary,
+            datastore_atmosphere=datastore_atmosphere,
         )
 
         assert (
@@ -111,21 +113,15 @@ class GraphEFM(ARProbModel):
             + self.grid_mlp_blueprint_end
         )
 
+        # Define embedder for boundary and atmosphere nodes
         if self.boundary_forced:
-            # Define embedder for boundary nodes
-            # Optional separate embedder for boundary nodes
-            if args.shared_grid_embedder:
-                assert self.interior_dim == self.boundary_dim, (
-                    "Grid and boundary input dimension must "
-                    "be the same when using "
-                    f"the same embedder, got interior_dim={self.interior_dim}, "
-                    f"boundary_dim={self.boundary_dim}"
-                )
-                self.boundary_embedder = self.interior_embedder
-            else:
-                self.boundary_embedder = utils.make_mlp(
-                    [self.boundary_dim] + self.grid_mlp_blueprint_end,
-                )
+            self.boundary_embedder = utils.make_mlp(
+                [self.boundary_dim] + self.grid_mlp_blueprint_end,
+            )
+        if self.atmosphere_forced:
+            self.boundary_embedder = utils.make_mlp(
+                [self.atmosphere_dim] + self.grid_mlp_blueprint_end,
+            )
 
         # Embedders for mesh
         self.g2m_embedder = utils.make_mlp(
@@ -550,6 +546,7 @@ class GraphEFM(ARProbModel):
         current_state,
         forcing_features,
         boundary_forcing,
+        atmosphere_forcing,
     ):
         """
         Perform forward pass and compute loss for one time step
@@ -558,6 +555,8 @@ class GraphEFM(ARProbModel):
         current_state: (B, num_grid_nodes, d_features) X^t
         forcing_features: (B, num_grid_nodes, d_forcing) corresponding to
             index 1 of prev_states
+        boundary_forcing: (B, num_boundary_nodes, d_boundary)
+        atmosphere_forcing: (B, num_atmosphere_nodes, d_atmosphere)
         """
         # embed all features
         grid_prev_emb, grid_prev_interior_emb, graph_emb = self.embedd_all(
@@ -565,6 +564,7 @@ class GraphEFM(ARProbModel):
             prev_states[:, 0],
             forcing_features,
             boundary_forcing,
+            atmosphere_forcing,
         )
         # embed also including current grid state, for encoder
         grid_current_emb = self.embedd_current(
@@ -572,6 +572,7 @@ class GraphEFM(ARProbModel):
             prev_states[:, 0],
             forcing_features,
             boundary_forcing,
+            atmosphere_forcing,
             current_state,
         )  # (B, num_grid_nodes, d_h)
 
@@ -680,6 +681,7 @@ class GraphEFM(ARProbModel):
             target_states,
             forcing,
             boundary_forcing,
+            atmosphere_forcing,
             _,
         ) = batch
 
@@ -707,6 +709,7 @@ class GraphEFM(ARProbModel):
                 target_state,
                 forcing[:, i],
                 boundary_forcing[:, i],
+                atmosphere_forcing[:, i],
             )
             # (B,), (B,), (B, num_grid_nodes, d_state),
             # pred_std is (B, num_grid_nodes, d_state) or (d_state)
@@ -752,6 +755,7 @@ class GraphEFM(ARProbModel):
                 init_states,
                 forcing,
                 boundary_forcing,
+                atmosphere_forcing,
                 target_states,
                 2,
             )
@@ -777,7 +781,12 @@ class GraphEFM(ARProbModel):
         return loss
 
     def predict_step(
-        self, prev_state, prev_prev_state, forcing, boundary_forcing
+        self,
+        prev_state,
+        prev_prev_state,
+        forcing,
+        boundary_forcing,
+        atmosphere_forcing,
     ):
         """
         Step state one step ahead using prediction model, X_{t-1}, X_t -> X_t+1
@@ -785,6 +794,7 @@ class GraphEFM(ARProbModel):
         prev_prev_state: (B, num_interior_nodes, feature_dim), X_{t-1}
         forcing: (B, num_interior_nodes, forcing_dim)
         boundary_forcing: (B, num_boundary_nodes, boundary_forcing_dim)
+        atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
         """
 
         # embed all features
@@ -793,6 +803,7 @@ class GraphEFM(ARProbModel):
             prev_prev_state,
             forcing,
             boundary_forcing,
+            atmosphere_forcing,
         )
 
         # Compute prior
@@ -823,6 +834,7 @@ class GraphEFM(ARProbModel):
         init_states,
         forcing_features,
         boundary_forcing,
+        atmosphere_forcing,
         true_states,
         num_traj,
         use_encoder=False,
@@ -831,6 +843,7 @@ class GraphEFM(ARProbModel):
         init_states: (B, 2, num_grid_nodes, d_f)
         forcing_features: (B, pred_steps, num_grid_nodes, d_forcing)
         boundary_forcing: (B, pred_steps, num_boundary_nodes, d_boundary)
+        atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
         true_states: (B, pred_steps, num_grid_nodes, d_f)
         num_traj: S, number of trajectories to sample
         use_encoder: bool, if latent variables should be sampled from
@@ -847,6 +860,7 @@ class GraphEFM(ARProbModel):
                     init_states,
                     forcing_features,
                     boundary_forcing,
+                    atmosphere_forcing,
                     true_states,
                 )
                 for _ in range(num_traj)
@@ -857,6 +871,7 @@ class GraphEFM(ARProbModel):
                     init_states,
                     forcing_features,
                     boundary_forcing,
+                    atmosphere_forcing,
                 )
                 for _ in range(num_traj)
             ]
@@ -877,7 +892,12 @@ class GraphEFM(ARProbModel):
         return traj_means, traj_stds
 
     def unroll_prediction_vi(
-        self, init_states, forcing, boundary_forcing, true_states
+        self,
+        init_states,
+        forcing,
+        boundary_forcing,
+        atmosphere_forcing,
+        true_states,
     ):
         """
         Roll out prediction, sampling latent var. from variational
@@ -886,6 +906,7 @@ class GraphEFM(ARProbModel):
         init_states: (B, 2, num_grid_nodes, d_f)
         forcing: (B, pred_steps, num_grid_nodes, d_forcing)
         boundary_forcing: (B, pred_steps, num_boundary_nodes, d_boundary)
+        atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
         true_states: (B, pred_steps, num_grid_nodes, d_f)
         """
         prev_prev_state = init_states[:, 0]
@@ -898,6 +919,7 @@ class GraphEFM(ARProbModel):
             # Compute 1-step prediction, but using encoder
             step_forcing = forcing[:, i]
             step_boundary_forcing = boundary_forcing[:, i]
+            step_atmosphere_forcing = atmosphere_forcing[:, i]
             current_state = true_states[:, i]
 
             # embed all features
@@ -906,6 +928,7 @@ class GraphEFM(ARProbModel):
                 prev_prev_state,
                 step_forcing,
                 step_boundary_forcing,
+                step_atmosphere_forcing,
             )
 
             # embed also including current grid state, for encoder
@@ -914,6 +937,7 @@ class GraphEFM(ARProbModel):
                 prev_prev_state,
                 step_forcing,
                 step_boundary_forcing,
+                step_atmosphere_forcing,
                 current_state,
             )
 
@@ -978,13 +1002,15 @@ class GraphEFM(ARProbModel):
             target_states,
             forcing,
             boundary_forcing,
+            atmosphere_forcing,
             _,
         ) = batch
 
-        trajectories, traj_stds = self.sample_trajectories(
+        trajectories, _ = self.sample_trajectories(
             init_states,
             forcing,
             boundary_forcing,
+            atmosphere_forcing,
             target_states,
             self.ensemble_size,
         )
@@ -993,7 +1019,6 @@ class GraphEFM(ARProbModel):
         spread_squared_batch = metrics.spread_squared(
             trajectories,
             target_states,
-            traj_stds,
             None,
             mask=self.interior_mask_bool,
             sum_vars=False,
@@ -1047,6 +1072,7 @@ class GraphEFM(ARProbModel):
                 target_states,
                 forcing_features,
                 boundary_forcing,
+                atmosphere_forcing,
                 _,
             ) = batch
 
@@ -1055,6 +1081,7 @@ class GraphEFM(ARProbModel):
                 init_states,
                 forcing_features,
                 boundary_forcing,
+                atmosphere_forcing,
                 target_states,
                 self.ensemble_size,
                 use_encoder=True,
@@ -1105,6 +1132,7 @@ class GraphEFM(ARProbModel):
                 init_states[:, 0],
                 forcing_features[:, 0],
                 boundary_forcing[:, 0],
+                atmosphere_forcing[:, 0],
             )  # (B, num_grid_nodes, d_h)
             # embed also including current grid state, for encoder
             grid_current_emb = self.embedd_current(
@@ -1112,6 +1140,7 @@ class GraphEFM(ARProbModel):
                 init_states[:, 0],
                 forcing_features[:, 0],
                 boundary_forcing[:, 0],
+                atmosphere_forcing[:, 0],
                 target_states[:, 0],
             )  # (B, num_grid_nodes, d_h)
 

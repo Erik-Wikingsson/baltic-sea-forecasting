@@ -1,23 +1,26 @@
+# Standard library
+from typing import Union
+
 # Third-party
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn as nn
 import wandb
-import xarray as xr
+
+# First-party
+from neural_lam import metrics, utils, vis
 
 # Local
-from .. import metrics, utils, vis
 from ..config import NeuralLAMConfig
 from ..datastore import BaseDatastore
-from .ar_model import ARModel
+from .ar_prob_model import ARProbModel
 from .constant_latent_encoder import ConstantLatentEncoder
-from .graph_latent_decoder import GraphLatentDecoder
-from .graph_latent_encoder import GraphLatentEncoder
 from .hi_graph_latent_decoder import HiGraphLatentDecoder
 from .hi_graph_latent_encoder import HiGraphLatentEncoder
 
 
-class GraphEFM(ARModel):
+class GraphEFM(ARProbModel):
     """
     Graph-based Ensemble Forecasting Model
     """
@@ -27,59 +30,117 @@ class GraphEFM(ARModel):
         args,
         config: NeuralLAMConfig,
         datastore: BaseDatastore,
+        datastore_boundary: Union[BaseDatastore, None],
     ):
-        super().__init__(args, config, datastore)
+        super().__init__(
+            args,
+            config=config,
+            datastore=datastore,
+            datastore_boundary=datastore_boundary,
+        )
 
         assert (
             args.n_example_pred <= args.batch_size
         ), "Can not plot more examples than batch size in GraphEFM"
         self.sample_obs_noise = bool(args.sample_obs_noise)
         self.ensemble_size = args.ensemble_size
-        self.num_latents_plot = args.num_latents_plot
-        self.var_leads_val_plot = args.var_leads_val_plot
         self.kl_beta = args.kl_beta
         self.crps_weight = args.crps_weight
+        self.latent_samples_plot = args.latent_samples_plot
 
         # Load graph with static features
-        graph_dir_path = datastore.root_path / "graph" / args.graph
+        graph_dir_path = datastore.root_path / "graph" / args.graph_name
         self.hierarchical_graph, graph_ldict = utils.load_graph(
             graph_dir_path=graph_dir_path
         )
-
         for name, attr_value in graph_ldict.items():
+            # NOTE: It would be good to rescale mesh node position features in
+            # exactly the same way as grid node position static features.
+            if name == "mesh_static_features":
+                max_coord = datastore.get_xy("state").max()
+                # Rescale by dividing by maximum coordinate in interior
+                attr_value /= max_coord
+
             # Make BufferLists module members and register tensors as buffers
             if isinstance(attr_value, torch.Tensor):
                 self.register_buffer(name, attr_value, persistent=False)
             else:
                 setattr(self, name, attr_value)
 
-        # Specify dimensions of data
-        # grid_dim from data + static
-        grid_state_dim = self._datastore.get_num_data_vars("state")
-        grid_current_dim = self.interior_input_dim + grid_state_dim
-        g2m_dim = self.g2m_features.shape[1]
-        m2g_dim = self.m2g_features.shape[1]
+        # Determine grid hidden dim
+        if args.hidden_dim_grid is None:
+            # Same as hidden_dim
+            hidden_dim_grid = args.hidden_dim
+        else:
+            hidden_dim_grid = args.hidden_dim_grid
+
+        print(
+            f"Using hidden_dim_grid={hidden_dim_grid}, "
+            f"hidden_dim={args.hidden_dim}"
+        )
+
+        # interior_dim from data + static
+        self.g2m_edges, g2m_dim = self.g2m_features.shape
+        self.m2g_edges, m2g_dim = self.m2g_features.shape
+
+        # g2m_dim.shape: 3, m2g_dim.shape: 3
+        print(f"g2m_dim.shape: {g2m_dim}, m2g_dim.shape: {m2g_dim}")
 
         # Define sub-models
         # Feature embedders for grid
         self.mlp_blueprint_end = [args.hidden_dim] * (args.hidden_layers + 1)
+        # For grid hidden dim
+        self.grid_mlp_blueprint_end = [hidden_dim_grid] * (
+            args.hidden_layers + 1
+        )
 
-        self.grid_prev_embedder = utils.make_mlp(
-            [self.interior_input_dim] + self.mlp_blueprint_end
-        )  # For states up to t-1
-        self.grid_current_embedder = utils.make_mlp(
-            [grid_current_dim] + self.mlp_blueprint_end
-        )  # For states including t
+        print(
+            "GraphEFM, "
+            f"self.interior_dim={self.interior_dim}, "
+            f"self.boundary_dim={self.boundary_dim}, "
+        )
+
+        # Feature embedders for interior
+        self.interior_embedder = utils.make_mlp(
+            [self.interior_dim] + self.grid_mlp_blueprint_end
+        )
+
+        # We encode the current state as well, so we need to add more channels
+        self.interior_current_embedder = utils.make_mlp(
+            [self.interior_dim + self.grid_output_dim]
+            + self.grid_mlp_blueprint_end
+        )
+
+        if self.boundary_forced:
+            # Define embedder for boundary nodes
+            # Optional separate embedder for boundary nodes
+            if args.shared_grid_embedder:
+                assert self.interior_dim == self.boundary_dim, (
+                    "Grid and boundary input dimension must "
+                    "be the same when using "
+                    f"the same embedder, got interior_dim={self.interior_dim}, "
+                    f"boundary_dim={self.boundary_dim}"
+                )
+                self.boundary_embedder = self.interior_embedder
+            else:
+                self.boundary_embedder = utils.make_mlp(
+                    [self.boundary_dim] + self.grid_mlp_blueprint_end,
+                )
+
         # Embedders for mesh
-        self.g2m_embedder = utils.make_mlp([g2m_dim] + self.mlp_blueprint_end)
-        self.m2g_embedder = utils.make_mlp([m2g_dim] + self.mlp_blueprint_end)
+        self.g2m_embedder = utils.make_mlp(
+            [g2m_dim] + self.grid_mlp_blueprint_end
+        )
+        self.m2g_embedder = utils.make_mlp(
+            [m2g_dim] + self.grid_mlp_blueprint_end
+        )
+
         if self.hierarchical_graph:
             # Print some useful info
             print("Loaded hierarchical graph with structure:")
             level_mesh_sizes = [
                 mesh_feat.shape[0] for mesh_feat in self.mesh_static_features
             ]
-            self.num_mesh_nodes = level_mesh_sizes[-1]
             num_levels = len(self.mesh_static_features)
             for level_index, level_mesh_size in enumerate(level_mesh_sizes):
                 same_level_edges = self.m2m_features[level_index].shape[0]
@@ -93,6 +154,7 @@ class GraphEFM(ARModel):
                     down_edges = self.mesh_down_features[level_index].shape[0]
                     print(f"  {level_index}<->{level_index+1}")
                     print(f" - {up_edges} up edges, {down_edges} down edges")
+
             # Embedders
             # Assume all levels have same static feature dimensionality
             mesh_dim = self.mesh_static_features[0].shape[1]
@@ -101,24 +163,27 @@ class GraphEFM(ARModel):
             mesh_down_dim = self.mesh_down_features[0].shape[1]
 
             # Separate mesh node embedders for each level
-            self.mesh_embedders = torch.nn.ModuleList(
-                [
+            self.mesh_embedders = nn.ModuleList(
+                # Bottom mesh level is first embedded to hidden dim of grid
+                [utils.make_mlp([mesh_dim] + self.grid_mlp_blueprint_end)]
+                + [
                     utils.make_mlp([mesh_dim] + self.mlp_blueprint_end)
-                    for _ in range(num_levels)
+                    for _ in range(num_levels - 1)
                 ]
             )
-            self.mesh_up_embedders = torch.nn.ModuleList(
+            self.mesh_up_embedders = nn.ModuleList(
                 [
                     utils.make_mlp([mesh_up_dim] + self.mlp_blueprint_end)
                     for _ in range(num_levels - 1)
                 ]
             )
-            self.mesh_down_embedders = torch.nn.ModuleList(
+            self.mesh_down_embedders = nn.ModuleList(
                 [
                     utils.make_mlp([mesh_down_dim] + self.mlp_blueprint_end)
                     for _ in range(num_levels - 1)
                 ]
             )
+
             # If not using any processor layers, no need to embed m2m
             self.embedd_m2m = (
                 max(
@@ -136,27 +201,28 @@ class GraphEFM(ARModel):
                     ]
                 )
         else:
-            (
-                self.num_mesh_nodes,
-                mesh_static_dim,
-            ) = self.mesh_static_features.shape
-            print(
-                f"Loaded graph with {self.num_grid_nodes + self.num_mesh_nodes}"
-                f"nodes ({self.num_grid_nodes} grid, "
-                f"{self.num_mesh_nodes} mesh)"
-            )
-            mesh_static_dim = self.mesh_static_features.shape[1]
-            self.mesh_embedder = utils.make_mlp(
-                [mesh_static_dim] + self.mlp_blueprint_end
-            )
-            m2m_dim = self.m2m_features.shape[1]
-            self.m2m_embedder = utils.make_mlp(
-                [m2m_dim] + self.mlp_blueprint_end
+            raise NotImplementedError(
+                "GraphEFM currently only supports hierarchical graphs"
             )
 
         latent_dim = (
             args.latent_dim if args.latent_dim is not None else args.hidden_dim
         )
+
+        # Specify dimensions of data
+        print(
+            "Loaded graph with "
+            f"{self.num_total_grid_nodes + self.num_mesh_nodes} "
+            f"nodes ({self.num_total_grid_nodes} grid, "
+            f"{self.num_mesh_nodes} mesh)"
+        )
+
+        (
+            self.num_interior_nodes,
+            interior_static_dim,
+        ) = self.interior_static_features.shape
+        self.num_total_grid_nodes = self.num_interior_nodes
+
         # Prior
         if args.learn_prior:
             if self.hierarchical_graph:
@@ -166,19 +232,17 @@ class GraphEFM(ARModel):
                     self.m2m_edge_index,
                     self.mesh_up_edge_index,
                     args.hidden_dim,
+                    hidden_dim_grid,
                     args.prior_processor_layers,
                     hidden_layers=args.hidden_layers,
                     output_dist=args.prior_dist,
+                    num_grid_con_mesh_nodes=self.num_grid_con_mesh_nodes,
                 )
             else:
-                self.prior_model = GraphLatentEncoder(
-                    latent_dim,
-                    self.g2m_edge_index,
-                    self.m2m_edge_index,
-                    args.hidden_dim,
-                    args.prior_processor_layers,
-                    hidden_layers=args.hidden_layers,
-                    output_dist=args.prior_dist,
+                raise NotImplementedError(
+                    "GraphEFM currently only supports hierarchical graphs, "
+                    "but the GraphEFM model was initialized with a "
+                    "non-hierarchical graph."
                 )
         else:
             self.prior_model = ConstantLatentEncoder(
@@ -196,9 +260,11 @@ class GraphEFM(ARModel):
                 self.m2m_edge_index,
                 self.mesh_up_edge_index,
                 args.hidden_dim,
+                hidden_dim_grid,
                 args.encoder_processor_layers,
                 hidden_layers=args.hidden_layers,
                 output_dist="diagonal",
+                num_grid_con_mesh_nodes=self.num_grid_con_mesh_nodes,
             )
             # Decoder
             self.decoder = HiGraphLatentDecoder(
@@ -208,51 +274,39 @@ class GraphEFM(ARModel):
                 self.mesh_up_edge_index,
                 self.mesh_down_edge_index,
                 args.hidden_dim,
+                hidden_dim_grid,
                 latent_dim,
-                grid_state_dim,
+                self._datastore.get_num_data_vars(category="state"),
                 args.processor_layers,
                 hidden_layers=args.hidden_layers,
                 output_std=bool(args.output_std),
+                num_grid_con_mesh_nodes=self.num_grid_con_mesh_nodes,
+                num_interior_nodes=self.num_interior_nodes,
             )
         else:
-            # Encoder
-            self.encoder = GraphLatentEncoder(
-                latent_dim,
-                self.g2m_edge_index,
-                self.m2m_edge_index,
-                args.hidden_dim,
-                args.encoder_processor_layers,
-                hidden_layers=args.hidden_layers,
-                output_dist="diagonal",
-            )
-            # Decoder
-            self.decoder = GraphLatentDecoder(
-                self.g2m_edge_index,
-                self.m2m_edge_index,
-                self.m2g_edge_index,
-                args.hidden_dim,
-                latent_dim,
-                grid_state_dim,
-                args.processor_layers,
-                hidden_layers=args.hidden_layers,
-                output_std=bool(args.output_std),
+            raise NotImplementedError(
+                "GraphEFM currently only supports hierarchical graphs, "
+                "but the GraphEFM model was initialized with a "
+                "non-hierarchical graph."
             )
 
-        # Add lists for val and test errors of ensemble prediction
-        self.val_metrics.update(
-            {
-                "spread_squared": [],
-                "ens_mse": [],
-            }
+    @property
+    def num_mesh_nodes(self):
+        """
+        Get the total number of mesh nodes in the used mesh graph
+        """
+        num_mesh_nodes = sum(
+            node_feat.shape[0] for node_feat in self.mesh_static_features
         )
-        self.test_metrics.update(
-            {
-                "ens_mae": [],
-                "ens_mse": [],
-                "crps_ens": [],
-                "spread_squared": [],
-            }
-        )
+        return num_mesh_nodes
+
+    @property
+    def num_grid_con_mesh_nodes(self):
+        """
+        Get the total number of mesh nodes that have a connection to
+        the grid (e.g. bottom level in a hierarchy)
+        """
+        return self.mesh_static_features[0].shape[0]  # Bottom level
 
     def sample_next_state(self, pred_mean, pred_std):
         """
@@ -494,33 +548,30 @@ class GraphEFM(ARModel):
         self,
         prev_states,
         current_state,
-        step_forcing,
-        step_boundary_forcing,
-        step_atmosphere_forcing,
+        forcing_features,
+        boundary_forcing,
     ):
         """
         Perform forward pass and compute loss for one time step
 
         prev_states: (B, 2, num_grid_nodes, d_features), X^{t-p}, ..., X^{t-1}
         current_state: (B, num_grid_nodes, d_features) X^t
-        step_forcing: (B, num_grid_nodes, d_forcing) corresponding to
+        forcing_features: (B, num_grid_nodes, d_forcing) corresponding to
             index 1 of prev_states
-        step_boundary_forcing: (B, num_boundary_nodes, d_boundary)
-        step_atmosphere_forcing: (B, num_atmosphere_nodes, d_atmosphere)
         """
         # embed all features
-        # TODO embed boundary/atmosphere
-        grid_prev_emb, graph_emb = self.embedd_all(
+        grid_prev_emb, grid_prev_interior_emb, graph_emb = self.embedd_all(
             prev_states[:, 1],
             prev_states[:, 0],
-            step_forcing,
+            forcing_features,
+            boundary_forcing,
         )
         # embed also including current grid state, for encoder
-        # TODO embed boundary/atmosphere
         grid_current_emb = self.embedd_current(
             prev_states[:, 1],
             prev_states[:, 0],
-            step_forcing,
+            forcing_features,
+            boundary_forcing,
             current_state,
         )  # (B, num_grid_nodes, d_h)
 
@@ -532,7 +583,12 @@ class GraphEFM(ARModel):
         # Compute likelihood
         last_state = prev_states[:, -1]
         likelihood_term, pred_mean, pred_std = self.estimate_likelihood(
-            var_dist, current_state, last_state, grid_prev_emb, graph_emb
+            var_dist,
+            current_state,
+            last_state,
+            grid_prev_emb,
+            grid_prev_interior_emb,
+            graph_emb,
         )
         if self.kl_beta > 0:
             # Compute prior
@@ -552,7 +608,13 @@ class GraphEFM(ARModel):
         return likelihood_term, kl_term, pred_mean, pred_std
 
     def estimate_likelihood(
-        self, latent_dist, current_state, last_state, grid_prev_emb, graph_emb
+        self,
+        latent_dist,
+        current_state,
+        last_state,
+        grid_prev_emb,
+        interior_grid_prev_emb,
+        graph_emb,
     ):
         """
         Estimate (masked) likelihood using given distribution over
@@ -561,7 +623,7 @@ class GraphEFM(ARModel):
         latent_dist: distribution, (B, num_mesh_nodes, d_latent)
         current_state: (B, num_grid_nodes, d_state)
         last_state: (B, num_grid_nodes, d_state)
-        grid_prev_emb: (B, num_grid_nodes, d_state)
+        interior_grid_prev_emb: (B, num__interior_grid_nodes, d_state)
         g2m_emb: (B, M_g2m, d_h)
         m2m_emb: (B, M_m2m, d_h)
         m2g_emb: (B, M_m2g, d_h)
@@ -576,7 +638,11 @@ class GraphEFM(ARModel):
 
         # Compute reconstruction (decoder)
         pred_mean, model_pred_std = self.decoder(
-            grid_prev_emb, latent_samples, last_state, graph_emb
+            grid_prev_emb,
+            interior_grid_prev_emb,
+            latent_samples,
+            last_state,
+            graph_emb,
         )  # both (B, num_grid_nodes, d_state)
 
         if self.output_std:
@@ -614,7 +680,6 @@ class GraphEFM(ARModel):
             target_states,
             forcing,
             boundary_forcing,
-            atmosphere_forcing,
             _,
         ) = batch
 
@@ -626,16 +691,12 @@ class GraphEFM(ARModel):
         loss_kl_list = []
 
         for i in range(pred_steps):
-            step_forcing = forcing[:, i]  # (B, num_grid_nodes, d_forcing)
-            step_boundary_forcing = boundary_forcing[:, i]
-            # (B, num_boundary_nodes, d_boundary)
-            step_atmosphere_forcing = atmosphere_forcing[:, i]
-            # (B, num_atmosphere_nodes, d_atmosphere)
             target_state = target_states[:, i]  # (B, num_grid_nodes, d_state)
 
             prev_states_stacked = torch.stack(
                 (prev_prev_state, prev_state), dim=1
             )  # (B, 2, num_grid_nodes, d_state)
+
             (
                 loss_like_term,
                 loss_kl_term,
@@ -644,9 +705,8 @@ class GraphEFM(ARModel):
             ) = self.compute_step_loss(
                 prev_states_stacked,
                 target_state,
-                step_forcing,
-                step_boundary_forcing,
-                step_atmosphere_forcing,
+                forcing[:, i],
+                boundary_forcing[:, i],
             )
             # (B,), (B,), (B, num_grid_nodes, d_state),
             # pred_std is (B, num_grid_nodes, d_state) or (d_state)
@@ -657,15 +717,9 @@ class GraphEFM(ARModel):
             # Get predicted next state (sample or mean)
             predicted_state = self.sample_next_state(pred_mean, pred_std)
 
-            # Overwrite border with true state
-            new_state = (
-                self.boundary_mask * target_state
-                + self.interior_mask * predicted_state
-            )
-
             # Update conditioning states
             prev_prev_state = prev_state
-            prev_state = new_state
+            prev_state = predicted_state
 
         # Compute final ELBO and loss, sum over time, mean over batch
         per_sample_likelihood = torch.sum(
@@ -697,6 +751,7 @@ class GraphEFM(ARModel):
             pred_traj_means, pred_traj_stds = self.sample_trajectories(
                 init_states,
                 forcing,
+                boundary_forcing,
                 target_states,
                 2,
             )
@@ -721,21 +776,23 @@ class GraphEFM(ARModel):
         )
         return loss
 
-    def predict_step(self, prev_state, prev_prev_state, forcing):
+    def predict_step(
+        self, prev_state, prev_prev_state, forcing, boundary_forcing
+    ):
         """
-        Sample one time step prediction
-
-        prev_state: (B, num_grid_nodes, feature_dim), X_t
-        prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1}
-        forcing: (B, num_grid_nodes, forcing_dim)
-
-        Returns:
-        new_state: (B, num_grid_nodes, feature_dim)
+        Step state one step ahead using prediction model, X_{t-1}, X_t -> X_t+1
+        prev_state: (B, num_interior_nodes, feature_dim), X_t
+        prev_prev_state: (B, num_interior_nodes, feature_dim), X_{t-1}
+        forcing: (B, num_interior_nodes, forcing_dim)
+        boundary_forcing: (B, num_boundary_nodes, boundary_forcing_dim)
         """
+
         # embed all features
-        # TODO embed boundary/atmosphere
-        grid_prev_emb, graph_emb = self.embedd_all(
-            prev_state, prev_prev_state, forcing
+        grid_prev_emb, grid_prev_interior_emb, graph_emb = self.embedd_all(
+            prev_state,
+            prev_prev_state,
+            forcing,
+            boundary_forcing,
         )
 
         # Compute prior
@@ -748,10 +805,16 @@ class GraphEFM(ARModel):
         # (B, num_mesh_nodes, d_latent)
 
         # Compute reconstruction (decoder)
-        last_state = prev_state
         pred_mean, pred_std = self.decoder(
-            grid_prev_emb, latent_samples, last_state, graph_emb
+            grid_prev_emb,
+            grid_prev_interior_emb,
+            latent_samples,
+            prev_state,
+            graph_emb,
         )  # (B, num_grid_nodes, d_state)
+
+        # TODO: Add option for pred_residual,
+        # for now it is always True in the decoder
 
         return self.sample_next_state(pred_mean, pred_std), pred_std
 
@@ -759,13 +822,15 @@ class GraphEFM(ARModel):
         self,
         init_states,
         forcing_features,
+        boundary_forcing,
         true_states,
         num_traj,
         use_encoder=False,
     ):
         """
         init_states: (B, 2, num_grid_nodes, d_f)
-        forcing_features: (B, pred_steps, num_grid_nodes, d_static_f)
+        forcing_features: (B, pred_steps, num_grid_nodes, d_forcing)
+        boundary_forcing: (B, pred_steps, num_boundary_nodes, d_boundary)
         true_states: (B, pred_steps, num_grid_nodes, d_f)
         num_traj: S, number of trajectories to sample
         use_encoder: bool, if latent variables should be sampled from
@@ -775,17 +840,26 @@ class GraphEFM(ARModel):
         traj_means: (B, S, pred_steps, num_grid_nodes, d_f)
         traj_stds: (B, S, pred_steps, num_grid_nodes, d_f) or (d_f)
         """
-        unroll_func = (
-            self.unroll_prediction_vi if use_encoder else self.unroll_prediction
-        )
-        traj_list = [
-            unroll_func(
-                init_states,
-                forcing_features,
-                true_states,
-            )
-            for _ in range(num_traj)
-        ]
+
+        if use_encoder:
+            traj_list = [
+                self.unroll_prediction_vi(
+                    init_states,
+                    forcing_features,
+                    boundary_forcing,
+                    true_states,
+                )
+                for _ in range(num_traj)
+            ]
+        else:
+            traj_list = [
+                self.unroll_prediction(
+                    init_states,
+                    forcing_features,
+                    boundary_forcing,
+                )
+                for _ in range(num_traj)
+            ]
         # List of tuples, each containing
         # mean: (B, pred_steps, num_grid_nodes, d_f) and
         # std: (B, pred_steps, num_grid_nodes, d_f) or (d_f,)
@@ -802,38 +876,44 @@ class GraphEFM(ARModel):
 
         return traj_means, traj_stds
 
-    def unroll_prediction_vi(self, init_states, forcing_features, true_states):
+    def unroll_prediction_vi(
+        self, init_states, forcing, boundary_forcing, true_states
+    ):
         """
         Roll out prediction, sampling latent var. from variational
         encoder distribution
 
         init_states: (B, 2, num_grid_nodes, d_f)
-        forcing_features: (B, pred_steps, num_grid_nodes, d_static_f)
+        forcing: (B, pred_steps, num_grid_nodes, d_forcing)
+        boundary_forcing: (B, pred_steps, num_boundary_nodes, d_boundary)
         true_states: (B, pred_steps, num_grid_nodes, d_f)
         """
         prev_prev_state = init_states[:, 0]
         prev_state = init_states[:, 1]
         prediction_list = []
         pred_std_list = []
-        pred_steps = forcing_features.shape[1]
+        pred_steps = forcing.shape[1]
 
         for i in range(pred_steps):
             # Compute 1-step prediction, but using encoder
-            forcing = forcing_features[:, i]
+            step_forcing = forcing[:, i]
+            step_boundary_forcing = boundary_forcing[:, i]
             current_state = true_states[:, i]
 
             # embed all features
-            # TODO embed boundary/atmosphere
-            grid_prev_emb, graph_emb = self.embedd_all(
-                prev_state, prev_prev_state, forcing
+            grid_prev_emb, grid_prev_interior_emb, graph_emb = self.embedd_all(
+                prev_state,
+                prev_prev_state,
+                step_forcing,
+                step_boundary_forcing,
             )
 
             # embed also including current grid state, for encoder
-            # TODO embed boundary/atmosphere
             grid_current_emb = self.embedd_current(
                 prev_state,
                 prev_prev_state,
-                forcing,
+                step_forcing,
+                step_boundary_forcing,
                 current_state,
             )
 
@@ -848,18 +928,16 @@ class GraphEFM(ARModel):
 
             # Compute reconstruction (decoder)
             pred_mean, pred_std = self.decoder(
-                grid_prev_emb, latent_samples, prev_state, graph_emb
+                grid_prev_emb,
+                grid_prev_interior_emb,
+                latent_samples,
+                prev_state,
+                graph_emb,
             )  # (B, num_grid_nodes, d_state)
 
-            pred_state = self.sample_next_state(pred_mean, pred_std)
+            new_state = self.sample_next_state(pred_mean, pred_std)
             # pred_state: (B, num_grid_nodes, d_f)
             # pred_std: (B, num_grid_nodes, d_f) or None
-
-            # Overwrite border with true state
-            new_state = (
-                self.boundary_mask * current_state
-                + self.interior_mask * pred_state
-            )
 
             prediction_list.append(new_state)
             if self.output_std:
@@ -881,153 +959,7 @@ class GraphEFM(ARModel):
 
         return prediction, pred_std
 
-    def plot_examples(self, batch, n_examples, split, prediction=None):
-        """
-        Plot ensemble forecast + mean and std
-        (split argument should be unused, only for compatibility with ARModel)
-        """
-        init_states, target_states, forcing_features, time = batch
-
-        trajectories, _ = self.sample_trajectories(
-            init_states,
-            forcing_features,
-            target_states,
-            self.ensemble_size,
-        )
-        # (B, S, pred_steps, num_grid_nodes, d_f)
-
-        # Rescale to original data scale
-        traj_rescaled = trajectories * self.state_std + self.state_mean
-        target_rescaled = target_states * self.state_std + self.state_mean
-
-        # Compute mean and std of ensemble
-        ens_mean = torch.mean(
-            traj_rescaled, dim=1
-        )  # (B, pred_steps, num_grid_nodes, d_f)
-        ens_std = torch.std(
-            traj_rescaled, dim=1
-        )  # (B, pred_steps, num_grid_nodes, d_f)
-
-        # Iterate over the examples
-        for (
-            traj_slice,
-            target_slice,
-            ens_mean_slice,
-            ens_std_slice,
-            time_slice,
-        ) in zip(
-            traj_rescaled[:n_examples],
-            target_rescaled[:n_examples],
-            ens_mean[:n_examples],
-            ens_std[:n_examples],
-            time[:n_examples],
-        ):
-
-            # Create xarray for plotting
-            da_samples = [
-                self._create_dataarray_from_tensor(
-                    tensor=traj_slice[i, ...],
-                    time=time_slice,
-                    split=split,
-                    category="state",
-                ).unstack("grid_index")
-                for i in range(traj_slice.shape[0])
-            ]
-
-            da_target = self._create_dataarray_from_tensor(
-                tensor=target_slice,
-                time=time_slice,
-                split=split,
-                category="state",
-            ).unstack("grid_index")
-
-            da_ens_mean = self._create_dataarray_from_tensor(
-                tensor=ens_mean_slice,
-                time=time_slice,
-                split=split,
-                category="state",
-            ).unstack("grid_index")
-
-            da_ens_std = self._create_dataarray_from_tensor(
-                tensor=ens_std_slice,
-                time=time_slice,
-                split=split,
-                category="state",
-            ).unstack("grid_index")
-            # traj_slice is (S, pred_steps, num_grid_nodes, d_f)
-            # others are (pred_steps, num_grid_nodes, d_f)
-            self.plotted_examples += 1  # Increment already here
-
-            # Note: min and max values can not be in ensemble mean
-            var_vmin = (
-                torch.minimum(
-                    traj_slice.flatten(0, 2).min(dim=0)[0],
-                    target_slice.flatten(0, 1).min(dim=0)[0],
-                )
-                .cpu()
-                .numpy()
-            )  # (d_f,)
-            var_vmax = (
-                torch.maximum(
-                    traj_slice.flatten(0, 2).max(dim=0)[0],
-                    target_slice.flatten(0, 1).max(dim=0)[0],
-                )
-                .cpu()
-                .numpy()
-            )  # (d_f,)
-            var_vranges = list(zip(var_vmin, var_vmax))
-
-            # Iterate over prediction horizon time steps
-            for t_i, (samples_t, target_t, ens_mean_t, ens_std_t) in enumerate(
-                zip(
-                    traj_slice.transpose(0, 1),
-                    # (pred_steps, S, num_grid_nodes, d_f)
-                    target_slice,
-                    ens_mean_slice,
-                    ens_std_slice,
-                ),
-                start=1,
-            ):
-                time_title_part = (
-                    f"t={t_i} ({self._datastore.step_length*t_i} h)"
-                )
-                # Create one figure per variable at this time step
-                var_figs = [
-                    vis.plot_ensemble_prediction(
-                        [
-                            da.isel(state_feature=var_i, time=t_i - 1)
-                            for da in da_samples
-                        ],
-                        da_target.isel(state_feature=var_i, time=t_i - 1),
-                        da_ens_mean.isel(state_feature=var_i, time=t_i - 1),
-                        da_ens_std.isel(state_feature=var_i, time=t_i - 1),
-                        self._datastore,
-                        title=f"{var_name} ({var_unit}), {time_title_part}",
-                        vrange=var_vrange,
-                    )
-                    for var_i, (var_name, var_unit, var_vrange) in enumerate(
-                        zip(
-                            self._datastore.get_vars_names("state"),
-                            self._datastore.get_vars_units("state"),
-                            var_vranges,
-                        )
-                    )
-                ]
-
-                example_title = f"example_{self.plotted_examples}"
-                wandb.log(
-                    {
-                        f"{var_name}_{example_title}": wandb.Image(fig)
-                        for var_name, fig in zip(
-                            self._datastore.get_vars_names("state"), var_figs
-                        )
-                    }
-                )
-                plt.close(
-                    "all"
-                )  # Close all figs for this time step, saves memory
-
-    def ensemble_common_step(self, batch):
+    def ensemble_step(self, batch):
         """
         Perform ensemble forecast and compute basic metrics.
         Common step done during both evaluation and testing
@@ -1036,17 +968,23 @@ class GraphEFM(ARModel):
 
         Returns:
         trajectories: (B, S, pred_steps, num_grid_nodes, d_f)
-        traj_stds: (B, S, pred_steps, num_grid_nodes, d_f)
         target_states: (B, pred_steps, num_grid_nodes, d_f)
         spread_squared_batch: (B, pred_steps, d_f)
         ens_mse_batch: (B, pred_steps, d_f)
         """
         # Compute and store metrics for ensemble forecast
-        init_states, target_states, forcing_features, _ = batch
+        (
+            init_states,
+            target_states,
+            forcing,
+            boundary_forcing,
+            _,
+        ) = batch
 
         trajectories, traj_stds = self.sample_trajectories(
             init_states,
-            forcing_features,
+            forcing,
+            boundary_forcing,
             target_states,
             self.ensemble_size,
         )
@@ -1056,6 +994,7 @@ class GraphEFM(ARModel):
             trajectories,
             target_states,
             traj_stds,
+            None,
             mask=self.interior_mask_bool,
             sum_vars=False,
         )
@@ -1074,7 +1013,6 @@ class GraphEFM(ARModel):
 
         return (
             trajectories,
-            traj_stds,
             target_states,
             spread_squared_batch,
             ens_mse_batch,
@@ -1091,10 +1029,9 @@ class GraphEFM(ARModel):
         (
             prior_trajectories,
             _,
-            _,
             spread_squared_batch,
             ens_mse_batch,
-        ) = self.ensemble_common_step(batch)
+        ) = self.ensemble_step(batch)
         self.val_metrics["spread_squared"].append(spread_squared_batch)
         self.val_metrics["ens_mse"].append(ens_mse_batch)
 
@@ -1105,153 +1042,76 @@ class GraphEFM(ARModel):
             and self.n_example_pred > 0
         ):
             # Roll out trajectories using variational distribution (encoder)
-            (init_states, target_states, forcing_features, time) = batch
-            # Only create ens. forecast for as many examples as needed
-            init_states = init_states[: self.n_example_pred]
-            target_states = target_states[: self.n_example_pred]
-            forcing_features = forcing_features[: self.n_example_pred]
-            time = time[: self.n_example_pred]
+            (
+                init_states,
+                target_states,
+                forcing_features,
+                boundary_forcing,
+                _,
+            ) = batch
 
             # Sample trajectories using variational dist. for latent var.
             enc_trajectories, _ = self.sample_trajectories(
                 init_states,
                 forcing_features,
+                boundary_forcing,
                 target_states,
                 self.ensemble_size,
                 use_encoder=True,
             )
 
-            # Only need n_example_pred prior trajectories
-            prior_trajectories = prior_trajectories[: self.n_example_pred]
-
-            # Rescale to original data scale
-            prior_rescaled = (
-                prior_trajectories * self.state_std + self.state_mean
+            # For now use val_steps_to_log to determine which steps
+            # to make these plots for
+            plot_log_steps = list(
+                filter(
+                    lambda s: s <= target_states.shape[1],
+                    self.args.val_steps_to_log,
+                )
             )
-            enc_rescaled = enc_trajectories * self.state_std + self.state_mean
-            target_rescaled = target_states * self.state_std + self.state_mean
 
-            # Plot samples
+            # Plot forecasts, prior samples
+            prior_plots = self.plot_ensemble_examples(
+                batch,
+                n_examples=self.n_example_pred,
+                prediction=prior_trajectories,
+                time_steps=plot_log_steps,
+                log=False,
+            )
+            # Plot forecasts, variational samples
+            vi_plots = self.plot_ensemble_examples(
+                batch,
+                n_examples=self.n_example_pred,
+                prediction=enc_trajectories,
+                time_steps=plot_log_steps,
+                log=False,
+            )
+
+            # Store plots
             log_plot_dict = {}
-            for example_i, (
-                prior_traj,
-                enc_traj,
-                target_traj,
-                time_slice,
-            ) in enumerate(
-                zip(prior_rescaled, enc_rescaled, target_rescaled, time),
-                start=1,
-            ):
-                # prior_traj and enc traj are
-                # (S, pred_steps, num_grid_nodes, d_f)
-
-                var_name_list = self._datastore.get_vars_names("state")
-                var_unit_list = self._datastore.get_vars_units("state")
-
-                # Make Xarray.DA
-                da_target = self._create_dataarray_from_tensor(
-                    tensor=target_traj,
-                    time=time_slice,
-                    split="val",
-                    category="state",
-                ).unstack("grid_index")
-                da_prior_traj = [
-                    self._create_dataarray_from_tensor(
-                        tensor=prior_traj[i],
-                        time=time_slice,
-                        split="val",
-                        category="state",
-                    ).unstack("grid_index")
-                    for i in range(prior_traj.shape[0])
-                ]
-                da_enc_traj = [
-                    self._create_dataarray_from_tensor(
-                        tensor=enc_traj[i],
-                        time=time_slice,
-                        split="val",
-                        category="state",
-                    ).unstack("grid_index")
-                    for i in range(enc_traj.shape[0])
-                ]
-
-                for var_i, timesteps in self.var_leads_val_plot.items():
-                    var_name = var_name_list[var_i]
-                    var_unit = var_unit_list[var_i]
-                    for step in timesteps:
-                        prior_states = [
-                            da_prior_sample.isel(
-                                state_feature=var_i, time=step - 1
-                            )
-                            for da_prior_sample in da_prior_traj
-                        ]  # (S, num_grid_nodes)
-                        enc_states = [
-                            da_enc_sample.isel(
-                                state_feature=var_i, time=step - 1
-                            )
-                            for da_enc_sample in da_enc_traj
-                        ]  # (S, num_grid_nodes)
-
-                        target_state = da_target.isel(
-                            state_feature=var_i, time=step - 1
-                        )  # (num_grid_nodes,)
-
-                        # Concatenate along ens member dim for stats compute
-                        prior_states_cat = xr.concat(
-                            prior_states, dim="ensemble"
-                        )
-                        enc_states_cat = xr.concat(enc_states, dim="ensemble")
-
-                        plot_title = (
-                            f"{var_name} ({var_unit}), t={step} "
-                            f"({self._datastore.step_length*step} h)"
-                        )
-
-                        # Make plots
-                        with np.testing.suppress_warnings() as sup:
-                            # Numpy will complain when we do the .std
-                            # for dimensions only containing NaNs, and this is
-                            # very noisy. As we will anyhow filter out these
-                            # dimensions later we suppress them here.
-                            sup.filter(
-                                RuntimeWarning,
-                                "Degrees of freedom <= 0 for slice.",
-                            )
-
-                            log_plot_dict[
-                                f"prior_{var_name}_step_{step}_ex{example_i}"
-                            ] = vis.plot_ensemble_prediction(
-                                prior_states,
-                                target_state,
-                                prior_states_cat.mean(dim="ensemble"),
-                                prior_states_cat.std(dim="ensemble", ddof=1),
-                                self._datastore,
-                                title=f"{plot_title} (prior)",
-                            )
-                            log_plot_dict[
-                                f"vi_{var_name}_step_{step}_ex{example_i}"
-                            ] = vis.plot_ensemble_prediction(
-                                enc_states,
-                                target_state,
-                                enc_states_cat.mean(dim="ensemble"),
-                                enc_states_cat.std(dim="ensemble", ddof=1),
-                                self._datastore,
-                                title=f"{plot_title} (vi)",
-                            )
+            log_plot_dict.update(
+                {
+                    f"prior_{plot_key}": plot
+                    for plot_key, plot in prior_plots.items()
+                }
+            )
+            log_plot_dict.update(
+                {f"vi_{plot_key}": plot for plot_key, plot in vi_plots.items()}
+            )
 
             # Sample latent variable and plot
             # embed all features
-            # TODO embed boundary/atmosphere
-            grid_prev_emb, graph_emb = self.embedd_all(
+            grid_prev_emb, _, graph_emb = self.embedd_all(
                 init_states[:, 1],
                 init_states[:, 0],
                 forcing_features[:, 0],
+                boundary_forcing[:, 0],
             )  # (B, num_grid_nodes, d_h)
             # embed also including current grid state, for encoder
-            # TODO embed boundary/atmosphere
             grid_current_emb = self.embedd_current(
                 init_states[:, 1],
                 init_states[:, 0],
                 forcing_features[:, 0],
+                boundary_forcing[:, 0],
                 target_states[:, 0],
             )  # (B, num_grid_nodes, d_h)
 
@@ -1260,7 +1120,7 @@ class GraphEFM(ARModel):
                 grid_prev_emb, graph_emb=graph_emb
             )  # Gaussian, (B, num_mesh_nodes, d_latent)
             prior_samples = prior_dist.rsample(
-                (self.num_latents_plot,)
+                (self.latent_samples_plot,)
             ).transpose(
                 0, 1
             )  # (B, samples, num_mesh_nodes, d_latent)
@@ -1268,7 +1128,7 @@ class GraphEFM(ARModel):
             vi_dist = self.encoder(
                 grid_current_emb, graph_emb=graph_emb
             )  # Gaussian, (B, num_mesh_nodes, d_latent)
-            vi_samples = vi_dist.rsample((self.num_latents_plot,)).transpose(
+            vi_samples = vi_dist.rsample((self.latent_samples_plot,)).transpose(
                 0, 1
             )  # (B, samples, num_mesh_nodes, d_latent)
 
@@ -1323,14 +1183,6 @@ class GraphEFM(ARModel):
             )  # log mean
             wandb.log(log_dict)
 
-    def on_validation_epoch_end(self):
-        """
-        Compute val metrics at the end of val epoch
-        """
-        # Must log before super call, as metric lists are cleared at end of step
-        self.log_spsk_ratio(self.val_metrics, "val")
-        super().on_validation_epoch_end()
-
     def test_step(self, batch, batch_idx):
         """
         Run test on single batch
@@ -1340,11 +1192,10 @@ class GraphEFM(ARModel):
 
         (
             trajectories,
-            traj_stds,
             target_states,
             spread_squared_batch,
             ens_mse_batch,
-        ) = self.ensemble_common_step(batch)
+        ) = self.ensemble_step(batch)
         self.test_metrics["spread_squared"].append(spread_squared_batch)
         self.test_metrics["ens_mse"].append(ens_mse_batch)
 
@@ -1367,7 +1218,7 @@ class GraphEFM(ARModel):
         crps_batch = metrics.crps_ens(
             trajectories,
             target_states,
-            traj_stds,
+            None,  # pred_stds is unused in crps
             mask=self.interior_mask_bool,
             sum_vars=False,
         )  # (B, pred_steps, d_f)

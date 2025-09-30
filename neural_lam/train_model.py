@@ -110,6 +110,14 @@ def main(input_args=None):
         help="Dimensionality of all hidden representations (default: 64)",
     )
     parser.add_argument(
+        "--hidden_dim_grid",
+        type=int,
+        help=(
+            "(For Graph-EFM) Dimensionality of hidden representations related "
+            "to grid nodes (default: None, use same as hidden_dim)."
+        ),
+    )
+    parser.add_argument(
         "--latent_dim",
         type=int,
         default=None,

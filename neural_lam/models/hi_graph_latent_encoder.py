@@ -21,21 +21,28 @@ class HiGraphLatentEncoder(BaseLatentEncoder):
         m2m_edge_index,
         mesh_up_edge_index,
         hidden_dim,
+        hidden_dim_grid,
         intra_level_layers,
         hidden_layers=1,
         output_dist="isotropic",
+        num_grid_con_mesh_nodes=None,
     ):
         super().__init__(
             latent_dim,
             output_dist,
         )
 
+        print(
+            f"HiGraphLatentEncoder hidden_dim: {hidden_dim}, "
+            f"hidden_dim_grid: {hidden_dim_grid}"
+        )
         # GNN from grid to mesh
         self.g2m_gnn = PropagationNet(
             g2m_edge_index,
-            hidden_dim,
+            hidden_dim_grid,
             hidden_layers=hidden_layers,
             update_edges=False,
+            num_rec=num_grid_con_mesh_nodes,
         )
 
         # GNNs going up through mesh levels
@@ -60,6 +67,10 @@ class HiGraphLatentEncoder(BaseLatentEncoder):
                 )
                 for edge_index in m2m_edge_index
             ]
+        )
+
+        self.pre_mesh_proj = nn.Sequential(
+            nn.SiLU(), nn.Linear(hidden_dim_grid, hidden_dim)
         )
 
         # Final map to parameters
@@ -87,6 +98,8 @@ class HiGraphLatentEncoder(BaseLatentEncoder):
         current_mesh_rep = self.g2m_gnn(
             grid_rep, graph_emb["mesh"][0], graph_emb["g2m"]
         )  # (B, N_mesh, d_h)
+
+        current_mesh_rep = self.pre_mesh_proj(current_mesh_rep)
 
         # Run same level processing on level 0
         current_mesh_rep, _ = self.intra_level_gnns[0](

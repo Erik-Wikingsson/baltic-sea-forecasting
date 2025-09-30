@@ -1,5 +1,4 @@
 # Standard library
-import os
 from typing import Union
 
 # Third-party
@@ -418,8 +417,6 @@ class ARProbModel(ARModel):
                             var_vranges,
                         )
                     )
-                    # Only plot self.plot_vars
-                    if var_name in self.plot_vars
                 }
 
                 if log:
@@ -447,42 +444,6 @@ class ARProbModel(ARModel):
                 )  # Close all figs for this time step, saves memory
 
         return plot_dict
-
-    def create_metric_log_dict(self, metric_tensor, prefix, metric_name):
-        """
-        Put together a dict with everything to log for one metric. Also saves
-        plots as pdf and csv if using test prefix.
-
-        metric_tensor: (pred_steps, d_f), metric values per time and variable
-        prefix: string, prefix to use for logging metric_name: string, name of
-        the metric
-
-        Return: log_dict: dict with everything to log for given metric
-        """
-        log_dict = {}
-        metric_fig = vis.plot_error_map(
-            errors=metric_tensor,
-            datastore=self._datastore,
-        )
-        full_log_name = f"{prefix}_{metric_name}"
-        log_dict[full_log_name] = wandb.Image(metric_fig)
-
-        if prefix == "test":
-            # Save pdf
-            metric_fig.savefig(
-                os.path.join(wandb.run.dir, f"{full_log_name}.pdf")
-            )
-
-        # Check if metrics are watched, log exact values for specific vars
-        var_names = self._datastore.get_vars_names(category="state")
-        if full_log_name in self.args.metrics_watch:
-            for var_i, timesteps in self.args.var_leads_metrics_watch.items():
-                var_name = var_names[var_i]
-                for step in timesteps:
-                    key = f"{full_log_name}_{var_name}_step_{step}"
-                    log_dict[key] = metric_tensor[step - 1, var_i]
-
-        return log_dict
 
     def on_test_epoch_end(self):
         """

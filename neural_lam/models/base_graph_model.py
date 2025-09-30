@@ -84,6 +84,7 @@ class BaseGraphModel(ARModel):
             args.hidden_dim,
             hidden_layers=args.hidden_layers,
             update_edges=False,
+            num_rec=self.num_grid_connected_mesh_nodes,
         )
         self.encoding_grid_mlp = utils.make_mlp(
             [args.hidden_dim] + self.mlp_blueprint_end
@@ -95,6 +96,7 @@ class BaseGraphModel(ARModel):
             args.hidden_dim,
             hidden_layers=args.hidden_layers,
             update_edges=False,
+            num_rec=self.num_grid_nodes,
         )
 
         # Output mapping (hidden_dim -> output_dim)
@@ -106,6 +108,16 @@ class BaseGraphModel(ARModel):
 
         # Compute indices and define clamping functions
         self.prepare_clamping_params(config, datastore)
+
+    @property
+    def num_grid_connected_mesh_nodes(self):
+        """
+        Get the total number of mesh nodes that have a connection to
+        the grid (e.g. bottom level in a hierarchy)
+        """
+        raise NotImplementedError(
+            "num_grid_connected_mesh_nodes not implemented"
+        )
 
     def prepare_clamping_params(
         self, config: NeuralLAMConfig, datastore: BaseDatastore

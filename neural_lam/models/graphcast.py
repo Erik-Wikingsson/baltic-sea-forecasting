@@ -62,6 +62,14 @@ class GraphCast(BaseGraphModel):
         """
         return self.mesh_static_features.shape[0], 0
 
+    @property
+    def num_grid_connected_mesh_nodes(self):
+        """
+        Get the total number of mesh nodes that have a connection to
+        the grid (e.g. bottom level in a hierarchy)
+        """
+        return self.num_mesh_nodes  # All nodes
+
     def embedd_mesh_nodes(self):
         """
         Embed static mesh features

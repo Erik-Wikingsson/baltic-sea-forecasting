@@ -117,6 +117,14 @@ class BaseHiGraphModel(BaseGraphModel):
             ]
         )
 
+    @property
+    def num_grid_connected_mesh_nodes(self):
+        """
+        Get the total number of mesh nodes that have a connection to
+        the grid (e.g. bottom level in a hierarchy)
+        """
+        return self.mesh_static_features[0].shape[0]  # Bottom level
+
     def get_num_mesh(self):
         """
         Compute number of mesh nodes from loaded features,

@@ -62,6 +62,10 @@ class InteractionNet(pyg.nn.MessagePassing):
             self.num_rec = edge_index[1].max() + 1
         else:
             self.num_rec = num_rec
+            assert edge_index[1].max() < self.num_rec, (
+                "Given edge index has receiver node index up to "
+                f"{edge_index[1].max()}, but num_rec is just {self.num_rec}."
+            )
 
         # any edge_index used here must start sender and rec. nodes at index 0
         edge_index = torch.stack(

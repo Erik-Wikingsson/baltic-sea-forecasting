@@ -131,11 +131,12 @@ def load_graph(graph_dir_path, device="cpu"):
     # might be indexed
     m2g_min_indices = m2g_edge_index.min(dim=1, keepdim=True)[0]
 
-    # Rect graph, need to zero-index g2m and m2g edge_index
+    # Zero-index g2m and m2g edge_index
     if m2g_min_indices[0] < m2g_min_indices[1]:
         # mesh has the first indices
-        # Number of mesh nodes at level that connects to grid
-        num_mesh_nodes = mesh_static_features[0].shape[0]
+        # Number of mesh nodes at all levels
+        # NOTE: Need to check if this is how we still want to reindex
+        num_mesh_nodes = sum(mf.shape[0] for mf in mesh_static_features)
 
         m2g_edge_index = torch.stack(
             (

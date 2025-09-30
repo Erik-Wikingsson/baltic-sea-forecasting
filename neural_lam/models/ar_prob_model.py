@@ -1,13 +1,11 @@
 # Standard library
 import os
-import pickle
-from typing import List, Union
+from typing import Union
 
 # Third-party
 import matplotlib.pyplot as plt
 import numcodecs
 import numpy as np
-import pytorch_lightning as pl
 import torch
 import wandb
 import xarray as xr
@@ -18,8 +16,6 @@ from .. import metrics, vis
 from ..config import NeuralLAMConfig
 from ..datastore import BaseDatastore
 from ..datastore.base import BaseRegularGridDatastore
-from ..loss_weighting import get_state_feature_weighting
-from ..weather_dataset import WeatherDataset
 from .ar_model import ARModel
 
 
@@ -205,7 +201,8 @@ class ARProbModel(ARModel):
         self, prev_state, prev_prev_state, forcing, boundary_forcing
     ):
         """
-        This method is used during inference to sample a prediction of the next state.
+        This method is used during inference to sample a
+        prediction of the next state.
         Step state one step ahead using prediction model, X_{t-1}, X_t -> X_t+1
 
         Inputs:

@@ -48,10 +48,10 @@ class GraphEFM(ARProbModel):
         self.ensemble_size = args.ensemble_size
         self.kl_beta = args.kl_beta
         self.crps_weight = args.crps_weight
-        self.latent_samples_plot = args.latent_samples_plot
+        self.num_latents_plot = args.num_latents_plot
 
         # Load graph with static features
-        graph_dir_path = datastore.root_path / "graph" / args.graph_name
+        graph_dir_path = datastore.root_path / "graph" / args.graph
         self.hierarchical_graph, graph_ldict = utils.load_graph(
             graph_dir_path=graph_dir_path
         )
@@ -59,7 +59,7 @@ class GraphEFM(ARProbModel):
             # NOTE: It would be good to rescale mesh node position features in
             # exactly the same way as grid node position static features.
             if name == "mesh_static_features":
-                max_coord = datastore.get_xy("state").max()
+                max_coord = datastore.get_xy("state", stacked=True).max()
                 # Rescale by dividing by maximum coordinate in interior
                 attr_value /= max_coord
 
@@ -98,18 +98,18 @@ class GraphEFM(ARProbModel):
 
         print(
             "GraphEFM, "
-            f"self.interior_dim={self.interior_dim}, "
+            f"self.interior_dim={self.interior_input_dim}, "
             f"self.boundary_dim={self.boundary_dim}, "
         )
 
         # Feature embedders for interior
         self.interior_embedder = utils.make_mlp(
-            [self.interior_dim] + self.grid_mlp_blueprint_end
+            [self.interior_input_dim] + self.grid_mlp_blueprint_end
         )
 
         # We encode the current state as well, so we need to add more channels
         self.interior_current_embedder = utils.make_mlp(
-            [self.interior_dim + self.grid_output_dim]
+            [self.interior_input_dim + self.num_state_vars]
             + self.grid_mlp_blueprint_end
         )
 
@@ -119,7 +119,7 @@ class GraphEFM(ARProbModel):
                 [self.boundary_dim] + self.grid_mlp_blueprint_end,
             )
         if self.atmosphere_forced:
-            self.boundary_embedder = utils.make_mlp(
+            self.atmosphere_embedder = utils.make_mlp(
                 [self.atmosphere_dim] + self.grid_mlp_blueprint_end,
             )
 
@@ -216,7 +216,7 @@ class GraphEFM(ARProbModel):
         (
             self.num_interior_nodes,
             interior_static_dim,
-        ) = self.interior_static_features.shape
+        ) = self.grid_static_features.shape
         self.num_total_grid_nodes = self.num_interior_nodes
 
         # Prior
@@ -428,7 +428,7 @@ class GraphEFM(ARProbModel):
                 prev_state,
                 prev_prev_state,
                 forcing,
-                self.expand_to_batch(self.interior_static_features, batch_size),
+                self.expand_to_batch(self.grid_static_features, batch_size),
                 current_state,
             ),
             dim=-1,
@@ -474,7 +474,7 @@ class GraphEFM(ARProbModel):
                 prev_state,
                 prev_prev_state,
                 forcing,
-                self.expand_to_batch(self.interior_static_features, batch_size),
+                self.expand_to_batch(self.grid_static_features, batch_size),
             ),
             dim=-1,
         )
@@ -1149,7 +1149,7 @@ class GraphEFM(ARProbModel):
                 grid_prev_emb, graph_emb=graph_emb
             )  # Gaussian, (B, num_mesh_nodes, d_latent)
             prior_samples = prior_dist.rsample(
-                (self.latent_samples_plot,)
+                (self.num_latents_plot,)
             ).transpose(
                 0, 1
             )  # (B, samples, num_mesh_nodes, d_latent)
@@ -1157,7 +1157,7 @@ class GraphEFM(ARProbModel):
             vi_dist = self.encoder(
                 grid_current_emb, graph_emb=graph_emb
             )  # Gaussian, (B, num_mesh_nodes, d_latent)
-            vi_samples = vi_dist.rsample((self.latent_samples_plot,)).transpose(
+            vi_samples = vi_dist.rsample((self.num_latents_plot,)).transpose(
                 0, 1
             )  # (B, samples, num_mesh_nodes, d_latent)
 

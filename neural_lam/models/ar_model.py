@@ -41,7 +41,7 @@ class ARModel(pl.LightningModule):
         self._datastore = datastore
         self._datastore_boundary = datastore_boundary
         self._datastore_atmosphere = datastore_atmosphere
-        num_state_vars = datastore.get_num_data_vars(category="state")
+        self.num_state_vars = datastore.get_num_data_vars(category="state")
         num_forcing_vars = datastore.get_num_data_vars(category="forcing")
         # Load masks
         self.surface_mask = datastore.get_mask(
@@ -102,10 +102,10 @@ class ARModel(pl.LightningModule):
         self.output_std = bool(args.output_std)
         if self.output_std:
             # Pred. dim. in grid cell
-            self.grid_output_dim = 2 * num_state_vars
+            self.grid_output_dim = 2 * self.num_state_vars
         else:
             # Pred. dim. in grid cell
-            self.grid_output_dim = num_state_vars
+            self.grid_output_dim = self.num_state_vars
             # Store constant per-variable std.-dev. weighting
             # NOTE that this is the inverse of the multiplicative weighting
             # in wMSE/wMAE
@@ -123,7 +123,7 @@ class ARModel(pl.LightningModule):
         self.num_total_grid_nodes = self.num_grid_nodes
 
         self.interior_input_dim = (
-            2 * num_state_vars
+            2 * self.num_state_vars
             + grid_static_dim
             + num_forcing_vars
             * (num_past_forcing_steps + num_future_forcing_steps + 1)

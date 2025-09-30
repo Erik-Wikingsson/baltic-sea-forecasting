@@ -226,6 +226,7 @@ class ARProbModel(ARModel):
             ens_mean,
             target_states,
             ens_std,
+            mask=self.interior_mask_bool,
             sum_vars=False,
         )  # (B, pred_steps, d_f)
         self.test_metrics["ens_mae"].append(ens_maes)
@@ -233,17 +234,10 @@ class ARProbModel(ARModel):
             trajectories,
             target_states,
             None,
+            mask=self.interior_mask_bool,
             sum_vars=False,
         )  # (B, pred_steps, d_f)
         self.test_metrics["crps_ens"].append(crps_batch)
-
-        if self.args.save_eval_to_zarr_path:
-            self._save_predictions_to_zarr(
-                batch_times=batch[-1],
-                batch_predictions=trajectories,
-                batch_idx=batch_idx,
-                zarr_output_path=self.args.save_eval_to_zarr_path,
-            )
 
         # Plot example predictions (on rank 0 only)
         if (

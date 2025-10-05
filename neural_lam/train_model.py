@@ -14,7 +14,7 @@ from loguru import logger
 # Local
 from . import utils
 from .config import load_config_and_datastore
-from .models import EDM, GraphCast, GraphEFM, GraphFM, FM
+from .models import EDM, GraphCast, GraphEFM, GraphFM, FM, CRPS
 from .weather_dataset import WeatherDataModule
 
 MODELS = {
@@ -23,6 +23,7 @@ MODELS = {
     "graph_efm": GraphEFM,
     "EDM": EDM,
     "FM": FM,
+    "crps": CRPS,
 }
 
 
@@ -216,16 +217,31 @@ def main(input_args=None):
         help="Number of steps to use in sampler (default: 20)",
     )
     parser.add_argument(
-        "--diffusion_model",
+        "--backbone_model",
         type=str,
         default="graph_diff",
-        help="Diffusion model to use in EDM (graph_diff) (default: graph_diff)",
+        help="Backbone model to use in EDM (graph_diff) (default: graph_diff)",
     )
     parser.add_argument(
         "--pred_residual",
         action="store_true",
         help="If the EDM model should predict residuals instead of the "
         "next state",
+    )
+
+    # Graph-CRPS options
+    parser.add_argument(
+        "--noise_embedding",
+        type=str,
+        default="fourier",
+        help="Type of encoder to use in edm model (positional/fourier)"
+        "(default: 'fourier')",
+    )
+    parser.add_argument(
+        "--noise_dim",
+        type=int,
+        default=32,
+        help="Dimension of the noise vector z, 32 in FGN (default: 32)",
     )
 
     # Training options
@@ -245,9 +261,6 @@ def main(input_args=None):
     parser.add_argument(
         "--lr", type=float, default=1e-3, help="learning rate (default: 0.001)"
     )
-    # TODO: We don't want to do validation during training
-    # if we are training a diffusion model?
-    # Set to None?
     parser.add_argument(
         "--val_interval",
         type=int,

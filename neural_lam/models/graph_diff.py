@@ -21,7 +21,16 @@ class GraphDiff(ARModel):
 
     def __init__(self, args, config: NeuralLAMConfig, datastore: BaseDatastore):
         super().__init__(args, config=config, datastore=datastore)
-        self.map_noise = NoiseEmbedding()
+        print("Initializing GraphDiff")
+        print(f"Using noise embedding: {args.noise_embedding}")
+        if args.noise_embedding == "linear":
+            self.noise_dim = args.noise_dim
+            self.map_noise = LinearNoiseEmbedding(noise_dim=self.noise_dim)
+            print("Using linear noise embedding"
+                  f" with noise dim {args.noise_dim}")
+        else:
+            self.noise_dim = 16
+            self.map_noise = NoiseEmbedding(noise_dim=self.noise_dim)
 
         num_state_vars = datastore.get_num_data_vars(category="state")
         num_forcing_vars = datastore.get_num_data_vars(category="forcing")
@@ -38,12 +47,21 @@ class GraphDiff(ARModel):
             num_state_vars  # We only output the denoised state
         )
 
-        self.grid_dim = (
-            3 * self.grid_output_dim  # prev_prev, prev, diffusion
-            + grid_static_dim
-            + num_forcing_vars
-            * (num_past_forcing_steps + num_future_forcing_steps + 1)
-        )
+        if args.noise_embedding == "linear":
+            self.grid_dim = (
+                # prev_prev, prev, NOTE: we don't use diffusion chanenel for CRPS model
+                2 * self.grid_output_dim
+                + grid_static_dim
+                + num_forcing_vars
+                * (num_past_forcing_steps + num_future_forcing_steps + 1)
+            )
+        else:
+            self.grid_dim = (
+                3 * self.grid_output_dim  # prev_prev, prev, diffusion
+                + grid_static_dim
+                + num_forcing_vars
+                * (num_past_forcing_steps + num_future_forcing_steps + 1)
+            )
 
         # ----------------------------------------------------------------------------
         # BaseGraphModel parameters
@@ -79,9 +97,12 @@ class GraphDiff(ARModel):
         # Define sub-models
         # Feature embedders for grid
         self.mlp_blueprint_end = [args.hidden_dim] * (args.hidden_layers + 1)
-        self.grid_embedder = make_mlp([self.grid_dim] + self.mlp_blueprint_end)
-        self.g2m_embedder = make_mlp([g2m_dim] + self.mlp_blueprint_end)
-        self.m2g_embedder = make_mlp([m2g_dim] + self.mlp_blueprint_end)
+        self.grid_embedder = make_mlp(
+            [self.grid_dim] + self.mlp_blueprint_end, noise_level_dim=self.noise_dim)
+        self.g2m_embedder = make_mlp(
+            [g2m_dim] + self.mlp_blueprint_end, noise_level_dim=self.noise_dim)
+        self.m2g_embedder = make_mlp(
+            [m2g_dim] + self.mlp_blueprint_end, noise_level_dim=self.noise_dim)
 
         # GNNs
         gnn_class = PropagationNet if args.vertical_propnets else InteractionNet
@@ -91,9 +112,10 @@ class GraphDiff(ARModel):
             args.hidden_dim,
             hidden_layers=args.hidden_layers,
             update_edges=False,
+            noise_dim=self.noise_dim
         )
         self.encoding_grid_mlp = make_mlp(
-            [args.hidden_dim] + self.mlp_blueprint_end
+            [args.hidden_dim] + self.mlp_blueprint_end, noise_level_dim=self.noise_dim
         )
 
         # decoder
@@ -102,6 +124,7 @@ class GraphDiff(ARModel):
             args.hidden_dim,
             hidden_layers=args.hidden_layers,
             update_edges=False,
+            noise_dim=self.noise_dim
         )
 
         # Output mapping (hidden_dim -> output_dim)
@@ -145,25 +168,29 @@ class GraphDiff(ARModel):
         # Separate mesh node embedders for each level
         self.mesh_embedders = nn.ModuleList(
             [
-                make_mlp([mesh_dim] + self.mlp_blueprint_end)
+                make_mlp([mesh_dim] + self.mlp_blueprint_end,
+                         noise_level_dim=self.noise_dim)
                 for _ in range(self.num_levels)
             ]
         )
         self.mesh_same_embedders = nn.ModuleList(
             [
-                make_mlp([mesh_same_dim] + self.mlp_blueprint_end)
+                make_mlp([mesh_same_dim] + self.mlp_blueprint_end,
+                         noise_level_dim=self.noise_dim)
                 for _ in range(self.num_levels)
             ]
         )
         self.mesh_up_embedders = nn.ModuleList(
             [
-                make_mlp([mesh_up_dim] + self.mlp_blueprint_end)
+                make_mlp([mesh_up_dim] + self.mlp_blueprint_end,
+                         noise_level_dim=self.noise_dim)
                 for _ in range(self.num_levels - 1)
             ]
         )
         self.mesh_down_embedders = nn.ModuleList(
             [
-                make_mlp([mesh_down_dim] + self.mlp_blueprint_end)
+                make_mlp([mesh_down_dim] + self.mlp_blueprint_end,
+                         noise_level_dim=self.noise_dim)
                 for _ in range(self.num_levels - 1)
             ]
         )
@@ -176,6 +203,7 @@ class GraphDiff(ARModel):
                     edge_index,
                     args.hidden_dim,
                     hidden_layers=args.hidden_layers,
+                    noise_dim=self.noise_dim,
                 )
                 for edge_index in self.mesh_up_edge_index
             ]
@@ -189,6 +217,7 @@ class GraphDiff(ARModel):
                     args.hidden_dim,
                     hidden_layers=args.hidden_layers,
                     update_edges=False,
+                    noise_dim=self.noise_dim,
                 )
                 for edge_index in self.mesh_down_edge_index
             ]
@@ -228,7 +257,7 @@ class GraphDiff(ARModel):
         return prediction
 
     # BaseGraphModel methods
-    def predict_step(self, x, emb, cond):
+    def predict_step(self, x, emb, cond=None):
         """
         Step state one step ahead using prediction model, X_{t-1}, X_t -> X_t+1
         x: (B, num_grid_nodes, feature_dim)
@@ -238,14 +267,25 @@ class GraphDiff(ARModel):
         batch_size = x.shape[0]
 
         # Create full grid node features of shape (B, num_grid_nodes, grid_dim)
-        grid_features = torch.cat(
-            (
-                x,
-                cond,
-                self.expand_to_batch(self.grid_static_features, batch_size),
-            ),
-            dim=-1,
-        )
+        if cond is None:
+            grid_features = torch.cat(
+                (
+                    x,
+                    self.expand_to_batch(
+                        self.grid_static_features, batch_size),
+                ),
+                dim=-1,
+            )
+        else:
+            grid_features = torch.cat(
+                (
+                    x,
+                    cond,
+                    self.expand_to_batch(
+                        self.grid_static_features, batch_size),
+                ),
+                dim=-1,
+            )
 
         # Embed all features
         grid_emb = self.grid_embedder(
@@ -419,6 +459,7 @@ class GraphDiff(ARModel):
                     edge_index,
                     args.hidden_dim,
                     hidden_layers=args.hidden_layers,
+                    noise_dim=self.noise_dim,
                 )
                 for edge_index in self.m2m_edge_index
             ]
@@ -435,6 +476,7 @@ class GraphDiff(ARModel):
                     edge_index,
                     args.hidden_dim,
                     hidden_layers=args.hidden_layers,
+                    noise_dim=self.noise_dim,
                 )
                 for edge_index in self.mesh_up_edge_index
             ]
@@ -450,6 +492,7 @@ class GraphDiff(ARModel):
                     edge_index,
                     args.hidden_dim,
                     hidden_layers=args.hidden_layers,
+                    noise_dim=self.noise_dim,
                 )
                 for edge_index in self.mesh_down_edge_index
             ]
@@ -593,6 +636,17 @@ class GraphDiff(ARModel):
 
 # ----------------------------------------------------------------------------
 # Timestep embedding used in the NCSN++ architecture.
+class LinearNoiseEmbedding(nn.Module):
+    def __init__(self, noise_dim=32):
+        super(LinearNoiseEmbedding, self).__init__()
+        self.linear = nn.Linear(noise_dim, noise_dim)
+
+    def forward(self, noise):
+        noise_level_encoding = self.linear(noise)  # (batch_size, noise_dim)
+        if noise_level_encoding.dim() == 1:
+            noise_level_encoding = noise_level_encoding.unsqueeze(
+                0)  # Add back batch dimension if missing
+        return noise_level_encoding
 
 
 class FourierEmbedding(torch.nn.Module):
@@ -622,12 +676,13 @@ class NoiseLevelMLP(nn.Module):
 
 # TODO: Check if this is correct
 class NoiseEmbedding(nn.Module):
-    def __init__(self, num_frequencies=32, base_period=16):
+    def __init__(self, num_frequencies=32, base_period=16, noise_dim=16):
         super(NoiseEmbedding, self).__init__()
         self.fourier_transform = FourierEmbedding(
             num_channels=num_frequencies, scale=base_period
         )
-        self.mlp = NoiseLevelMLP(input_dim=num_frequencies, output_dim=16)
+        self.mlp = NoiseLevelMLP(
+            input_dim=num_frequencies, output_dim=noise_dim)
 
     def forward(self, log_noise_levels):
         emb = self.fourier_transform(log_noise_levels)
@@ -726,6 +781,7 @@ class InteractionNet(pyg.nn.MessagePassing):
         edge_chunk_sizes=None,
         aggr_chunk_sizes=None,
         aggr="sum",
+        noise_dim=16,
     ):
         """
         Create a new InteractionNet
@@ -747,6 +803,7 @@ class InteractionNet(pyg.nn.MessagePassing):
         """
         assert aggr in ("sum", "mean"), f"Unknown aggregation method: {aggr}"
         super().__init__(aggr=aggr)
+        self.noise_dim = noise_dim
 
         if hidden_dim is None:
             # Default to input dim if not explicitly given
@@ -766,18 +823,22 @@ class InteractionNet(pyg.nn.MessagePassing):
         aggr_mlp_recipe = [2 * input_dim] + [hidden_dim] * (hidden_layers + 1)
 
         if edge_chunk_sizes is None:
-            self.edge_mlp = make_mlp(edge_mlp_recipe)
+            self.edge_mlp = make_mlp(
+                edge_mlp_recipe, noise_level_dim=self.noise_dim)
         else:
             self.edge_mlp = SplitMLPs(
-                [make_mlp(edge_mlp_recipe) for _ in edge_chunk_sizes],
+                [make_mlp(edge_mlp_recipe, noise_level_dim=self.noise_dim)
+                 for _ in edge_chunk_sizes],
                 edge_chunk_sizes,
             )
 
         if aggr_chunk_sizes is None:
-            self.aggr_mlp = make_mlp(aggr_mlp_recipe)
+            self.aggr_mlp = make_mlp(
+                aggr_mlp_recipe, noise_level_dim=self.noise_dim)
         else:
             self.aggr_mlp = SplitMLPs(
-                [make_mlp(aggr_mlp_recipe) for _ in aggr_chunk_sizes],
+                [make_mlp(aggr_mlp_recipe, noise_level_dim=self.noise_dim)
+                 for _ in aggr_chunk_sizes],
                 aggr_chunk_sizes,
             )
 
@@ -849,6 +910,7 @@ class PropagationNet(InteractionNet):
         edge_chunk_sizes=None,
         aggr_chunk_sizes=None,
         aggr="sum",
+        noise_dim=16,
     ):
         # Use mean aggregation in propagation version to avoid instability
         super().__init__(
@@ -860,6 +922,7 @@ class PropagationNet(InteractionNet):
             edge_chunk_sizes=edge_chunk_sizes,
             aggr_chunk_sizes=aggr_chunk_sizes,
             aggr="mean",
+            noise_dim=noise_dim,
         )
 
     def forward(self, send_rep, rec_rep, edge_rep, emb=0):

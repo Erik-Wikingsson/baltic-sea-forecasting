@@ -45,12 +45,12 @@ class EDM(ARModel):
             args.pred_residual
         )  # Whether to predict the residual instead of the next state
 
-        if args.diffusion_model == "graph_diff":
+        if args.backbone_model == "graph_diff":
             print("Using GraphDiff")
             self.model = GraphDiff(args, config, datastore)
         else:
             raise NotImplementedError(
-                f"Unknown diffusion model: {args.diffusion_model}"
+                f"Unknown backbone model: {args.backbone_model}"
             )
 
         self.test_metrics.update(
@@ -114,6 +114,7 @@ class EDM(ARModel):
                 latents=latents,
                 class_labels=input_grid,
                 sigma_min=self.sigma_min * 1.5,
+                num_steps=self.sampler_steps,
             )
         elif self.sampler == "edm":
             next_state = self.edm_sampler(
@@ -127,6 +128,7 @@ class EDM(ARModel):
                 latents=latents,
                 class_labels=input_grid,
                 sigma_min=self.sigma_min * 1.5,
+                num_steps=self.sampler_steps,
             )
 
         # Add residual if needed
@@ -159,10 +161,7 @@ class EDM(ARModel):
                 prev_state, prev_prev_state, forcing)
 
             # Overwrite border with true state
-            pred_state = (
-                self.boundary_mask * true_state
-                + self.interior_mask * pred_state
-            )
+            pred_state = self.boundary_mask * true_state + self.interior_mask * pred_state
 
             prediction_list.append(pred_state)
 
@@ -703,20 +702,31 @@ class EDM(ARModel):
 
         # Calculate the loss
         # Weights for the loss function based on the noise level
-        weight = (
-            (sigma**2 + self.sigma_data**2) / (sigma * self.sigma_data) ** 2
-        ).squeeze()  # (B)
+        weight = (sigma**2 + self.sigma_data**2) / \
+            (sigma * self.sigma_data) ** 2
+        # (B)
 
         pred_std = self.per_var_std
 
-        loss = self.loss(
-            next_state,
-            target_state,
-            pred_std,
-            mask=self.interior_mask_bool,
-        )  # (B)
+        # loss = self.loss(
+        #     next_state,
+        #     target_state,
+        #     pred_std=pred_std,
+        #     mask=self.interior_mask_bool,
+        # )  # (B)
+        entry_mse = torch.nn.functional.mse_loss(
+            next_state, target_state, reduction="none"
+        )  # (..., N, d_state)
+        entry_mse_weighted = entry_mse / (pred_std**2)  # (..., N, d_state)
 
-        loss = loss * weight.squeeze()  # (B)
+        entry_mse_weighted = entry_mse_weighted * weight  # (B, N, d_state)
+
+        loss = metrics.mask_and_reduce_metric(
+            entry_mse_weighted,
+            mask=self.interior_mask_bool,
+            average_grid=True,
+            sum_vars=True,
+        )
 
         return next_state, loss
 
@@ -747,18 +757,15 @@ class EDM(ARModel):
                 prev_state, prev_prev_state, forcing, true_state
             )
 
-            # Overwrite border with true state
-            pred_state = (
-                self.boundary_mask * true_state
-                + self.interior_mask * pred_state
-            )
+        # Overwrite border with true state
+        pred_state = self.boundary_mask * true_state + self.interior_mask * pred_state
 
-            prediction_list.append(pred_state)
-            loss_list.append(loss)
+        prediction_list.append(pred_state)
+        loss_list.append(loss)
 
-            # Update conditioning states
-            prev_prev_state = prev_state
-            prev_state = pred_state
+        # Update conditioning states
+        prev_prev_state = prev_state
+        prev_state = pred_state
 
         prediction = torch.stack(
             prediction_list, dim=1

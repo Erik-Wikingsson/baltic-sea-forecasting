@@ -101,7 +101,7 @@ class FM(EDM):
         zt = (1 - t) * z0 + t * z1
 
         # Shape (B, d_state, N_x, N_y)
-        pred_drift = self.model(zt, t, input_grid)
+        pred_drift = self.model(zt, t.flatten(), input_grid)
 
         # This predicts the drift b
         drift = z1 - z0
@@ -174,19 +174,19 @@ class FM(EDM):
 
     def stochastic_sampler(
         self, latents, class_labels=None, boundary_forcing=None, randn_like=torch.randn_like,
-            num_steps=20,
+            num_steps=20, sigma_min=0.03, sigma_max=80, rho=7,
     ):
         tmin = 0.0
         tmax = 1
         eps = 1.0
 
         # Time step discretization.
-        ts = torch.linspace(tmin, tmax, num_steps, device=self.device)
+        ts = torch.linspace(tmin, tmax, num_steps+1, device=self.device)[:-1]
         dt = (tmax - tmin) / num_steps
 
         # Main sampling loop.
         zt = latents  # Initialize with noise
-        for t in ts[:-1]:
+        for t in ts:
             alpha_t = t
             beta_t = 1 - t
             gamma_t = 1
@@ -194,9 +194,8 @@ class FM(EDM):
             beta_dot_t = -1
             eps_t = eps * beta_t
 
-            b = self.model(zt, t, class_labels)
-            s = (alpha_t * b - alpha_dot_t * zt) / \
-                (beta_t * gamma_t)  # s = (t * b - zt) / (1 - t)
+            b = self.forward(zt, t, class_labels=class_labels, dropout=self.dropout)
+            s = (alpha_t * b - alpha_dot_t * zt) / (beta_t * gamma_t) # s = (t * b - zt) / (1 - t)
             dz = b + eps_t * s
 
             dW = torch.randn_like(zt) * torch.sqrt(2*dt * eps_t)

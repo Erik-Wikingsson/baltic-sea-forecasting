@@ -7,3 +7,4 @@ from .graph_efm import GraphEFM
 from .graph_fm import GraphFM
 from .graphcast import GraphCast
 from .FM import FM
+from .crps import CRPS

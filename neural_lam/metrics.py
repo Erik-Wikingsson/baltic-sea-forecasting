@@ -34,8 +34,8 @@ def mask_and_reduce_metric(metric_entry_vals, mask, average_grid, sum_vars):
     metric_val: One of (...,), (..., d_state), (..., N), (..., N, d_state),
     depending on reduction arguments.
     """
-
-    metric_entry_vals *= mask
+    if mask is not None:
+        metric_entry_vals *= mask
 
     # Optionally reduce last two dimensions
     if average_grid:  # Reduce grid first

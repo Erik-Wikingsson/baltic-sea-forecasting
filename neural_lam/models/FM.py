@@ -116,7 +116,7 @@ class FM(EDM):
         )  # (B)
 
         # This is the predicted E[z1 | zt]
-        next_state = zt + pred_drift * (1-t)
+        next_state = zt + pred_drift * (1 - t)
 
         # Add residual if needed
         if self.pred_residual:
@@ -142,7 +142,11 @@ class FM(EDM):
     # ----------------------------------------------------------------------------
     # Proposed Heun sampler (Algorithm 1).
     def heun_sampler(
-        self, latents, class_labels=None, boundary_forcing=None, randn_like=torch.randn_like,
+        self,
+        latents,
+        class_labels=None,
+        boundary_forcing=None,
+        randn_like=torch.randn_like,
         num_steps=20,
     ):
         tmin = 0.0
@@ -165,16 +169,20 @@ class FM(EDM):
 
             # Apply 2nd order correction.
             if i < num_steps - 1:
-                d_prime = self.model(
-                    x_next, t_next, class_labels)
-                x_next = x_cur + (t_next - t_cur) * \
-                    (0.5 * d_cur + 0.5 * d_prime)
+                d_prime = self.model(x_next, t_next, class_labels)
+                x_next = x_cur + (t_next - t_cur) * (
+                    0.5 * d_cur + 0.5 * d_prime
+                )
 
         return x_next
 
     def stochastic_sampler(
-        self, latents, class_labels=None, boundary_forcing=None, randn_like=torch.randn_like,
-            num_steps=20, sigma_min=0.03, sigma_max=80, rho=7,
+        self,
+        latents,
+        class_labels=None,
+        boundary_forcing=None,
+        randn_like=torch.randn_like,
+        num_steps=20,
     ):
         tmin = 0.0
         tmax = 1
@@ -194,11 +202,13 @@ class FM(EDM):
             beta_dot_t = -1
             eps_t = eps * beta_t
 
-            b = self.forward(zt, t, class_labels=class_labels, dropout=self.dropout)
-            s = (alpha_t * b - alpha_dot_t * zt) / (beta_t * gamma_t) # s = (t * b - zt) / (1 - t)
+            b = self.model(zt, t, class_labels)
+            s = (alpha_t * b - alpha_dot_t * zt) / (
+                beta_t * gamma_t
+            )  # s = (t * b - zt) / (1 - t)
             dz = b + eps_t * s
 
-            dW = torch.randn_like(zt) * torch.sqrt(2*dt * eps_t)
+            dW = torch.randn_like(zt) * torch.sqrt(2 * dt * eps_t)
 
             zt = zt + dz * dt + dW
 

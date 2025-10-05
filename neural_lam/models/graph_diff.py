@@ -250,8 +250,7 @@ class GraphDiff(ARModel):
         cond: (B, num_grid_nodes, feature_dim)
         """
         # Mapping.
-        emb = self.map_noise(noise_level).unsqueeze(
-            1).expand(x.shape[0], 1, -1)
+        emb = self.map_noise(noise_level).unsqueeze(1).expand(x.shape[0], 1, -1)
         prediction = self.predict_step(x, emb, cond)
 
         return prediction

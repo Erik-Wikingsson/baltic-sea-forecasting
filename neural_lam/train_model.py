@@ -15,6 +15,7 @@ from loguru import logger
 from . import utils
 from .config import load_config_and_datastore
 from .models import EDM, GraphCast, GraphEFM, GraphFM, FM, CRPS
+from .models import EDM, FM, GraphCast, GraphEFM, GraphFM
 from .weather_dataset import WeatherDataModule
 
 MODELS = {

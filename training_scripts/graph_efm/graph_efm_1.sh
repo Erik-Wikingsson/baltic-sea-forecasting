@@ -9,12 +9,12 @@
 # Since the prior isn't trained, the prior samples do not matter here.
 
 pdm run python -m neural_lam.train_model \
-    --config_path /monolith/global_data/ml_datasets/baltic_sea/data/baltic_nl_config_small.yaml \
-    --num_workers 8 \
+    --config_path /monolith/global_data/ml_datasets/baltic_sea/data/baltic_graph_rework.yaml \
+    --num_workers 2 \
     --precision bf16-mixed \
     --model graph_efm \
     --graph hierarchical \
-    --hidden_dim 64 \
+    --hidden_dim 8 \
     --processor_layers 2 \
     --num_past_forcing_steps 1 \
     --num_future_forcing_steps 1 \

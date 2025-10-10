@@ -553,3 +553,40 @@ class MDPDatastore(BaseRegularGridDatastore):
             da_mask = da_mask == 0
 
         return da_mask.values.astype(bool)
+
+    def get_atmosphere_mask(
+        self, stacked: bool = True, invert: bool = False
+    ) -> np.ndarray:
+        """
+        Return the atmosphere mask.
+
+        Parameters
+        ----------
+        stacked : bool
+            Whether to stack the lat, lon coordinates.
+        invert : bool
+            Whether to invert the mask.
+
+        Returns
+        -------
+        np.ndarray
+            The dataset mask, returned differently based on
+            the value of `stacked`:
+            - `stacked=True`: (N_lat*N_lon,)
+            - `stacked=False`: (N_lat, N_lon)
+        """
+        da_mask = self._ds["mask"]
+        da_mask = da_mask.sel(mask_feature="mask")
+
+        if stacked:
+            # already has grid_index dimension, return (N_grid,)
+            mask_arr = da_mask
+        else:
+            # unstack to (lat, lon)
+            mask_arr = self.unstack_grid_coords(da_mask)
+            mask_arr = mask_arr.transpose("longitude", "latitude")
+
+        if invert:
+            mask_arr = mask_arr == 0
+
+        return mask_arr.values.astype(bool)

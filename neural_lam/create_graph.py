@@ -588,14 +588,17 @@ def create_graph_from_datastore(
     land_mask = datastore.get_mask(surface=True, stacked=False, invert=True)
     xy = datastore.get_projected_xy("state", stacked=False)
 
-    # How to get boundary + mask and atmosphere xy
-    # boundary_mask = datastore_boundary.get_mask(
-    #     surface=True, stacked=False, invert=True
-    # )
-    # xy_boundary = datastore_boundary.get_projected_xy("forcing",stacked=False)
-    # xy_atmosphere = datastore_atmosphere.get_projected_xy(
-    #     "forcing", stacked=False
-    # )
+    boundary_mask = datastore_boundary.get_mask(
+        surface=True, stacked=False, invert=True
+    )
+    xy_boundary = datastore_boundary.get_projected_xy("forcing", stacked=False)
+
+    atmosphere_mask = datastore_atmosphere.get_atmosphere_mask(
+        stacked=False, invert=True
+    )
+    xy_atmosphere = datastore_atmosphere.get_projected_xy(
+        "forcing", stacked=False
+    )
 
     create_graph(
         graph_dir_path=output_root_path,

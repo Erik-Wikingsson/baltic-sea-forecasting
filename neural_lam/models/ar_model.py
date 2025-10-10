@@ -190,7 +190,7 @@ class ARModel(pl.LightningModule):
             (
                 self.num_atmosphere_nodes,
                 atmosphere_static_dim,
-            ) = self.boundary_static_features.shape
+            ) = self.atmosphere_static_features.shape
 
             # Compute atmosphere input dim separately
             num_atmosphere_forcing_vars = (

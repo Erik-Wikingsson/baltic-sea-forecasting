@@ -510,10 +510,10 @@ class MDPDatastore(BaseRegularGridDatastore):
         np.ndarray
             The dataset mask, returned differently based on
             the values of `surface` and `stacked`:
-            - `surface=True`, `stacked=True`: (N_lat*N_lon,)
-            - `surface=True`, `stacked=False`: (N_lat, N_lon)
-            - `surface=False`, `stacked=True`: (N_lat*N_lon, d_features)
-            - `surface=False`, `stacked=False`: (N_lat, N_lon, d_features)
+            - `surface=True`, `stacked=True`: (N_lon*N_lon,)
+            - `surface=True`, `stacked=False`: (N_lon, N_lat)
+            - `surface=False`, `stacked=True`: (N_lon*N_lat, d_features)
+            - `surface=False`, `stacked=False`: (N_lon, N_lat, d_features)
         """
         da_mask = self._ds["mask"]
 
@@ -572,8 +572,8 @@ class MDPDatastore(BaseRegularGridDatastore):
         np.ndarray
             The dataset mask, returned differently based on
             the value of `stacked`:
-            - `stacked=True`: (N_lat*N_lon,)
-            - `stacked=False`: (N_lat, N_lon)
+            - `stacked=True`: (N_lon*N_lat,)
+            - `stacked=False`: (N_lon, N_lat)
         """
         da_mask = self._ds["mask"]
         da_mask = da_mask.sel(mask_feature="mask")

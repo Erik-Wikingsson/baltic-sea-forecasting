@@ -143,8 +143,8 @@ def mk_2d_graph(xy, nx, ny, land_mask):
             g.nodes[node]["pos"] = node_pos
 
     # add diagonal edges if both nodes exist
-    for x in range(nx - 1):
-        for y in range(ny - 1):
+    for x in range(nx_eff - 1):
+        for y in range(ny_eff - 1):
             if g.has_node((x, y)) and g.has_node((x + 1, y + 1)):
                 g.add_edge((x, y), (x + 1, y + 1))
             if g.has_node((x + 1, y)) and g.has_node((x, y + 1)):

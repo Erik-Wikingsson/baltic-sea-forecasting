@@ -103,10 +103,10 @@ class WeatherDataset(torch.utils.data.Dataset):
             )
         self.surface_mask = self.datastore.get_mask(
             surface=True, stacked=True, invert=False
-        )  # (N_lat*N_lon)
+        )  # (N_lon*N_lat)
         self.land_mask = self.datastore.get_mask(
             surface=False, stacked=True, invert=True
-        )  # (N_lat*N_lon, d_features)
+        )  # (N_lon*N_lat, d_features)
         self.land_mask_bool = self.datastore.get_mask(
             surface=False, stacked=True, invert=True
         )[self.surface_mask][np.newaxis, ...].astype(
@@ -114,7 +114,7 @@ class WeatherDataset(torch.utils.data.Dataset):
         )  # (1, N_grid, d_features)
         self.surface_mask_boundary = self.datastore_boundary.get_mask(
             surface=True, stacked=True, invert=False
-        )  # (N_lat_boundary*N_lon_boundary)
+        )  # (N_lon_boundary*N_lat_boundary)
 
         # check that with the provided data-arrays and ar_steps that we have a
         # non-zero amount of samples
@@ -649,7 +649,7 @@ class WeatherDataset(torch.utils.data.Dataset):
             da_atmosphere_windowed.values, dtype=tensor_dtype
         )
 
-        # mask to surface grid (N_lat*N_lon -> N_grid)
+        # mask to surface grid (N_lon*N_lat -> N_grid)
         init_states = init_states[:, self.surface_mask, :]
         target_states = target_states[:, self.surface_mask, :]
         forcing = forcing[:, self.surface_mask, :]

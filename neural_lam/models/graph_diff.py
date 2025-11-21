@@ -97,6 +97,7 @@ class GraphDiff(ARModel):
         if args.noise_embedding == "linear":
             # TODO: Should expand noise dim as in the flow models
             self.noise_dim = args.noise_dim
+            self.noise_level_dim = self.noise_dim
             self.map_noise = LinearNoiseEmbedding(noise_dim=self.noise_dim)
             print("Using linear noise embedding"
                   f" with noise dim {args.noise_dim}")
@@ -673,6 +674,19 @@ class FourierEmbedding(torch.nn.Module):
         x = torch.cat([x.cos(), x.sin()], dim=1)
         return x
 
+# Fourier embedding supporting (batch_size, noise_dim) input?
+# class FourierEmbedding(torch.nn.Module):
+#     def __init__(self, num_channels, scale=16):
+#         super().__init__()
+#         self.num_channels = num_channels
+#         self.scale = scale
+#
+#     def forward(self, x):
+#         noise_dim = x.shape[1]
+#         freqs = torch.randn(noise_dim, self.num_channels // 2).to(x.dtype)
+#         x = 2 * np.pi * (x @ freqs)
+#         x = torch.cat([x.cos(), x.sin()], dim=1)
+#         return x
 
 class NoiseLevelMLP(nn.Module):
     def __init__(self, input_dim, hidden_dim=128, output_dim=16):

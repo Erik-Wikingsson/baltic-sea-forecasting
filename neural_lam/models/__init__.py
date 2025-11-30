@@ -7,3 +7,6 @@ from .graph_diff import GraphDiff
 from .graph_efm import GraphEFM
 from .graph_fm import GraphFM
 from .graphcast import GraphCast
+from .FM import FM
+from .crps import CRPS
+from .SI import SI

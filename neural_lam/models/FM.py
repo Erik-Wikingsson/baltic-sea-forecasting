@@ -101,7 +101,7 @@ class FM(EDM):
         zt = (1 - t) * z0 + t * z1
 
         # Shape (B, d_state, N_x, N_y)
-        pred_drift = self.model(zt, t, input_grid)
+        pred_drift = self.model(zt, t.flatten(), input_grid)
 
         # This predicts the drift b
         drift = z1 - z0
@@ -189,12 +189,12 @@ class FM(EDM):
         eps = 1.0
 
         # Time step discretization.
-        ts = torch.linspace(tmin, tmax, num_steps, device=self.device)
+        ts = torch.linspace(tmin, tmax, num_steps+1, device=self.device)[:-1]
         dt = (tmax - tmin) / num_steps
 
         # Main sampling loop.
         zt = latents  # Initialize with noise
-        for t in ts[:-1]:
+        for t in ts:
             alpha_t = t
             beta_t = 1 - t
             gamma_t = 1

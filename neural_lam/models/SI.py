@@ -1,5 +1,6 @@
 # Standard library
 import math
+from typing import Union
 
 # Third-party
 import matplotlib.pyplot as plt
@@ -33,8 +34,10 @@ class SI(EDM):
         args,
         config: NeuralLAMConfig,
         datastore: BaseDatastore,
+        datastore_boundary: Union[BaseDatastore, None],
+        datastore_atmosphere: Union[BaseDatastore, None],
     ):
-        super().__init__(args, config, datastore)
+        super().__init__(args, config, datastore, datastore_boundary, datastore_atmosphere)
         self.GT = None
         self.sampler = "euler"  # TODO: Only euler for now
         # TODO: Should be able to change sigma_coef
@@ -43,7 +46,7 @@ class SI(EDM):
         self.t_max_sampling = .999
 
     # Evaluation
-    def EM(self, base=None, cond=None, diffusion_fn=None):
+    def EM(self, base=None, cond=None, boundary_forcing=None, atmosphere_forcing=None, diffusion_fn=None):
         steps = self.sampler_steps
         tmin, tmax = self.t_min_sampling, self.t_max_sampling
         ts = torch.linspace(tmin, tmax, steps).type_as(base)
@@ -60,7 +63,7 @@ class SI(EDM):
         def step_fn(xt, t):
             D = self.I.interpolant_coefs({'t': t, 'zt': xt, 'z0': base})
 
-            bF = self.model(xt, t, cond)
+            bF = self.model(xt, t, cond, boundary_forcing, atmosphere_forcing)
             D['bF'] = bF
             sigma = self.I.sigma(t)
 
@@ -81,11 +84,12 @@ class SI(EDM):
 
         # TODO: Only supporting the same diffusion function for now.
         def step_fn_2(xt, t, t1):
-            bF = self.model(xt, t, cond)
+            bF = self.model(xt, t, cond, boundary_forcing, atmosphere_forcing)
 
             mu1 = xt + bF * dt
 
-            bF2 = self.model(mu1, t1, cond)
+            bF2 = self.model(mu1, t1, cond, boundary_forcing,
+                             atmosphere_forcing)
 
             f = 0.5 * (bF + bF2)
 
@@ -114,26 +118,33 @@ class SI(EDM):
         return mu
 
     # TODO: Should support going from pure noise to the reference distribution to compare with diffusion.
-    def predict_step(self, prev_state, prev_prev_state, forcing):
+    def predict_step(
+        self,
+        prev_state,
+        prev_prev_state,
+        forcing,
+        boundary_forcing,
+        atmosphere_forcing,
+    ):
         """
-        Predict weather state one time step ahead
-        X_{t-1}, X_t -> X_t+1
+        Step state one step ahead using prediction model, X_{t-1}, X_t -> X_t+1
+        prev_state: (B, num_grid_nodes, feature_dim), X_t
+        prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1}
+        forcing: (B, num_grid_nodes, forcing_dim)
+        boundary_forcing: (B, num_boundary_nodes, boundary_forcing_dim)
+        atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
 
-        prev_state: (B, N_grid, d_state), weather state X_t at time t
-        prev_prev_state: (B, N_grid, d_state), weather state X_{t-1} at time t-1
-        batch_static_features: (B, N_grid, batch_static_feature_dim), static forcing
-        forcing: (B, N_grid, forcing_dim), dynamic forcing
 
         Returns:
-        next_state: (B, N_grid, d_state), predicted weather state X_{t+1} at time t+1
-        pred_std: None or (B, N_grid, d_state), predicted standard-deviations
-                    (pred_std can be ignored by just returning None)
+        next_state: (B, N_grid, d_state),
+            predicted weather state X_{t+1} at time t+1
         """
         input_grid = torch.cat(
             (prev_state, prev_prev_state, forcing), dim=-1)  # (B, N_grid, d_input)
 
-        # definently_sample
-        EM_args = {'base': prev_state, 'cond': input_grid}
+        # definitely_sample
+        EM_args = {'base': prev_state, 'cond': input_grid,
+                   'boundary_forcing': boundary_forcing, 'atmosphere_forcing': atmosphere_forcing}
 
         # list diffusion funcs
         # None means use the one you trained with
@@ -149,20 +160,30 @@ class SI(EDM):
         return next_state
 
     # TODO: Should support going from pure noise to the reference distribution to compare with diffusion.
-    def predict_step_train(self, prev_state, prev_prev_state, forcing, target_state):
+    def predict_step_train(
+        self,
+        prev_state,
+        prev_prev_state,
+        forcing,
+        boundary_forcing,
+        atmosphere_forcing,
+        target_state
+    ):
         """
         Predict weather state one time step ahead
         X_{t-1}, X_t -> X_t+1
 
         prev_state: (B, N_grid, d_state), weather state X_t at time t
         prev_prev_state: (B, N_grid, d_state), weather state X_{t-1} at time t-1
-        batch_static_features: (B, N_grid, batch_static_feature_dim), static forcing
+        batch_static_features: (B, N_grid, batch_static_feature_dim), static
         forcing: (B, N_grid, forcing_dim), dynamic forcing
+        boundary_forcing: (B, num_boundary_nodes, boundary_forcing_dim)
+        atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
+        target_state: (B, N_grid, d_state), true weather state X_{t+1} at time t+1
 
         Returns:
-        next_state: (B, N_grid, d_state), predicted weather state X_{t+1} at time t+1
-        pred_std: None or (B, N_grid, d_state), predicted standard-deviations
-                    (pred_std can be ignored by just returning None)
+        next_state: (B, N_grid, d_state), predicted weather state X_{t+1} at t+1
+        loss: (B)
         """
 
         input_grid = torch.cat((prev_state, prev_prev_state, forcing), dim=-1)
@@ -187,7 +208,7 @@ class SI(EDM):
         D['drift_target'] = self.I.compute_target(D)
 
         output = self.model(D['zt'], D['t'].reshape(
-            D['zt'].shape[0]), input_grid)  # Shape (B, d_state, N_x, N_y)
+            D['zt'].shape[0]), input_grid, boundary_forcing, atmosphere_forcing)  # Shape (B, d_state, N_x, N_y)
 
         # Calculate loss
         loss = F.mse_loss(output, D['drift_target'], reduction='none')

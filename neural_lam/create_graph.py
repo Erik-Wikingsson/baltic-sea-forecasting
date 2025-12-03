@@ -410,7 +410,8 @@ def create_graph(
                 .reshape(int(n / nx) ** 2, 2)
             )
             ij = [tuple(x) for x in ij]
-            G[lev] = networkx.relabel_nodes(G[lev], dict(zip(G[lev].nodes, ij)))
+            G[lev] = networkx.relabel_nodes(
+                G[lev], dict(zip(G[lev].nodes, ij)))
             G_tot = networkx.compose(G_tot, G[lev])
 
         # Relabel mesh nodes to start with 0

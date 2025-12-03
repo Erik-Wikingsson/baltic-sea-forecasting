@@ -13,7 +13,7 @@ from loguru import logger
 
 # Local
 from . import utils
-from .config import load_config_and_datastore
+from .config import load_config_and_datastores
 from .models import EDM, GraphCast, GraphEFM, GraphFM, FM, CRPS, SI
 from .models import EDM, FM, GraphCast, GraphEFM, GraphFM
 from .weather_dataset import WeatherDataModule

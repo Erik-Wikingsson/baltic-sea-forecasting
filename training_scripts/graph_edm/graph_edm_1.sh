@@ -4,8 +4,8 @@
 # Change the config_path to point to your dataset configuration file
 # Change the --num_workers, --precision and --batch_size according to your system's capabilities
 
-pdm run python -m neural_lam.train_model \
-    --config_path /monolith/global_data/ml_datasets/baltic_sea/data/baltic_nl_config_small.yaml \
+python -m neural_lam.train_model \
+    --config_path /proj/berzelius-2022-164/weather/neural_lam_datasets/baltic/graph_rework_data/baltic_graph_rework.yaml \
     --model EDM \
     --precision bf16-mixed \
     --n_example_pred 1 \
@@ -27,4 +27,5 @@ pdm run python -m neural_lam.train_model \
     --num_sanity_val_steps 0 \
     --val_steps_to_log 1 2 4 \
     --var_leads_val_plot '{"0":[1,4], "1":[1,4], "2":[1,4], "3":[1,4], "4":[1,4]}' \
-    --devices 3 4 5
+    # --subset_ds \
+    # --devices 3 4 5

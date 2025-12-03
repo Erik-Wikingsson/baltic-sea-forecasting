@@ -67,6 +67,7 @@ class ARProbModel(ARModel):
         forcing: torch.Tensor,
         boundary_forcing: torch.Tensor,
         atmosphere_forcing: torch.Tensor,
+        ensemble_size: int = None,
     ):
         """
         Sample trajectories from the model.
@@ -78,6 +79,8 @@ class ARProbModel(ARModel):
         Returns:
         sampled_trajectories: (num_traj, B, pred_steps, num_interior_nodes, d_f)
         """
+        if ensemble_size is None:
+            ensemble_size = self.ensemble_size
 
         traj_list = [
             self.unroll_prediction(

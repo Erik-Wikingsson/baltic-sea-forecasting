@@ -1175,43 +1175,6 @@ class GraphEFM(ARProbModel):
 
             plt.close("all")
 
-    def log_spsk_ratio(self, metric_vals, prefix):
-        """
-        Compute the mean spread-skill ratio for logging in evaluation
-
-        metric_vals: dict with all metric values
-        prefix: string, prefix to use for logging
-        """
-        # Compute mean spsk_ratio
-        spread_squared_tensor = self.all_gather_cat(
-            torch.cat(metric_vals["spread_squared"], dim=0)
-        )  # (N_eval, pred_steps, d_f)
-        ens_mse_tensor = self.all_gather_cat(
-            torch.cat(metric_vals["ens_mse"], dim=0)
-        )  # (N_eval, pred_steps, d_f)
-
-        # Do not log during sanity check?
-        if self.trainer.is_global_zero and not self.trainer.sanity_checking:
-            # Note that spsk_ratio is scale-invariant, so do not have to rescale
-            spread = torch.sqrt(torch.mean(spread_squared_tensor, dim=0))
-            skill = torch.sqrt(torch.mean(ens_mse_tensor, dim=0))
-            # Both (pred_steps, d_f)
-
-            # Include finite sample correction
-            spsk_ratios = np.sqrt(
-                (self.ensemble_size + 1) / self.ensemble_size
-            ) * (
-                spread / skill
-            )  # (pred_steps, d_f)
-            log_dict = self.create_metric_log_dict(
-                spsk_ratios, prefix, "spsk_ratio"
-            )
-
-            log_dict[f"{prefix}_mean_spsk_ratio"] = torch.mean(
-                spsk_ratios
-            )  # log mean
-            wandb.log(log_dict)
-
     def test_step(self, batch, batch_idx):
         """
         Run test on single batch
@@ -1252,11 +1215,3 @@ class GraphEFM(ARProbModel):
             sum_vars=False,
         )  # (B, pred_steps, d_f)
         self.test_metrics["crps_ens"].append(crps_batch)
-
-    def on_test_epoch_end(self):
-        """
-        Compute test metrics and make plots at the end of test epoch.
-        Will gather stored tensors and perform plotting and logging on rank 0.
-        """
-        super().on_test_epoch_end()
-        self.log_spsk_ratio(self.test_metrics, "test")

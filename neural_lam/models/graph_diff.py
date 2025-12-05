@@ -49,21 +49,9 @@ class GraphDiff(ARModel):
             num_state_vars  # We only output the denoised state
         )
 
-        if args.noise_embedding == "linear":
-            self.grid_dim = (
-                # prev_prev, prev, NOTE: we don't use diffusion chanenel for CRPS model
-                2 * self.grid_output_dim
-                + grid_static_dim
-                + num_forcing_vars
-                * (num_past_forcing_steps + num_future_forcing_steps + 1)
-            )
-        else:
-            self.grid_dim = (
-                3 * self.grid_output_dim  # prev_prev, prev, diffusion
-                + grid_static_dim
-                + num_forcing_vars
-                * (num_past_forcing_steps + num_future_forcing_steps + 1)
-            )
+        # Add the noise channel for the diffusion process
+        if args.noise_embedding != "linear":
+            self.interior_input_dim += num_state_vars
 
         # ----------------------------------------------------------------------------
         # BaseGraphModel parameters
@@ -337,8 +325,8 @@ class GraphDiff(ARModel):
         interior_emb = self.interior_embedder(
             interior_features, emb
         )  # (B, num_interior_nodes, d_h)
-        g2m_emb = self.g2m_embedder(self.g2m_features)  # (M_g2m, d_h)
-        m2g_emb = self.m2g_embedder(self.m2g_features)  # (M_m2g, d_h)
+        g2m_emb = self.g2m_embedder(self.g2m_features, emb)  # (M_g2m, d_h)
+        m2g_emb = self.m2g_embedder(self.m2g_features, emb)  # (M_m2g, d_h)
         mesh_emb = self.embedd_mesh_nodes(emb)
         grid_emb_list = [interior_emb]
 
@@ -850,6 +838,8 @@ class MLP(nn.Module):
 
         return x
 
+# TODO: If we accept noise_level_dim and emb for other models as an optional argument we don't need to have this here
+
 
 def make_mlp(blueprint, layer_norm=True, noise_level_dim=16):
     """
@@ -909,6 +899,7 @@ class InteractionNet(pyg.nn.MessagePassing):
             assumption that all receiver nodes have at least one incoming edge.
         noise_dim: Dimensionality of noise level embedding
         """
+        self.noise_level_dim = noise_dim
         assert aggr in ("sum", "mean"), f"Unknown aggregation method: {aggr}"
         super().__init__(aggr=aggr)
 
@@ -1040,6 +1031,7 @@ class PropagationNet(InteractionNet):
             edge_chunk_sizes=edge_chunk_sizes,
             aggr_chunk_sizes=aggr_chunk_sizes,
             aggr="mean",
+            num_rec=num_rec,
             noise_dim=noise_dim,
         )
 

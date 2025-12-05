@@ -325,6 +325,100 @@ def crps_ens(
     return mask_and_reduce_metric(crps_estimator, mask, average_grid, sum_vars)
 
 
+def afcrps_ens(
+    pred,
+    target,
+    pred_std,  # pylint: disable=unused-argument
+    mask=None,
+    average_grid=True,
+    sum_vars=True,
+    ens_dim=1,
+    alpha=0.95,
+):
+    """
+    (Negative) Almost Fair Continuous Ranked Probability Score (CRPS)
+
+    (..., M, ...,) is any number of batch dimensions, including ensemble dimension M
+
+    pred: (..., M, D, X, Y), prediction
+    target: (..., D, X, Y), target
+    mask: (X, Y), boolean mask describing which grid nodes to use in metric
+    average_grid: boolean, if grid dimension should be reduced (mean over X, Y)
+    sum_vars: boolean, if variable dimension should be reduced (sum over D)
+
+    Returns:
+    metric_val: One of (...,), (..., d_state), (..., N), (..., N, d_state),
+    depending on reduction arguments.
+    """
+    if pred.shape == target.shape:
+        pred = pred.unsqueeze(ens_dim)
+
+    num_ens = pred.shape[ens_dim]  # Number of ensemble members
+    eps = (1-alpha) / num_ens
+    if num_ens == 1:
+        # With one sample CRPS reduces to MAE
+        return mae(
+            pred.squeeze(ens_dim),
+            target,
+            mask=mask,
+            average_grid=average_grid,
+            sum_vars=sum_vars,
+        )
+
+    if num_ens == 2:
+        mean_mae = torch.mean(
+            torch.abs(pred - target.unsqueeze(ens_dim)), dim=ens_dim
+        )
+
+        # Use simpler estimator
+        pair_diffs_term = -0.5 * torch.abs(
+            pred.select(ens_dim, 0) - pred.select(ens_dim, 1)
+        )
+
+        crps_estimator = mean_mae + (1-eps) * pair_diffs_term
+    elif num_ens < 10:
+        # This is the rank-based implementation with O(M*log(M)) compute and
+        # O(M) memory. See Zamo and Naveau and WB2 for explanation.
+        # For smaller ensemble we can compute all of this directly in memory.
+        mean_mae = torch.mean(
+            torch.abs(pred - target.unsqueeze(ens_dim)), dim=ens_dim
+        )
+
+        # Ranks start at 1, two argsorts will compute entry ranks
+        ranks = pred.argsort(dim=ens_dim).argsort(ens_dim) + 1
+
+        pair_diffs_term = (1 / (num_ens - 1)) * torch.mean(
+            (num_ens + 1 - 2 * ranks) * pred,
+            dim=ens_dim,
+        )
+
+        crps_estimator = mean_mae + (1-eps) * pair_diffs_term
+    else:
+        # For large ensembles we batch this over the variable dimension
+        crps_res = []
+        # Pred is of shape (..., M, D, X, Y)
+        for var_i in range(pred.shape[-3]):
+            pred_var = pred[..., var_i, :, :]
+            target_var = target[..., var_i, :, :]
+
+            mean_mae = torch.mean(
+                torch.abs(pred_var - target_var.unsqueeze(ens_dim)), dim=ens_dim
+            )
+
+            # Ranks start at 1, two argsorts will compute entry ranks
+            ranks = pred_var.argsort(dim=ens_dim).argsort(ens_dim) + 1
+
+            pair_diffs_term = (1 / (num_ens - 1)) * torch.mean(
+                (num_ens + 1 - 2 * ranks) * pred_var,
+                dim=ens_dim,
+            )
+            crps_res.append(mean_mae + (1-eps) * pair_diffs_term)
+
+        crps_estimator = torch.stack(crps_res, dim=-3)  # (..., D, X, Y)
+
+    return mask_and_reduce_metric(crps_estimator, mask, average_grid, sum_vars)
+
+
 def spread_squared(
     pred,
     target,  # pylint: disable=unused-argument

@@ -253,6 +253,12 @@ def main(input_args=None):
         default=32,
         help="Dimension of the noise vector z, 32 in FGN (default: 32)",
     )
+    parser.add_argument(
+        "--crps_alpha",
+        type=float,
+        default=0.95,
+        help="Alpha parameter for the Almost Fair CRPS (default: 0.95)",
+    )
 
     # Training options
     parser.add_argument(

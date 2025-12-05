@@ -10,7 +10,7 @@ BS=1
 PREC=32 # Change to bf16 if suitable
 
 srun python -m neural_lam.train_model \
-    --config_path /proj/berzelius-2022-164/weather/neural_lam_datasets/baltic/small_data/baltic_nl_config_tiny.yaml \
+    --config_path /proj/berzelius-2022-164/weather/neural_lam_datasets/baltic/graph_rework_data/baltic_graph_rework.yaml \
     --model FM \
     --precision $PREC\
     --n_example_pred 1 \

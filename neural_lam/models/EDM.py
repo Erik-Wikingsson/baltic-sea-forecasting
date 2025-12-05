@@ -411,7 +411,7 @@ class EDM(ARProbModel):
         return next_state, loss
 
     def unroll_prediction_train(
-        self, init_states, forcing, boundary_forcing, atmosphere_forcing
+        self, init_states, forcing, boundary_forcing, atmosphere_forcing, target_states
     ):
         """
         Roll out prediction taking multiple autoregressive steps with model
@@ -446,7 +446,7 @@ class EDM(ARProbModel):
                 forcing_step,
                 boundary_forcing_step,
                 atmosphere_forcing_step,
-            )
+                target_state=target_states[:, i])
             # state: (B, num_grid_nodes, d_f)
             # pred_std: (B, num_grid_nodes, d_f) or None
 
@@ -488,7 +488,7 @@ class EDM(ARProbModel):
         ) = batch
 
         prediction, loss = self.unroll_prediction_train(
-            init_states, forcing, boundary_forcing, atmosphere_forcing
+            init_states, forcing, boundary_forcing, atmosphere_forcing, target_states
         )  # (B, pred_steps, num_grid_nodes, d_f)
         # prediction: (B, pred_steps, num_grid_nodes, d_f)
         # pred_std: (B, pred_steps, num_grid_nodes, d_f) or (d_f,)

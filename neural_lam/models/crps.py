@@ -12,6 +12,7 @@ import xarray as xr
 # First-party
 from neural_lam import metrics, vis
 from neural_lam.models.EDM import EDM
+from neural_lam.models.ar_prob_model import ARProbModel
 from neural_lam.models.graph_diff import GraphDiff
 
 # Local
@@ -21,7 +22,7 @@ from ..datastore import BaseDatastore
 # TODO: it is probably better to inherit from ARProbModel instead of EDM
 
 
-class CRPS(EDM):
+class CRPS(ARProbModel):
     """
     Continuous Ranked Probability Score (CRPS) Model.
     """
@@ -76,12 +77,12 @@ class CRPS(EDM):
             input_grid, noise_level=z, cond=None, boundary_forcing=boundary_forcing, atmosphere_forcing=atmosphere_forcing)  # (B, N_grid, d_f)
 
         # Add residual if needed
-        if self.pred_residual:
+        if self.args.pred_residual:
             next_state = (next_state * self.diff_std) + \
                 self.diff_mean  # Unormalize residual
             next_state = prev_state + next_state
 
-        return next_state
+        return next_state, None
 
     def training_step(self, batch):
         """
@@ -102,16 +103,16 @@ class CRPS(EDM):
             forcing,
             boundary_forcing,
             atmosphere_forcing,
-            target_states,
             ensemble_size=2,
         )
 
-        crps_batch = metrics.crps_ens(
+        crps_batch = metrics.afcrps_ens(
             trajectories,
             target_states,
             None,
             average_grid=False,
             sum_vars=False,
+            alpha=self.args.crps_alpha,
         )  # (B, pred_steps, d_f)
         # prediction: (B, pred_steps, num_interior_nodes, d_f)
         # pred_std: (B, pred_steps, num_interior_nodes, d_f) or (d_f,)

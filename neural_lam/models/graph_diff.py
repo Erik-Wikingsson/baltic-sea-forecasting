@@ -89,17 +89,15 @@ class GraphDiff(ARModel):
         self.mlp_blueprint_end = [args.hidden_dim] * (args.hidden_layers + 1)
 
         print(f"Using noise embedding: {args.noise_embedding}")
+        self.noise_level_dim = self.mlp_blueprint_end[-1] * \
+            self.channel_mult_emb
         if args.noise_embedding == "linear":
             # TODO: Should expand noise dim as in the flow models
             self.noise_dim = args.noise_dim
-            self.noise_level_dim = self.noise_dim
-            self.map_noise = LinearNoiseEmbedding(noise_dim=self.noise_dim)
-            print("Using linear noise embedding"
-                  f" with noise dim {args.noise_dim}")
+            self.map_noise = LinearNoiseEmbedding(
+                noise_dim=self.noise_dim, hidden_dim=self.noise_level_dim, output_dim=self.noise_level_dim)
         else:
             self.noise_dim = 16
-            self.noise_level_dim = self.mlp_blueprint_end[-1] * \
-                self.channel_mult_emb
             self.map_noise = NoiseEmbedding(
                 num_frequencies=args.hidden_dim*self.channel_mult_noise, hidden_dim=self.noise_level_dim, output_dim=self.noise_level_dim)
 
@@ -720,12 +718,15 @@ class GraphDiff(ARModel):
 # ----------------------------------------------------------------------------
 # Timestep embedding used in the NCSN++ architecture.
 class LinearNoiseEmbedding(nn.Module):
-    def __init__(self, noise_dim=32):
+    def __init__(self, noise_dim=32, hidden_dim=128, output_dim=128):
         super(LinearNoiseEmbedding, self).__init__()
         self.linear = nn.Linear(noise_dim, noise_dim)
+        self.mlp = NoiseLevelMLP(
+            input_dim=noise_dim, output_dim=output_dim, hidden_dim=hidden_dim)
 
     def forward(self, noise):
         noise_level_encoding = self.linear(noise)  # (batch_size, noise_dim)
+        noise_level_encoding = self.mlp(noise_level_encoding)
         if noise_level_encoding.dim() == 1:
             noise_level_encoding = noise_level_encoding.unsqueeze(
                 0)  # Add back batch dimension if missing

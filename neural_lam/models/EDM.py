@@ -142,58 +142,6 @@ class EDM(ARProbModel):
 
         return next_state
 
-    def ensemble_step(self, batch):
-        """
-        Perform ensemble forecast and compute basic metrics.
-        Common step done during both evaluation and testing
-
-        batch: tuple of tensors, batch to perform ensemble forecast on
-
-        Returns:
-        trajectories: (B, S, pred_steps, num_grid_nodes, d_f)
-        traj_stds: (B, S, pred_steps, num_grid_nodes, d_f)
-        target_states: (B, pred_steps, num_grid_nodes, d_f)
-        spread_squared_batch: (B, pred_steps, d_f)
-        ens_mse_batch: (B, pred_steps, d_f)
-        """
-        # Compute and store metrics for ensemble forecast
-        init_states, target_states, forcing_features, boundary_forcing, atmosphere_forcing, _ = batch
-
-        trajectories = self.sample_trajectories(
-            init_states,
-            forcing_features,
-            boundary_forcing,
-            atmosphere_forcing,
-        )
-        # (B, S, pred_steps, num_grid_nodes, d_f)
-
-        spread_squared_batch = metrics.spread_squared(
-            trajectories,
-            target_states,
-            None,
-            mask=self.interior_mask_bool,
-            sum_vars=False,
-        )
-        # (B, pred_steps, d_f)
-
-        ens_mean = torch.mean(
-            trajectories, dim=1
-        )  # (B, pred_steps, num_grid_nodes, d_f)
-        ens_mse_batch = metrics.mse(
-            ens_mean,
-            target_states,
-            None,
-            mask=self.interior_mask_bool,
-            sum_vars=False,
-        )  # (B, pred_steps, d_f)
-
-        return (
-            trajectories,
-            target_states,
-            spread_squared_batch,
-            ens_mse_batch,
-        )
-
     def test_step(self, batch, batch_idx):
         """
         Run test on single batch
@@ -315,15 +263,6 @@ class EDM(ARProbModel):
             sync_dist=True,
             batch_size=batch[0].shape[0],
         )
-
-    # def on_validation_epoch_end(self):
-    #     """
-    #     Compute val metrics at the end of val epoch
-    #     """
-        # Must log before super call, as metric lists are cleared at end of step
-        # super().on_validation_epoch_end()
-        # print("End of validation epoch")
-        # We don't save any validation metrics for now so we want to skip this
 
     # Training
     def predict_step_train(

@@ -19,8 +19,6 @@ from neural_lam.models.graph_diff import GraphDiff
 from ..config import NeuralLAMConfig
 from ..datastore import BaseDatastore
 
-# TODO: it is probably better to inherit from ARProbModel instead of EDM
-
 
 class CRPS(ARProbModel):
     """
@@ -36,6 +34,11 @@ class CRPS(ARProbModel):
         datastore_atmosphere: Union[BaseDatastore, None],
     ):
         super().__init__(args, config, datastore, datastore_boundary, datastore_atmosphere)
+        self.val_metrics.update(
+            {
+                "ens_crps": [],
+            }
+        )
 
         if args.backbone_model == "graph_diff":
             print("Using GraphDiff")
@@ -82,7 +85,7 @@ class CRPS(ARProbModel):
                 self.diff_mean  # Unormalize residual
             next_state = prev_state + next_state
 
-        return next_state, None
+        return next_state, self.per_var_std
 
     def training_step(self, batch):
         """
@@ -133,3 +136,56 @@ class CRPS(ARProbModel):
             batch_size=batch[0].shape[0],
         )
         return batch_loss
+
+    def validation_step(self, batch, *args):
+        """
+        Run validation on single batch
+        """
+        super().validation_step(batch, *args)
+        (
+            trajectories,
+            target_states,
+            spread_squared_batch,
+            ens_mse_batch,
+        ) = self.ensemble_step(batch)
+        self.val_metrics["spread_squared"].append(spread_squared_batch)
+        self.val_metrics["ens_mse"].append(ens_mse_batch)
+        crps_batch = metrics.crps_ens(trajectories, target_states, None,
+                                      mask=self.interior_mask_bool, average_grid=True, sum_vars=False)
+        self.val_metrics["ens_crps"].append(crps_batch)
+
+        if (
+            self.trainer.is_global_zero
+            and self.n_example_pred > 0
+        ):
+            # For now use val_steps_to_log to determine which steps
+            # to make these plots for
+            plot_log_steps = list(
+                filter(
+                    lambda s: s <= target_states.shape[1],
+                    self.args.val_steps_to_log,
+                )
+            )
+            # Plot forecasts
+            traj_plots = self.plot_ensemble_examples(
+                batch,
+                n_examples=self.n_example_pred,
+                prediction=trajectories,
+                time_steps=plot_log_steps,
+                log=False,
+            )
+
+            # Store plots
+            log_plot_dict = {}
+            log_plot_dict.update(
+                {
+                    f"prior_{plot_key}": plot
+                    for plot_key, plot in traj_plots.items()
+                }
+            )
+
+            if not self.trainer.sanity_checking:
+                # Log all plots to wandb
+                wandb.log(log_plot_dict)
+
+            plt.close("all")

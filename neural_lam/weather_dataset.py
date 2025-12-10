@@ -44,7 +44,7 @@ class WeatherDataset(torch.utils.data.Dataset):
         self,
         datastore: BaseDatastore,
         split="train",
-        ar_steps=3,
+        ar_steps=1,
         num_past_forcing_steps=1,
         num_future_forcing_steps=1,
         standardize=True,
@@ -63,6 +63,17 @@ class WeatherDataset(torch.utils.data.Dataset):
         self.da_forcing = self.datastore.get_dataarray(
             category="forcing", split=self.split
         )
+        self.surface_mask = self.datastore.get_mask(
+            surface=True, stacked=True, invert=False
+        )  # (N_lat*N_lon)
+        self.land_mask = self.datastore.get_mask(
+            surface=False, stacked=True, invert=True
+        )  # (N_lat*N_lon, d_features)
+        self.land_mask_bool = self.datastore.get_mask(
+            surface=False, stacked=True, invert=True
+        )[self.surface_mask][np.newaxis, ...].astype(
+            bool
+        )  # (1, N_grid, d_features)
 
         # check that with the provided data-arrays and ar_steps that we have a
         # non-zero amount of samples
@@ -488,6 +499,23 @@ class WeatherDataset(torch.utils.data.Dataset):
 
         forcing = torch.tensor(da_forcing_windowed.values, dtype=tensor_dtype)
 
+        # mask to surface grid (N_lat*N_lon -> N_grid)
+        init_states = init_states[:, self.surface_mask, :]
+        target_states = target_states[:, self.surface_mask, :]
+        forcing = forcing[:, self.surface_mask, :]
+
+        # convert land from nan to zero
+        init_states = torch.where(
+            torch.tensor(self.land_mask_bool, dtype=torch.bool),
+            torch.tensor(0.0, dtype=tensor_dtype),
+            init_states,
+        )
+        target_states = torch.where(
+            torch.tensor(self.land_mask_bool, dtype=torch.bool),
+            torch.tensor(0.0, dtype=tensor_dtype),
+            target_states,
+        )
+
         # init_states: (2, N_grid, d_features)
         # target_states: (ar_steps, N_grid, d_features)
         # forcing: (ar_steps, N_grid, d_windowed_forcing)
@@ -578,16 +606,31 @@ class WeatherDataset(torch.utils.data.Dataset):
             f"{category}_feature": da_state_feature,
             "grid_index": da_grid_index,
         }
+
+        array = tensor.cpu().numpy()
+        d_full_grid = self.surface_mask.shape[0]
+        d_features = array.shape[-1]
+
         if add_time_as_dim:
             coords["time"] = time
+            d_time = array.shape[0]
+            full_array = np.zeros((d_time, d_full_grid, d_features))
+            full_array[:, self.surface_mask, :] = array
+            full_array = np.where(
+                self.land_mask[np.newaxis, ...], np.nan, full_array
+            )
+        else:
+            full_array = np.zeros(self.full_mask.shape)
+            full_array[self.surface_mask, :] = array
+            full_array = np.where(self.land_mask, np.nan, full_array)
 
         da = xr.DataArray(
-            tensor.cpu().numpy(),
+            full_array,
             dims=dims,
             coords=coords,
         )
 
-        for grid_coord in ["x", "y"]:
+        for grid_coord in ["longitude", "latitude"]:
             if (
                 grid_coord in da_datastore_state.coords
                 and grid_coord not in da.coords

@@ -400,7 +400,7 @@ class BaseDatastore(abc.ABC):
         dim_order = []
 
         if category is not None:
-            if category != "static":
+            if (category != "static") and (category != "mask"):
                 # static data does not vary in time
                 if self.is_forecast:
                     dim_order.extend(

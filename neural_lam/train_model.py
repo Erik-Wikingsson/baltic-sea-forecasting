@@ -14,7 +14,8 @@ from loguru import logger
 # Local
 from . import utils
 from .config import load_config_and_datastore
-from .models import GraphCast, GraphEFM, GraphFM, EDM
+from .models import EDM, GraphCast, GraphEFM, GraphFM, FM, CRPS, SI
+from .models import EDM, FM, GraphCast, GraphEFM, GraphFM
 from .weather_dataset import WeatherDataModule
 
 MODELS = {
@@ -22,6 +23,9 @@ MODELS = {
     "graph_fm": GraphFM,
     "graph_efm": GraphEFM,
     "EDM": EDM,
+    "FM": FM,
+    "crps": CRPS,
+    "SI": SI,
 }
 
 
@@ -124,21 +128,21 @@ def main(input_args=None):
     parser.add_argument(
         "--processor_layers",
         type=int,
-        default=4,
+        default=3,
         help="Number of GNN layers in processor GNN (for prob. model: in "
-        "decoder) (default: 4)",
+        "decoder) (default: 3)",
     )
     parser.add_argument(
         "--encoder_processor_layers",
         type=int,
-        default=2,
-        help="Number of on-mesh GNN layers in encoder GNN (default: 2)",
+        default=1,
+        help="Number of on-mesh GNN layers in encoder GNN (default: 1)",
     )
     parser.add_argument(
         "--prior_processor_layers",
         type=int,
-        default=2,
-        help="Number of on-mesh GNN layers in prior GNN (default: 2)",
+        default=1,
+        help="Number of on-mesh GNN layers in prior GNN (default: 1)",
     )
     parser.add_argument(
         "--mesh_aggr",
@@ -171,10 +175,10 @@ def main(input_args=None):
     parser.add_argument(
         "--vertical_propnets",
         type=int,
-        default=0,
+        default=1,
         help="If PropagationNets should be used for all vertical message "
         "passing (g2m, m2g, up in hierarchy), in deterministic models."
-        "(default: 0 (no))",
+        "(default: 1 (yes))",
     )
 
     # EDM options
@@ -215,15 +219,31 @@ def main(input_args=None):
         help="Number of steps to use in sampler (default: 20)",
     )
     parser.add_argument(
-        "--diffusion_model",
+        "--backbone_model",
         type=str,
         default="graph_diff",
-        help="Diffusion model to use in EDM (graph_diff) (default: graph_diff)",
+        help="Backbone model to use in EDM (graph_diff) (default: graph_diff)",
     )
     parser.add_argument(
         "--pred_residual",
         action="store_true",
-        help="If the model should predict residuals instead of the next state",
+        help="If the EDM model should predict residuals instead of the "
+        "next state",
+    )
+
+    # Graph-CRPS options
+    parser.add_argument(
+        "--noise_embedding",
+        type=str,
+        default="fourier",
+        help="Type of encoder to use in edm model (positional/fourier)"
+        "(default: 'fourier')",
+    )
+    parser.add_argument(
+        "--noise_dim",
+        type=int,
+        default=32,
+        help="Dimension of the noise vector z, 32 in FGN (default: 32)",
     )
 
     # Training options
@@ -243,10 +263,8 @@ def main(input_args=None):
     parser.add_argument(
         "--lr", type=float, default=1e-3, help="learning rate (default: 0.001)"
     )
-    # TODO: We don't want to do validation during training if we are training a diffusion model?
-    # Set to None?
     parser.add_argument(
-        "--val_interval", 
+        "--val_interval",
         type=int,
         default=1,
         help="Number of epochs training between each validation run "
@@ -320,14 +338,15 @@ def main(input_args=None):
     parser.add_argument(
         "--logger-project",
         type=str,
-        default="neural_lam",
-        help="Logger project name, for eg. Wandb (default: neural_lam)",
+        default="baltic-sea-forecasting",
+        help="Logger project name, for eg. Wandb "
+        "(default: baltic-sea-forecasting)",
     )
     parser.add_argument(
         "--val_steps_to_log",
         nargs="+",
         type=int,
-        default=[1, 2, 3, 5, 10, 15, 19],
+        default=[1, 2, 3],
         help="Steps to log val loss for (default: 1 2 3 5 10 15 19)",
     )
     parser.add_argument(
@@ -417,7 +436,7 @@ def main(input_args=None):
         )  # Allows using Tensor Cores on A100s
     else:
         device_name = "cpu"
-    
+
     # Set devices to use
     if args.devices == ["auto"]:
         devices = "auto"

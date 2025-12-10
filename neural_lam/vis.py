@@ -1,3 +1,6 @@
+# Standard library
+from typing import List
+
 # Third-party
 import matplotlib
 import matplotlib.pyplot as plt
@@ -89,7 +92,9 @@ def plot_prediction(
     extent = datastore.get_xy_extent("state")
 
     # Set up masking of border region
-    da_mask = datastore.unstack_grid_coords(datastore.boundary_mask)
+    da_mask = datastore.unstack_grid_coords(datastore.boundary_mask).isel(
+        mask_feature=0
+    )
     mask_values = np.invert(da_mask.values.astype(bool)).astype(float)
     pixel_alpha = mask_values.clip(0.7, 1)  # Faded border region
 
@@ -106,9 +111,10 @@ def plot_prediction(
         da.plot.imshow(
             ax=ax,
             origin="lower",
-            x="x",
+            x="longitude",
+            y="latitude",
             extent=extent,
-            alpha=pixel_alpha.T,
+            alpha=pixel_alpha,
             vmin=vmin,
             vmax=vmax,
             cmap="plasma",
@@ -127,10 +133,10 @@ def plot_prediction(
 
 @matplotlib.rc_context(utils.fractional_plot_bundle(1))
 def plot_ensemble_prediction(
-    samples,
-    target,
-    ens_mean,
-    ens_std,
+    samples: List[xr.DataArray],
+    target: xr.DataArray,
+    ens_mean: xr.DataArray,
+    ens_std: xr.DataArray,
     datastore: BaseRegularGridDatastore,
     title=None,
     vrange=None,
@@ -148,15 +154,22 @@ def plot_ensemble_prediction(
     (optional) vrange: tuple of length with common min and max of values
         (not for std.)
     """
+
+    # Convert tensors to dataarrays
+
     # Get common scale for values
     if vrange is None:
-        vmin = min(vals.min().cpu().item() for vals in (samples, target))
-        vmax = max(vals.max().cpu().item() for vals in (samples, target))
+        vrange_vals = samples + [target]
+        vmin = min(vals.min().values for vals in vrange_vals)
+        vmax = max(vals.max().values for vals in vrange_vals)
     else:
         vmin, vmax = vrange
 
     # Set up masking of border region
-    da_mask = datastore.unstack_grid_coords(datastore.boundary_mask).T
+    # da_mask = datastore.unstack_grid_coords(datastore.boundary_mask).T
+    da_mask = datastore.unstack_grid_coords(datastore.boundary_mask).isel(
+        mask_feature=0
+    )
     mask_values = np.invert(da_mask.values.astype(bool)).astype(float)
     pixel_alpha = mask_values.clip(0.7, 1)  # Faded border region
 
@@ -206,7 +219,7 @@ def plot_ensemble_prediction(
         )
 
     # Turn off unused axes
-    for ax in axes[(3 + samples.shape[0]) :]:
+    for ax in axes[(3 + len(samples)) :]:
         ax.axis("off")
 
     # Add colorbars
@@ -225,7 +238,7 @@ def plot_ensemble_prediction(
 
 def plot_on_axis(
     ax,
-    data,
+    data: xr.DataArray,
     datastore: BaseRegularGridDatastore,
     alpha=None,
     vmin=None,
@@ -237,21 +250,18 @@ def plot_on_axis(
     """
     ax.coastlines()  # Add coastline outlines
     extent = datastore.get_xy_extent("state")
-    data_grid = (
-        data.reshape(
-            [datastore.grid_shape_state.x, datastore.grid_shape_state.y]
-        )
-        .T.cpu()
-        .numpy()
-    )
-    im = ax.imshow(
-        data_grid,
+
+    im = data.plot.imshow(
+        ax=ax,
         origin="lower",
+        x="longitude",
+        y="latitude",
         extent=extent,
         alpha=alpha,
         vmin=vmin,
         vmax=vmax,
         cmap="plasma",
+        transform=datastore.coords_projection,
     )
 
     if ax_title:
@@ -276,9 +286,15 @@ def plot_spatial_error(
     extent = datastore.get_xy_extent("state")
 
     # Set up masking of border region
-    da_mask = datastore.unstack_grid_coords(datastore.boundary_mask)
+    da_mask = datastore.unstack_grid_coords(datastore.boundary_mask).isel(
+        mask_feature=0
+    )
     mask_reshaped = da_mask.values
     pixel_alpha = mask_reshaped.clip(0.7, 1)  # Faded border region
+
+    surface_mask = datastore.get_mask(surface=True, stacked=True, invert=False)
+    full_error = np.full_like(surface_mask, np.nan)
+    full_error[surface_mask] = error.cpu().numpy()
 
     fig, ax = plt.subplots(
         figsize=(5, 4.8),
@@ -286,13 +302,9 @@ def plot_spatial_error(
     )
 
     ax.coastlines()  # Add coastline outlines
-    error_grid = (
-        error.reshape(
-            [datastore.grid_shape_state.x, datastore.grid_shape_state.y]
-        )
-        .T.cpu()
-        .numpy()
-    )
+    error_grid = full_error.reshape(
+        [datastore.grid_shape_state.x, datastore.grid_shape_state.y]
+    ).T
 
     im = ax.imshow(
         error_grid,
@@ -331,10 +343,15 @@ def plot_latent_samples(prior_samples, vi_samples, title=None):
     num_samples, num_mesh_nodes, latent_dim = prior_samples.shape
     plot_dims = min(latent_dim, 3)  # Plot first 3 dimensions
     img_side_size = int(np.sqrt(num_mesh_nodes))
-    assert img_side_size**2 == num_mesh_nodes, (
-        "Number of mesh nodes is not a "
-        "square number, can not plot latent samples as images"
-    )
+
+    # Check if number of nodes is a square
+    if img_side_size**2 != num_mesh_nodes:
+        # Number of mesh nodes is not a square number, can not directly plot
+        # latent samples as images"
+        # Fix this by not plotting all nodes (choose amount to work as image)
+        num_mesh_subset = img_side_size**2
+        prior_samples = prior_samples[:, :num_mesh_subset]
+        vi_samples = vi_samples[:, :num_mesh_subset]
 
     # Get common scale for values
     vmin = min(

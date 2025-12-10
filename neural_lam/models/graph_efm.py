@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import wandb
+import xarray as xr
 
 # Local
 from .. import metrics, utils, vis
@@ -333,8 +334,6 @@ class GraphEFM(ARModel):
             ),
             dim=-1,
         )  # (B, num_grid_nodes, grid_dim)
-
-        print(f"grid_features shape: {grid_features.shape}")
 
         grid_emb = self.grid_prev_embedder(grid_features)
         # (B, num_grid_nodes, d_h)
@@ -765,7 +764,7 @@ class GraphEFM(ARModel):
         Plot ensemble forecast + mean and std
         (split argument should be unused, only for compatibility with ARModel)
         """
-        init_states, target_states, forcing_features, _ = batch
+        init_states, target_states, forcing_features, time = batch
 
         trajectories, _ = self.sample_trajectories(
             init_states,
@@ -788,12 +787,51 @@ class GraphEFM(ARModel):
         )  # (B, pred_steps, num_grid_nodes, d_f)
 
         # Iterate over the examples
-        for traj_slice, target_slice, ens_mean_slice, ens_std_slice in zip(
+        for (
+            traj_slice,
+            target_slice,
+            ens_mean_slice,
+            ens_std_slice,
+            time_slice,
+        ) in zip(
             traj_rescaled[:n_examples],
             target_rescaled[:n_examples],
             ens_mean[:n_examples],
             ens_std[:n_examples],
+            time[:n_examples],
         ):
+
+            # Create xarray for plotting
+            da_samples = [
+                self._create_dataarray_from_tensor(
+                    tensor=traj_slice[i, ...],
+                    time=time_slice,
+                    split=split,
+                    category="state",
+                ).unstack("grid_index")
+                for i in range(traj_slice.shape[0])
+            ]
+
+            da_target = self._create_dataarray_from_tensor(
+                tensor=target_slice,
+                time=time_slice,
+                split=split,
+                category="state",
+            ).unstack("grid_index")
+
+            da_ens_mean = self._create_dataarray_from_tensor(
+                tensor=ens_mean_slice,
+                time=time_slice,
+                split=split,
+                category="state",
+            ).unstack("grid_index")
+
+            da_ens_std = self._create_dataarray_from_tensor(
+                tensor=ens_std_slice,
+                time=time_slice,
+                split=split,
+                category="state",
+            ).unstack("grid_index")
             # traj_slice is (S, pred_steps, num_grid_nodes, d_f)
             # others are (pred_steps, num_grid_nodes, d_f)
             self.plotted_examples += 1  # Increment already here
@@ -834,10 +872,13 @@ class GraphEFM(ARModel):
                 # Create one figure per variable at this time step
                 var_figs = [
                     vis.plot_ensemble_prediction(
-                        samples_t[:, :, var_i],
-                        target_t[:, var_i],
-                        ens_mean_t[:, var_i],
-                        ens_std_t[:, var_i],
+                        [
+                            da.isel(state_feature=var_i, time=t_i - 1)
+                            for da in da_samples
+                        ],
+                        da_target.isel(state_feature=var_i, time=t_i - 1),
+                        da_ens_mean.isel(state_feature=var_i, time=t_i - 1),
+                        da_ens_std.isel(state_feature=var_i, time=t_i - 1),
                         self._datastore,
                         title=f"{var_name} ({var_unit}), {time_title_part}",
                         vrange=var_vrange,
@@ -942,11 +983,12 @@ class GraphEFM(ARModel):
             and self.n_example_pred > 0
         ):
             # Roll out trajectories using variational distribution (encoder)
-            (init_states, target_states, forcing_features, _) = batch
+            (init_states, target_states, forcing_features, time) = batch
             # Only create ens. forecast for as many examples as needed
             init_states = init_states[: self.n_example_pred]
             target_states = target_states[: self.n_example_pred]
             forcing_features = forcing_features[: self.n_example_pred]
+            time = time[: self.n_example_pred]
 
             # Sample trajectories using variational dist. for latent var.
             enc_trajectories, _ = self.sample_trajectories(
@@ -960,10 +1002,22 @@ class GraphEFM(ARModel):
             # Only need n_example_pred prior trajectories
             prior_trajectories = prior_trajectories[: self.n_example_pred]
 
+            # Rescale to original data scale
+            prior_rescaled = (
+                prior_trajectories * self.state_std + self.state_mean
+            )
+            enc_rescaled = enc_trajectories * self.state_std + self.state_mean
+            target_rescaled = target_states * self.state_std + self.state_mean
+
             # Plot samples
             log_plot_dict = {}
-            for example_i, (prior_traj, enc_traj, target_traj) in enumerate(
-                zip(prior_trajectories, enc_trajectories, target_states),
+            for example_i, (
+                prior_traj,
+                enc_traj,
+                target_traj,
+                time_slice,
+            ) in enumerate(
+                zip(prior_rescaled, enc_rescaled, target_rescaled, time),
                 start=1,
             ):
                 # prior_traj and enc traj are
@@ -972,19 +1026,58 @@ class GraphEFM(ARModel):
                 var_name_list = self._datastore.get_vars_names("state")
                 var_unit_list = self._datastore.get_vars_units("state")
 
+                # Make Xarray.DA
+                da_target = self._create_dataarray_from_tensor(
+                    tensor=target_traj,
+                    time=time_slice,
+                    split="val",
+                    category="state",
+                ).unstack("grid_index")
+                da_prior_traj = [
+                    self._create_dataarray_from_tensor(
+                        tensor=prior_traj[i],
+                        time=time_slice,
+                        split="val",
+                        category="state",
+                    ).unstack("grid_index")
+                    for i in range(prior_traj.shape[0])
+                ]
+                da_enc_traj = [
+                    self._create_dataarray_from_tensor(
+                        tensor=enc_traj[i],
+                        time=time_slice,
+                        split="val",
+                        category="state",
+                    ).unstack("grid_index")
+                    for i in range(enc_traj.shape[0])
+                ]
+
                 for var_i, timesteps in self.var_leads_val_plot.items():
                     var_name = var_name_list[var_i]
                     var_unit = var_unit_list[var_i]
                     for step in timesteps:
-                        prior_states = prior_traj[
-                            :, step - 1, :, var_i
+                        prior_states = [
+                            da_prior_sample.isel(
+                                state_feature=var_i, time=step - 1
+                            )
+                            for da_prior_sample in da_prior_traj
                         ]  # (S, num_grid_nodes)
-                        enc_states = enc_traj[
-                            :, step - 1, :, var_i
+                        enc_states = [
+                            da_enc_sample.isel(
+                                state_feature=var_i, time=step - 1
+                            )
+                            for da_enc_sample in da_enc_traj
                         ]  # (S, num_grid_nodes)
-                        target_state = target_traj[
-                            step - 1, :, var_i
-                        ]  # (num_grid_nodes,)
+
+                        target_state = da_target.isel(
+                            state_feature=var_i, time=step - 1
+                        )  # (num_grid_nodes,)
+
+                        # Concatenate along ens member dim for stats compute
+                        prior_states_cat = xr.concat(
+                            prior_states, dim="ensemble"
+                        )
+                        enc_states_cat = xr.concat(enc_states, dim="ensemble")
 
                         plot_title = (
                             f"{var_name} ({var_unit}), t={step} "
@@ -992,26 +1085,36 @@ class GraphEFM(ARModel):
                         )
 
                         # Make plots
-                        log_plot_dict[
-                            f"prior_{var_name}_step_{step}_ex{example_i}"
-                        ] = vis.plot_ensemble_prediction(
-                            prior_states,
-                            target_state,
-                            prior_states.mean(dim=0),
-                            prior_states.std(dim=0),
-                            self._datastore,
-                            title=f"{plot_title} (prior)",
-                        )
-                        log_plot_dict[
-                            f"vi_{var_name}_step_{step}_ex{example_i}"
-                        ] = vis.plot_ensemble_prediction(
-                            enc_states,
-                            target_state,
-                            enc_states.mean(dim=0),
-                            enc_states.std(dim=0),
-                            self._datastore,
-                            title=f"{plot_title} (vi)",
-                        )
+                        with np.testing.suppress_warnings() as sup:
+                            # Numpy will complain when we do the .std
+                            # for dimensions only containing NaNs, and this is
+                            # very noisy. As we will anyhow filter out these
+                            # dimensions later we suppress them here.
+                            sup.filter(
+                                RuntimeWarning,
+                                "Degrees of freedom <= 0 for slice.",
+                            )
+
+                            log_plot_dict[
+                                f"prior_{var_name}_step_{step}_ex{example_i}"
+                            ] = vis.plot_ensemble_prediction(
+                                prior_states,
+                                target_state,
+                                prior_states_cat.mean(dim="ensemble"),
+                                prior_states_cat.std(dim="ensemble", ddof=1),
+                                self._datastore,
+                                title=f"{plot_title} (prior)",
+                            )
+                            log_plot_dict[
+                                f"vi_{var_name}_step_{step}_ex{example_i}"
+                            ] = vis.plot_ensemble_prediction(
+                                enc_states,
+                                target_state,
+                                enc_states_cat.mean(dim="ensemble"),
+                                enc_states_cat.std(dim="ensemble", ddof=1),
+                                self._datastore,
+                                title=f"{plot_title} (vi)",
+                            )
 
             # Sample latent variable and plot
             # embed all features
@@ -1049,9 +1152,9 @@ class GraphEFM(ARModel):
             for example_i, (prior_ex_samples, vi_ex_samples) in enumerate(
                 zip(prior_samples, vi_samples), start=1
             ):
-                log_plot_dict[
-                    f"latent_samples_ex{example_i}"
-                ] = vis.plot_latent_samples(prior_ex_samples, vi_ex_samples)
+                log_plot_dict[f"latent_samples_ex{example_i}"] = (
+                    vis.plot_latent_samples(prior_ex_samples, vi_ex_samples)
+                )
 
             if not self.trainer.sanity_checking:
                 # Log all plots to wandb

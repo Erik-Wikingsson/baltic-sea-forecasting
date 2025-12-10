@@ -8,7 +8,7 @@ import torch
 from neural_lam import config as nlconfig
 from neural_lam.create_graph import create_graph_from_datastore
 from neural_lam.datastore.mdp import MDPDatastore
-from neural_lam.models.graph_lam import GraphLAM
+from neural_lam.models.graphcast import GraphCast
 from tests.conftest import init_datastore_example
 
 
@@ -56,7 +56,7 @@ def test_clamping():
         ),
     )
 
-    model = GraphLAM(
+    model = GraphCast(
         args=model_args,
         datastore=datastore,
         config=config,

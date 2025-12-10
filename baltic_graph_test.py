@@ -17,15 +17,11 @@ LAM_PROJ = ccrs.LambertConformal(
     ),
 )
 
-static_ds = xr.open_zarr(
-    "configs/baltic_model0/data/baltic/static/bathymetry.zarr"
-)
-surface_mask_da = static_ds.mask.isel(depth=0)
+ds = xr.open_zarr("configs/baltic_example/baltic_mdp_config_small.zarr")
+surface_mask_da = ds.mask.isel(mask_feature=0)
 
 grid_coords = np.stack(
-    np.meshgrid(
-        surface_mask_da.latitude, surface_mask_da.longitude, indexing="ij"
-    ),
+    (surface_mask_da.latitude, surface_mask_da.longitude),
     axis=-1,
 ).reshape(-1, 2)
 flat_mask = surface_mask_da.to_numpy().flatten()

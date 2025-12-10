@@ -13,7 +13,7 @@ from torch_geometric.utils.convert import from_networkx
 # Local
 from .config import load_config_and_datastore
 from .datastore.base import BaseRegularGridDatastore
-from .graphs import regular_mesh, saving
+from .graphs import cluster_mesh, regular_mesh, saving
 from .graphs import utils as gutils
 from .graphs import vis
 
@@ -23,7 +23,7 @@ def create_graph(
     xy: np.ndarray,
     land_mask: np.ndarray,
     n_max_levels: int,
-    hierarchical: bool,
+    graph_type: str,
     create_plot: bool,
 ):
     """
@@ -82,8 +82,8 @@ def create_graph(
     n_max_levels : int
         Limit multi-scale mesh to given number of levels, from bottom up
         (default: None (no limit)).
-    hierarchical : bool
-        Generate hierarchical mesh graph (default: False).
+    graph_type : str
+        What type of graph to generate multiscale/hierarchical/cluster
     create_plot : bool
         If graphs should be plotted during generation (default: False).
 
@@ -102,7 +102,6 @@ def create_graph(
     #
     # Mesh
     #
-
     if create_plot:
 
         def mesh_plot_func(graph, title):
@@ -116,15 +115,25 @@ def create_graph(
     else:
         mesh_plot_func = None
 
-    mesh_pos, G_bottom_mesh, save_graphs = (
-        regular_mesh.build_regular_mesh_graph(
-            xy,
-            land_mask,
-            max_mesh_levels=n_max_levels,
-            hierarchical=hierarchical,
-            mesh_plot_function=mesh_plot_func,
+    if graph_type == "cluster":
+        mesh_pos, G_bottom_mesh, save_graphs = (
+            cluster_mesh.build_cluster_mesh_graph(
+                xy,
+                land_mask,
+                max_mesh_levels=n_max_levels,
+                mesh_plot_function=mesh_plot_func,
+            )
         )
-    )
+    else:
+        mesh_pos, G_bottom_mesh, save_graphs = (
+            regular_mesh.build_regular_mesh_graph(
+                xy,
+                land_mask,
+                max_mesh_levels=n_max_levels,
+                hierarchical=(graph_type == "hierarchical"),
+                mesh_plot_function=mesh_plot_func,
+            )
+        )
 
     # Save all graphs
     for graph_name, graph in save_graphs.items():
@@ -279,6 +288,7 @@ def create_graph_from_datastore(
     output_root_path: str,
     n_max_levels: int = None,
     hierarchical: bool = False,
+    graph_type: str = "hierarchical",
     create_plot: bool = False,
 ):
     if isinstance(datastore, BaseRegularGridDatastore):
@@ -295,7 +305,7 @@ def create_graph_from_datastore(
         xy=xy,
         land_mask=land_mask,
         n_max_levels=n_max_levels,
-        hierarchical=hierarchical,
+        graph_type=graph_type,
         create_plot=create_plot,
     )
 
@@ -326,9 +336,10 @@ def cli(input_args=None):
         "from bottom up (default: None (no limit))",
     )
     parser.add_argument(
-        "--hierarchical",
-        action="store_true",
-        help="Generate hierarchical mesh graph (default: False)",
+        "--type",
+        type=str,
+        help="Which type of graph structure to generate",
+        choices=["multiscale", "hierarchical", "cluster"],
     )
     args = parser.parse_args(input_args)
 
@@ -343,7 +354,7 @@ def cli(input_args=None):
         datastore=datastore,
         output_root_path=os.path.join(datastore.root_path, "graph", args.name),
         n_max_levels=args.levels,
-        hierarchical=args.hierarchical,
+        graph_type=args.type,
         create_plot=args.plot,
     )
 

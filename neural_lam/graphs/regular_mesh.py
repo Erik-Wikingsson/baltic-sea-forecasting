@@ -140,7 +140,7 @@ def build_regular_mesh_graph(
             v_from_xy = np.array([xy for _, xy in G_from.nodes.data("pos")])
             kdt_m = scipy.spatial.KDTree(v_from_xy)
 
-            # add edges from mesh to grid
+            # add edges between levels
             for v in v_to_list:
                 # find 1(?) nearest neighbours (index to vm_xy)
                 neigh_idx = kdt_m.query(G_down.nodes[v]["pos"], 1)[1]

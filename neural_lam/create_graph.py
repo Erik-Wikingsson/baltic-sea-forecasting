@@ -21,6 +21,7 @@ from .graphs import vis
 def create_graph(
     graph_dir_path: str,
     xy: np.ndarray,
+    aux_encode_xy: np.ndarray,
     land_mask: np.ndarray,
     n_max_levels: int,
     graph_type: str,
@@ -79,6 +80,9 @@ def create_graph(
         Path to store the graph components.
     xy : np.ndarray
         Grid coordinates, expected to be of shape (Nx, Ny, 2).
+    aux_encode_xy : np.ndarray
+        Auxiliary grid coordinates, for grid nodes to only use
+        in encoding (g2m), expected to be of shape (num_grid, 2).
     n_max_levels : int
         Limit multi-scale mesh to given number of levels, from bottom up
         (default: None (no limit)).
@@ -289,23 +293,33 @@ def create_graph_from_datastore(
     create_plot: bool = False,
 ):
     land_mask = datastore.get_mask(surface=True, stacked=False, invert=True)
-    xy = datastore.get_projected_xy("state", stacked=False)
+    xy_interior = datastore.get_projected_xy("state", stacked=False)
 
     boundary_mask = datastore_boundary.get_mask(
-        surface=True, stacked=False, invert=True
+        surface=True, stacked=True, invert=True
     )
-    xy_boundary = datastore_boundary.get_projected_xy("forcing", stacked=False)
+    xy_boundary = datastore_boundary.get_projected_xy("forcing", stacked=True)
 
     atmosphere_mask = datastore_atmosphere.get_atmosphere_mask(
-        stacked=False, invert=True
+        stacked=True, invert=True
     )
     xy_atmosphere = datastore_atmosphere.get_projected_xy(
-        "forcing", stacked=False
+        "forcing", stacked=True
     )
+
+    # Node ordering is: 1) interior, 2) boundary, 3) atmosphere
+    xy_aux = np.concatenate(
+        (
+            xy_boundary[boundary_mask],
+            xy_atmosphere[atmosphere_mask],
+        ),
+        axis=0,
+    )  # (num_aux_grid_nodes, 2)
 
     create_graph(
         graph_dir_path=output_root_path,
-        xy=xy,
+        xy=xy_interior,
+        aux_encode_xy=xy_aux,  # Only encode from these additional grid nodes
         land_mask=land_mask,
         n_max_levels=n_max_levels,
         graph_type=graph_type,

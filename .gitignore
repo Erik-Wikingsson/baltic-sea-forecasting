@@ -11,6 +11,7 @@ sweeps
 *.zarr
 *slurm*
 output
+configs
 
 ### Python ###
 # Byte-compiled / optimized / DLL files

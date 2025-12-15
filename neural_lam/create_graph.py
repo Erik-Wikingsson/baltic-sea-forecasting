@@ -21,7 +21,10 @@ from .graphs import vis
 def create_graph(
     graph_dir_path: str,
     xy: np.ndarray,
-    aux_encode_xy: np.ndarray,
+    xy_boundary: np.ndarray,
+    xy_atmosphere: np.ndarray,
+    g2m_radius: float,
+    g2m_radius_atm: float,
     land_mask: np.ndarray,
     n_max_levels: int,
     graph_type: str,
@@ -80,9 +83,16 @@ def create_graph(
         Path to store the graph components.
     xy : np.ndarray
         Grid coordinates, expected to be of shape (Nx, Ny, 2).
-    aux_encode_xy : np.ndarray
-        Auxiliary grid coordinates, for grid nodes to only use
-        in encoding (g2m), expected to be of shape (num_grid, 2).
+    xy_boundary : np.ndarray
+        Auxiliary grid coordinates, for boundary grid nodes to only use
+        in encoding (g2m), expected to be of shape (num_boundary, 2).
+    xy_atmosphere : np.ndarray
+        Auxiliary grid coordinates, for atmospheric grid nodes to only use
+        in encoding (g2m), expected to be of shape (num_atm, 2).
+    g2m_radius: float
+        Radius to connect interior and boundary nodes within for g2m
+    g2m_radius_atm: float
+        Radius to connect atmospheric nodes within for g2m
     n_max_levels : int
         Limit multi-scale mesh to given number of levels, from bottom up
         (default: None (no limit)).
@@ -155,15 +165,15 @@ def create_graph(
     # Grid2Mesh
     #
 
-    # radius within which grid nodes are associated with a mesh node
-    # (in terms of mesh distance)
-    DM_SCALE = 0.67
-
     # mesh nodes on lowest level
     vm = G_bottom_mesh.nodes
+    vm_list = list(vm)
     vm_xy = np.array([xy for _, xy in vm.data("pos")])
 
-    # compute dm as mean edge length
+    # build kd tree for mesh point pos
+    kdt_m = scipy.spatial.KDTree(vm_xy)
+
+    # compute dm as mean edge length of bottom mesh graph
     edge_lengths = [
         np.linalg.norm(
             G_bottom_mesh.nodes[u]["pos"] - G_bottom_mesh.nodes[v]["pos"]
@@ -193,40 +203,62 @@ def create_graph(
 
     # add 1000 to node key to separate grid nodes (1000,i,j) from mesh nodes
     # (i,j) and impose sorting order such that vm are the first nodes
-    G_grid = gutils.prepend_node_index(G_grid, 1000)
+    G_grid = gutils.prepend_node_index(G_grid, 1)
 
     # build kd tree for grid point pos
-    # order in vg_list should be same as in vg_xy
     vg_list = list(G_grid.nodes)
-    vg_xy = np.array([G_grid.nodes[node]["pos"] for node in vg_list])
-    kdt_g = scipy.spatial.KDTree(vg_xy)
 
     # now add (all bottom) mesh nodes, include features (pos)
-    G_grid.add_nodes_from(G_bottom_mesh.nodes(data=True))
+    G_g2m = networkx.Graph()
+    G_g2m.add_nodes_from(G_bottom_mesh.nodes(data=True))
 
     # Re-create graph with sorted node indices
     # Need to do sorting of nodes this way for indices to map correctly to pyg
-    G_g2m = networkx.Graph()
     G_g2m.add_nodes_from(sorted(G_grid.nodes(data=True)))
+
+    # Add auxiliary encoding nodes
+    boundary_nodes = [
+        ((2, aux_node_i), {"pos": pos})
+        for aux_node_i, pos in enumerate(xy_boundary)
+    ]
+    atmospheric_nodes = [
+        ((3, aux_node_i), {"pos": pos})
+        for aux_node_i, pos in enumerate(xy_atmosphere)
+    ]
+    G_g2m.add_nodes_from(boundary_nodes)
+    G_g2m.add_nodes_from(atmospheric_nodes)
 
     # turn into directed graph
     G_g2m = networkx.DiGraph(G_g2m)
 
-    # add edges
-    for v in vm:
-        # find neighbours (index to vg_xy)
-        neigh_idxs = kdt_g.query_ball_point(vm[v]["pos"], dm * DM_SCALE)
-        for i in neigh_idxs:
-            u = vg_list[i]
-            # add edge from grid to mesh
-            G_g2m.add_edge(u, v)
-            d = np.sqrt(
-                np.sum((G_g2m.nodes[u]["pos"] - G_g2m.nodes[v]["pos"]) ** 2)
+    # add edges from each grid node set to mesh
+    for node_list, connect_radius in (
+        (G_grid.nodes(data=True), g2m_radius),
+        (boundary_nodes, g2m_radius),
+        (atmospheric_nodes, g2m_radius),
+    ):
+        # Note: Below could likely be vectorized, if networkx can play along
+        for grid_node, node_attrs in node_list:
+            # find neighbours (index in mesh graph)
+            grid_node_pos = node_attrs["pos"]
+            neigh_idxs = kdt_m.query_ball_point(
+                grid_node_pos, dm * connect_radius
             )
-            G_g2m.edges[u, v]["len"] = d
-            G_g2m.edges[u, v]["vdiff"] = (
-                G_g2m.nodes[u]["pos"] - G_g2m.nodes[v]["pos"]
-            )
+
+            #  assert len(neigh_idxs) > 0, (
+            #  f"Grid node {grid_node} not connected to mesh in g2m, "
+            #  f"increase radius {connect_radius}"
+            #  )
+            # Add edges for each mesh node within radisu
+            for mesh_node_i in neigh_idxs:
+                mesh_node = vm_list[mesh_node_i]
+                mesh_node_pos = vm_xy[mesh_node_i]
+                # add edge from grid to mesh
+                G_g2m.add_edge(grid_node, mesh_node)
+                vdiff = mesh_node_pos - grid_node_pos
+                d = np.sqrt(np.sum((vdiff) ** 2))
+                G_g2m.edges[grid_node, mesh_node]["len"] = d
+                G_g2m.edges[grid_node, mesh_node]["vdiff"] = vdiff
 
     pyg_g2m = from_networkx(G_g2m)
 
@@ -244,12 +276,8 @@ def create_graph(
     G_m2g = G_g2m.copy()
     G_m2g.clear_edges()
 
-    # build kd tree for mesh point pos
-    # order in vm should be same as in vm_xy
-    vm_list = list(vm)
-    kdt_m = scipy.spatial.KDTree(vm_xy)
-
     # add edges from mesh to grid
+    # order in vm should be same as in vm_xy
     for v in vg_list:
         # find 4 nearest neighbours (index to vm_xy)
         neigh_idxs = kdt_m.query(G_m2g.nodes[v]["pos"], 4)[1]
@@ -287,6 +315,8 @@ def create_graph_from_datastore(
     datastore_boundary: BaseRegularGridDatastore,
     datastore_atmosphere: BaseRegularGridDatastore,
     output_root_path: str,
+    g2m_radius: float,
+    g2m_radius_atm: float,
     n_max_levels: int = None,
     hierarchical: bool = False,
     graph_type: str = "hierarchical",
@@ -296,30 +326,35 @@ def create_graph_from_datastore(
     xy_interior = datastore.get_projected_xy("state", stacked=False)
 
     boundary_mask = datastore_boundary.get_mask(
-        surface=True, stacked=True, invert=True
+        surface=True, stacked=True, invert=False
     )
     xy_boundary = datastore_boundary.get_projected_xy("forcing", stacked=True)
 
     atmosphere_mask = datastore_atmosphere.get_atmosphere_mask(
-        stacked=True, invert=True
+        stacked=True, invert=False
     )
     xy_atmosphere = datastore_atmosphere.get_projected_xy(
         "forcing", stacked=True
     )
 
     # Node ordering is: 1) interior, 2) boundary, 3) atmosphere
-    xy_aux = np.concatenate(
-        (
-            xy_boundary[boundary_mask],
-            xy_atmosphere[atmosphere_mask],
-        ),
-        axis=0,
-    )  # (num_aux_grid_nodes, 2)
+    #  xy_aux = np.concatenate(
+    #  (
+    #  xy_boundary[boundary_mask],
+    #  xy_atmosphere[atmosphere_mask],
+    #  ),
+    #  axis=0,
+    #  )  # (num_aux_grid_nodes, 2)
 
     create_graph(
         graph_dir_path=output_root_path,
         xy=xy_interior,
-        aux_encode_xy=xy_aux,  # Only encode from these additional grid nodes
+        xy_boundary=xy_boundary[
+            boundary_mask
+        ],  # Only encode from these additional grid nodes
+        xy_atmosphere=xy_atmosphere[atmosphere_mask],
+        g2m_radius=g2m_radius,
+        g2m_radius_atm=g2m_radius_atm,
         land_mask=land_mask,
         n_max_levels=n_max_levels,
         graph_type=graph_type,
@@ -353,6 +388,20 @@ def cli(input_args=None):
         "from bottom up (default: None (no limit))",
     )
     parser.add_argument(
+        "--g2m_radius",
+        type=float,
+        default=0.67,
+        help="Radius within which to connect grid nodes (interior and boundary)"
+        "to mesh, a multiple of mean edge length in mesh (default: 0.67)",
+    )
+    parser.add_argument(
+        "--g2m_radius_atm",
+        type=float,
+        default=0.67,
+        help="Radius within which to connect grid nodes (atmospheric)"
+        "to mesh, a multiple of mean edge length in mesh (default: 0.67)",
+    )
+    parser.add_argument(
         "--type",
         type=str,
         help="Which type of graph structure to generate",
@@ -374,6 +423,8 @@ def cli(input_args=None):
         datastore_boundary=datastore_boundary,
         datastore_atmosphere=datastore_atmosphere,
         output_root_path=os.path.join(datastore.root_path, "graph", args.name),
+        g2m_radius=args.g2m_radius,
+        g2m_radius_atm=args.g2m_radius_atm,
         n_max_levels=args.levels,
         graph_type=args.type,
         create_plot=args.plot,

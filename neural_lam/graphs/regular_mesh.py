@@ -183,7 +183,7 @@ def build_regular_mesh_graph(
                     f"Down graph, {from_level} -> {to_level}",
                 )
                 mesh_plot_function(
-                    pyg_down,
+                    pyg_up,
                     f"Up graph, {to_level} -> {from_level}",
                 )
 

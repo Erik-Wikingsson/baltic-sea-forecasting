@@ -71,7 +71,7 @@ class GraphDiff(ARModel):
         # Load graph with static features
         # NOTE: (IMPORTANT!) mesh nodes MUST have the first
         # num_mesh_nodes indices,
-        graph_dir_path = datastore.root_path / "graph" / args.graph
+        graph_dir_path = datastore.root_path / "graphs" / args.graph
         self.hierarchical, graph_ldict = utils.load_graph(
             graph_dir_path=graph_dir_path,
             datastore=datastore,

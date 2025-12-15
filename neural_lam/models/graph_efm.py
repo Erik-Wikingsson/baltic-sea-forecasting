@@ -50,7 +50,7 @@ class GraphEFM(ARProbModel):
         self.num_latents_plot = args.num_latents_plot
 
         # Load graph with static features
-        graph_dir_path = datastore.root_path / "graph" / args.graph
+        graph_dir_path = datastore.root_path / "graphs" / args.graph
         self.hierarchical_graph, graph_ldict = utils.load_graph(
             graph_dir_path=graph_dir_path,
             datastore=datastore,

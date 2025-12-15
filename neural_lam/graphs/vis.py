@@ -8,14 +8,15 @@ import numpy as np
 import torch_geometric as pyg
 
 
-def plot_graph(graph, title=None, graph_dir_path=None):
+def plot_graph(graph, title=None, graph_dir_path=None, reindex_edges=True):
     fig, axis = plt.subplots(figsize=(8, 8), dpi=200)  # W,H
     edge_index = graph.edge_index
     pos = graph.pos
 
     # Fix for re-indexed edge indices only containing mesh nodes at
     # higher levels in hierarchy
-    edge_index = edge_index - edge_index.min()
+    if reindex_edges:
+        edge_index = edge_index - edge_index.min()
 
     if pyg.utils.is_undirected(edge_index):
         # Keep only 1 direction of edge_index

@@ -87,9 +87,9 @@ def create_graph(
     xy_atmosphere : np.ndarray
         Auxiliary grid coordinates, for atmospheric grid nodes to only use
         in encoding (g2m), expected to be of shape (num_atm, 2).
-    g2m_radius: float
+    g2m_radius : float
         Radius to connect interior and boundary nodes within for g2m
-    g2m_radius_atm: float
+    g2m_radius_atm : float
         Radius to connect atmospheric nodes within for g2m
     n_max_levels : int
         Limit multi-scale mesh to given number of levels, from bottom up
@@ -168,7 +168,7 @@ def create_graph(
     # mesh nodes on lowest level
     vm = G_bottom_mesh.nodes
     vm_list = list(vm)
-    vm_xy = np.array([xy for _, xy in vm.data("pos")])
+    vm_xy = np.stack([xy for _, xy in vm.data("pos")], axis=0)
 
     # build kd tree for mesh point pos
     kdt_m = scipy.spatial.KDTree(vm_xy)
@@ -248,18 +248,17 @@ def create_graph(
     pyg_g2m = from_networkx(G_g2m)
 
     if create_plot:
-        pyg_g2m_reversed = pyg_g2m.clone()
-        pyg_g2m_reversed.edge_index = pyg_g2m.edge_index[[1, 0]]
-        vis.plot_graph(pyg_g2m_reversed, "Grid-to-mesh", graph_dir_path)
+        vis.plot_graph(pyg_g2m, "Grid-to-mesh", graph_dir_path)
         plt.show()
 
     #
     # Mesh2Grid
     #
 
-    # start out from Grid2Mesh and then replace edges
-    G_m2g = G_g2m.copy()
-    G_m2g.clear_edges()
+    # similar to Grid2Mesh, but only with grid nodes
+    G_m2g = networkx.DiGraph()
+    G_m2g.add_nodes_from(G_bottom_mesh.nodes(data=True))
+    G_m2g.add_nodes_from(sorted(G_interior.nodes(data=True)))
 
     # add edges from mesh to grid
     # order in vm should be same as in vm_xy
@@ -270,22 +269,16 @@ def create_graph(
             u = vm_list[i]
             # add edge from mesh to grid
             G_m2g.add_edge(u, v)
-            d = np.sqrt(
-                np.sum((G_m2g.nodes[u]["pos"] - G_m2g.nodes[v]["pos"]) ** 2)
-            )
-            G_m2g.edges[u, v]["len"] = d
-            G_m2g.edges[u, v]["vdiff"] = (
-                G_m2g.nodes[u]["pos"] - G_m2g.nodes[v]["pos"]
-            )
+            vdiff = G_m2g.nodes[v]["pos"] - G_m2g.nodes[u]["pos"]
+            G_m2g.edges[u, v]["len"] = np.linalg.norm(vdiff)
+            G_m2g.edges[u, v]["vdiff"] = vdiff
 
-    # relabel nodes to integers (sorted)
-    G_m2g_int = networkx.convert_node_labels_to_integers(
-        G_m2g, first_label=0, ordering="sorted"
-    )
-    pyg_m2g = from_networkx(G_m2g_int)
+    pyg_m2g = from_networkx(G_m2g)
 
     if create_plot:
-        vis.plot_graph(pyg_m2g, "Mesh-to-grid", graph_dir_path)
+        vis.plot_graph(
+            pyg_m2g, "Mesh-to-grid", graph_dir_path, reindex_edges=False
+        )
         plt.show()
 
     # Save g2m and m2g everything

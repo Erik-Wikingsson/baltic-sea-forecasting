@@ -13,9 +13,7 @@ from torch_geometric.utils.convert import from_networkx
 # Local
 from .config import load_config_and_datastores
 from .datastore.base import BaseRegularGridDatastore
-from .graphs import cluster_mesh, regular_mesh, saving
-from .graphs import utils as gutils
-from .graphs import vis
+from .graphs import cluster_mesh, regular_mesh, saving, vis
 
 
 def create_graph(
@@ -25,7 +23,7 @@ def create_graph(
     xy_atmosphere: np.ndarray,
     g2m_radius: float,
     g2m_radius_atm: float,
-    land_mask: np.ndarray,
+    mesh_node_distance: float,
     n_max_levels: int,
     graph_type: str,
     create_plot: bool,
@@ -82,7 +80,7 @@ def create_graph(
     graph_dir_path : str
         Path to store the graph components.
     xy : np.ndarray
-        Grid coordinates, expected to be of shape (Nx, Ny, 2).
+        Grid (interior) coordinates, expected to be of shape (num_grid, 2).
     xy_boundary : np.ndarray
         Auxiliary grid coordinates, for boundary grid nodes to only use
         in encoding (g2m), expected to be of shape (num_boundary, 2).
@@ -129,21 +127,23 @@ def create_graph(
     else:
         mesh_plot_func = None
 
+    # Build mesh graph over both interior and boundary nodes
+    xy_for_mesh = np.concatenate((xy, xy_boundary), axis=0)
+
     if graph_type == "cluster":
         mesh_pos, G_bottom_mesh, save_graphs = (
             cluster_mesh.build_cluster_mesh_graph(
-                xy,
-                land_mask,
-                max_mesh_levels=n_max_levels,
+                xy_for_mesh,
+                limit_mesh_levels=n_max_levels,
                 mesh_plot_function=mesh_plot_func,
             )
         )
     else:
         mesh_pos, G_bottom_mesh, save_graphs = (
             regular_mesh.build_regular_mesh_graph(
-                xy,
-                land_mask,
-                max_mesh_levels=n_max_levels,
+                xy_for_mesh,
+                mesh_node_distance=mesh_node_distance,
+                limit_mesh_levels=n_max_levels,
                 hierarchical=(graph_type == "hierarchical"),
                 mesh_plot_function=mesh_plot_func,
             )
@@ -181,32 +181,17 @@ def create_graph(
         for u, v in G_bottom_mesh.edges
     ]
     dm = np.mean(edge_lengths)
+    print(f"dm = {dm}")
 
     # grid nodes
-    Nx, Ny = xy.shape[:2]
-
-    G_grid = networkx.grid_2d_graph(Nx, Ny)
-    G_grid.clear_edges()
-
-    # vg features (only pos introduced here)
-    nodes_to_remove = []
-    for node in G_grid.nodes:
-        # Remove the node from the graph if it is a land node
-        if land_mask[node[0], node[1]]:
-            nodes_to_remove.append(node)
-        else:
-            # pos is in feature but here explicit for convenience
-            G_grid.nodes[node]["pos"] = xy[node[0], node[1]]
-
-    for node in nodes_to_remove:
-        G_grid.remove_node(node)
-
-    # add 1000 to node key to separate grid nodes (1000,i,j) from mesh nodes
-    # (i,j) and impose sorting order such that vm are the first nodes
-    G_grid = gutils.prepend_node_index(G_grid, 1)
+    interior_nodes = [
+        ((1, node_i), {"pos": pos}) for node_i, pos in enumerate(xy)
+    ]
+    G_interior = networkx.Graph()
+    G_interior.add_nodes_from(interior_nodes)
 
     # build kd tree for grid point pos
-    vg_list = list(G_grid.nodes)
+    vg_list = list(G_interior.nodes)
 
     # now add (all bottom) mesh nodes, include features (pos)
     G_g2m = networkx.Graph()
@@ -214,7 +199,7 @@ def create_graph(
 
     # Re-create graph with sorted node indices
     # Need to do sorting of nodes this way for indices to map correctly to pyg
-    G_g2m.add_nodes_from(sorted(G_grid.nodes(data=True)))
+    G_g2m.add_nodes_from(sorted(G_interior.nodes(data=True)))
 
     # Add auxiliary encoding nodes
     boundary_nodes = [
@@ -233,7 +218,7 @@ def create_graph(
 
     # add edges from each grid node set to mesh
     for node_list, connect_radius in (
-        (G_grid.nodes(data=True), g2m_radius),
+        (G_interior.nodes(data=True), g2m_radius),
         (boundary_nodes, g2m_radius),
         (atmospheric_nodes, g2m_radius),
     ):
@@ -249,14 +234,14 @@ def create_graph(
             #  f"Grid node {grid_node} not connected to mesh in g2m, "
             #  f"increase radius {connect_radius}"
             #  )
-            # Add edges for each mesh node within radisu
+            # Add edges for each mesh node within radius
             for mesh_node_i in neigh_idxs:
                 mesh_node = vm_list[mesh_node_i]
                 mesh_node_pos = vm_xy[mesh_node_i]
                 # add edge from grid to mesh
                 G_g2m.add_edge(grid_node, mesh_node)
                 vdiff = mesh_node_pos - grid_node_pos
-                d = np.sqrt(np.sum((vdiff) ** 2))
+                d = np.linalg.norm(vdiff)
                 G_g2m.edges[grid_node, mesh_node]["len"] = d
                 G_g2m.edges[grid_node, mesh_node]["vdiff"] = vdiff
 
@@ -317,12 +302,15 @@ def create_graph_from_datastore(
     output_root_path: str,
     g2m_radius: float,
     g2m_radius_atm: float,
+    mesh_node_distance: float,
     n_max_levels: int = None,
     hierarchical: bool = False,
     graph_type: str = "hierarchical",
     create_plot: bool = False,
 ):
-    land_mask = datastore.get_mask(surface=True, stacked=False, invert=True)
+    interior_mask = datastore.get_mask(
+        surface=True, stacked=False, invert=False
+    )
     xy_interior = datastore.get_projected_xy("state", stacked=False)
 
     boundary_mask = datastore_boundary.get_mask(
@@ -348,14 +336,14 @@ def create_graph_from_datastore(
 
     create_graph(
         graph_dir_path=output_root_path,
-        xy=xy_interior,
+        xy=xy_interior[interior_mask],
         xy_boundary=xy_boundary[
             boundary_mask
         ],  # Only encode from these additional grid nodes
         xy_atmosphere=xy_atmosphere[atmosphere_mask],
         g2m_radius=g2m_radius,
         g2m_radius_atm=g2m_radius_atm,
-        land_mask=land_mask,
+        mesh_node_distance=mesh_node_distance,
         n_max_levels=n_max_levels,
         graph_type=graph_type,
         create_plot=create_plot,
@@ -402,6 +390,12 @@ def cli(input_args=None):
         "to mesh, a multiple of mean edge length in mesh (default: 0.67)",
     )
     parser.add_argument(
+        "--mesh_node_distance",
+        type=float,
+        default=20000,
+        help="Distanc between mesh nodes, in m (default: 20000)",
+    )
+    parser.add_argument(
         "--type",
         type=str,
         help="Which type of graph structure to generate",
@@ -425,6 +419,7 @@ def cli(input_args=None):
         output_root_path=os.path.join(datastore.root_path, "graph", args.name),
         g2m_radius=args.g2m_radius,
         g2m_radius_atm=args.g2m_radius_atm,
+        mesh_node_distance=args.mesh_node_distance,
         n_max_levels=args.levels,
         graph_type=args.type,
         create_plot=args.plot,

@@ -9,42 +9,41 @@ from torch_geometric.utils.convert import from_networkx
 from . import utils as gutils
 
 
-def mk_2d_graph(xy, nx, ny, land_mask):
-    N_x, N_y, _ = xy.shape
+def mk_2d_graph(xy, nx, ny):
+    # xy is (num_grid, 2)
+    min_x, min_y = np.min(xy, axis=0)
+    max_x, max_y = np.max(xy, axis=0)
+    # Offset from edge
+    offset_x = (max_x - min_x) / (2 * nx)
+    offset_y = (max_y - min_y) / (2 * ny)
+    x_coords = np.linspace(min_x + offset_x, max_x - offset_x, nx)
+    y_coords = np.linspace(min_y + offset_y, max_y - offset_y, ny)
 
-    # compute strides
-    stride_x = max(1, N_x // nx)
-    stride_y = max(1, N_y // ny)
-
-    # subsample xy grid
-    xy_coarse = xy[::stride_x, ::stride_y, :]
-
-    nx_eff, ny_eff, _ = xy_coarse.shape
-
-    # build kdtree for land points
-    land_points = xy[land_mask]
-    land_kdtree = scipy.spatial.KDTree(land_points)
+    xy_kdtree = scipy.spatial.KDTree(xy)
 
     # estimate spacing from subsampled grid to set threshold
-    dx = np.mean(np.diff(xy_coarse[:, 0, 0])) if nx_eff > 1 else 1.0
-    dy = np.mean(np.diff(xy_coarse[0, :, 1])) if ny_eff > 1 else 1.0
-    threshold = 0.5 * np.sqrt(dx**2 + dy**2)
+    #  dx = np.mean(np.diff(xy_coarse[:, 0, 0])) if nx_eff > 1 else 1.0
+    #  dy = np.mean(np.diff(xy_coarse[0, :, 1])) if ny_eff > 1 else 1.0
+    #  threshold = 0.5 * np.sqrt(dx**2 + dy**2)
+    threshold = np.sqrt(offset_x**2 + offset_y**2)
 
     # build base grid graph
-    g = networkx.grid_2d_graph(nx_eff, ny_eff)
+    g = networkx.grid_2d_graph(nx, ny)
 
     for node in list(g.nodes):
         i, j = node
-        node_pos = xy_coarse[i, j, :]
-        dist, _ = land_kdtree.query(node_pos, k=1)
+        node_pos = np.array((x_coords[i], y_coords[j]))
+
+        # Find closest point in xy, check that we are over grid
+        dist, _ = xy_kdtree.query(node_pos, k=1)
         if dist < threshold:
-            g.remove_node(node)
-        else:
             g.nodes[node]["pos"] = node_pos
+        else:
+            g.remove_node(node)
 
     # add diagonal edges if both nodes exist
-    for x in range(nx_eff - 1):
-        for y in range(ny_eff - 1):
+    for x in range(nx):
+        for y in range(ny):
             if g.has_node((x, y)) and g.has_node((x + 1, y + 1)):
                 g.add_edge((x, y), (x + 1, y + 1))
             if g.has_node((x + 1, y)) and g.has_node((x, y + 1)):
@@ -72,31 +71,48 @@ def mk_2d_graph(xy, nx, ny, land_mask):
 
 def build_regular_mesh_graph(
     xy,
-    land_mask,
-    max_mesh_levels,
+    mesh_node_distance,
+    limit_mesh_levels,
     hierarchical,
     mesh_plot_function,
 ):
-
     save_graphs = {}
+    level_refinement_factor = 3  # Hard-coded for now
 
-    # graph geometry
-    nx = 3  # number of children = nx**2
-    nlev = int(np.log(max(xy.shape[:2])) / np.log(nx))
-    nleaf = nx**nlev  # leaves at the bottom = nleaf**2
+    # Below computation is copied from wmg
+    # Compute the size along x and y direction of area to cover with graph
+    # This is measured in the Cartesian coordnates of xy
+    coord_extent = np.ptp(xy, axis=0)
+    # Number of nodes that would fit on bottom level of hierarchy,
+    # in both directions
+    max_nodes_bottom = (coord_extent / mesh_node_distance).astype(int)
 
-    mesh_levels = nlev - 1
-    if max_mesh_levels:
+    # Find the number of mesh levels possible in x- and y-direction,
+    # and the number of leaf nodes that would correspond to
+    # max_nodes_bottom/(level_refinement_factor^mesh_levels) = 1
+    max_mesh_levels_float = np.log(max_nodes_bottom) / np.log(
+        level_refinement_factor
+    )
+
+    max_mesh_levels = max_mesh_levels_float.astype(int)  # (2,)
+    nleaf = level_refinement_factor**max_mesh_levels
+    # leaves at the bottom in each direction, if using max_mesh_levels
+
+    # As we can not instantiate different number of mesh levels in each
+    # direction, create mesh levels corresponding to the minimum of the two
+    mesh_levels_to_create = max_mesh_levels.min()
+
+    if limit_mesh_levels:
         # Limit the levels in mesh graph
-        mesh_levels = min(mesh_levels, max_mesh_levels)
+        mesh_levels_to_create = min(mesh_levels_to_create, limit_mesh_levels)
 
-    print(f"nlev: {nlev}, nleaf: {nleaf}, mesh_levels: {mesh_levels}")
+    print(f"mesh_levels: {mesh_levels_to_create}, nleaf: {nleaf}")
 
-    # multi resolution tree levels
     G = []
-    for lev in range(1, mesh_levels + 1):
-        n = int(nleaf / (nx**lev))
-        g = mk_2d_graph(xy, n, n, land_mask)
+    for lev in range(mesh_levels_to_create):  # 0-index mesh levels
+        # Compute number of nodes on level separate for each direction
+        nodes_x, nodes_y = (nleaf / (level_refinement_factor**lev)).astype(int)
+        g = mk_2d_graph(xy, nodes_x, nodes_y)
         if mesh_plot_function is not None:
             mesh_plot_function(from_networkx(g), f"Mesh graph, level {lev}")
 
@@ -119,11 +135,11 @@ def build_regular_mesh_graph(
         up_graphs = []
         down_graphs = []
         for from_level, to_level, G_from, G_to, start_index in zip(
-            range(1, mesh_levels),
-            range(0, mesh_levels - 1),
+            range(1, mesh_levels_to_create),
+            range(0, mesh_levels_to_create - 1),
             G[1:],
             G[:-1],
-            first_index_level[: mesh_levels - 1],
+            first_index_level[: mesh_levels_to_create - 1],
         ):
             # start out from graph at from level
             G_down = G_from.copy()
@@ -218,6 +234,7 @@ def build_regular_mesh_graph(
         for lev in range(1, len(G)):
             nodes = list(G[lev - 1].nodes)
             n = int(np.sqrt(len(nodes)))
+            nx = 3  # TODO Dummy
             ij = (
                 np.array(nodes)
                 .reshape((n, n, 2))[1::nx, 1::nx, :]

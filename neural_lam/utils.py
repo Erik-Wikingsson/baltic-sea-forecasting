@@ -4,6 +4,7 @@ import shutil
 import warnings
 
 # Third-party
+import cartopy.crs as ccrs
 import pytorch_lightning as pl
 import torch
 import torch_geometric as pyg
@@ -53,7 +54,7 @@ class BufferList(nn.Module):
         return self
 
 
-def load_graph(graph_dir_path, device="cpu"):
+def load_graph(graph_dir_path, datastore, device="cpu"):
     """Load all tensors representing the graph from `graph_dir_path`.
 
     Needs the following files for all graphs:
@@ -114,9 +115,28 @@ def load_graph(graph_dir_path, device="cpu"):
         return edge_index - edge_index.min(dim=1, keepdim=True)[0]
 
     # Load static node features
-    mesh_static_features = loads_file(
+    mesh_pos = loads_file(
         "mesh_features.pt"
     )  # List of (N_mesh[l], d_mesh_static)
+    # Static mesh features are normalized mesh node positions
+    mesh_pos_min = (
+        torch.stack(
+            [level_pos.min(dim=0).values for level_pos in mesh_pos], dim=0
+        )
+        .min(dim=0)
+        .values
+    )
+    mesh_pos_max = (
+        torch.stack(
+            [level_pos.max(dim=0).values for level_pos in mesh_pos], dim=0
+        )
+        .max(dim=0)
+        .values
+    )
+    mesh_static_features = [
+        (level_pos - mesh_pos_min) / (mesh_pos_max - mesh_pos_min)
+        for level_pos in mesh_pos
+    ]
 
     # Load edges (edge_index)
     m2m_edge_index = BufferList(
@@ -200,6 +220,20 @@ def load_graph(graph_dir_path, device="cpu"):
         len(mesh_static_features) == n_levels
     ), "Inconsistent number of levels in mesh"
 
+    mesh_lat_lon = [
+        torch.tensor(
+            ccrs.PlateCarree().transform_points(
+                datastore.coords_projection,
+                mesh_coords[:, 0].numpy(),
+                mesh_coords[:, 1].numpy(),
+            )[
+                :, :2
+            ],  # Keep only 2d
+            dtype=torch.float32,
+        )
+        for mesh_coords in mesh_pos
+    ]
+
     if hierarchical:
         # Load up and down edges and features
         mesh_up_edge_index = BufferList(
@@ -252,6 +286,7 @@ def load_graph(graph_dir_path, device="cpu"):
         "mesh_up_features": mesh_up_features,
         "mesh_down_features": mesh_down_features,
         "mesh_static_features": mesh_static_features,
+        "mesh_lat_lon": mesh_lat_lon,
     }
 
 

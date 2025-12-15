@@ -5,7 +5,15 @@ import os
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+import plotly.graph_objects as go
 import torch_geometric as pyg
+from PIL import Image
+
+# Local
+from . import utils as gutils
+
+# https://community.plotly.com/t/whats-the-efficient-way-to-create-3d-scatter-plot-for-millions-of-points/60965/4
+NODE_PLOT_LIMIT = 100000  # Limit on number of points to plot before subsampling
 
 
 def plot_graph(graph, title=None, graph_dir_path=None, reindex_edges=True):
@@ -58,3 +66,151 @@ def plot_graph(graph, title=None, graph_dir_path=None, reindex_edges=True):
 
     if graph_dir_path is not None:
         plt.savefig(os.path.join(graph_dir_path, f"{title}.png"))
+
+
+def make_earth(radius, resolution_reduction=1.0):
+    """
+    Plotly earth from
+    https://community.plotly.com/t/applying-full-color-image-texture-to-create-an-interactive-earth-globe/60166
+
+    radius: radius of earth in plot
+    resolution: float, percentage of full resolution
+    """
+    earth_colorscale = [
+        [0.0, "rgb(30, 59, 117)"],
+        [0.1, "rgb(46, 68, 21)"],
+        [0.2, "rgb(74, 96, 28)"],
+        [0.3, "rgb(115,141,90)"],
+        [0.4, "rgb(122, 126, 75)"],
+        [0.6, "rgb(122, 126, 75)"],
+        [0.7, "rgb(141,115,96)"],
+        [0.8, "rgb(223, 197, 170)"],
+        [0.9, "rgb(237,214,183)"],
+        [1.0, "rgb(255, 255, 255)"],
+    ]
+    texture_path = "figures/earth_texture.jpeg"
+    img = Image.open(texture_path)
+
+    # Calculate new width to maintain aspect ratio
+    new_width = int(img.width * resolution_reduction)
+    new_height = int(img.height * resolution_reduction)
+
+    # Resize image preserving aspect ratio
+    img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+    texture = np.asarray(img_resized).T
+
+    N_lon = int(texture.shape[0])
+    N_lat = int(texture.shape[1])
+    theta = np.linspace(-np.pi, np.pi, N_lon)
+    phi = np.linspace(0, np.pi, N_lat)
+
+    # Set up coordinates for points on the sphere
+    x0 = radius * np.outer(np.cos(theta), np.sin(phi))
+    y0 = radius * np.outer(np.sin(theta), np.sin(phi))
+    z0 = radius * np.outer(np.ones(N_lon), np.cos(phi))
+
+    return go.Surface(
+        x=x0,
+        y=y0,
+        z=z0,
+        surfacecolor=texture,
+        colorscale=earth_colorscale,
+        name="Earth",
+        showscale=False,
+        showlegend=True,
+    )
+
+
+def create_edge_plot(
+    edge_index,
+    from_node_lat_lon,
+    to_node_lat_lon,
+    label,
+    color="blue",
+    width=1,
+    from_radius=1,
+    to_radius=1,
+    pos_filter_func=None,
+):
+    """
+    Create a plotly object showing edges
+
+    edge_index: (2, M)
+    from_node_lat_lon: (N, 2), positions of sender nodes
+    to_node_lat_lon: (N, 2), positions of receiver nodes
+    label: str, label of plot object
+    """
+    from_node_cart = (
+        gutils.node_lat_lon_to_cart(from_node_lat_lon) * from_radius
+    )
+    to_node_cart = gutils.node_lat_lon_to_cart(to_node_lat_lon) * to_radius
+
+    edge_start = from_node_cart[edge_index[0]]  # (M, 2)
+    edge_end = to_node_cart[edge_index[1]]  # (M, 2)
+
+    if pos_filter_func is not None:
+        # Filter edges
+        edge_start_lat_lon = from_node_lat_lon[edge_index[0]]  # (M, 2)
+        edge_end_lat_lon = to_node_lat_lon[edge_index[1]]  # (M, 2)
+
+        edge_mask = np.logical_and(
+            pos_filter_func(edge_start_lat_lon),
+            pos_filter_func(edge_end_lat_lon),
+        )
+        edge_start = edge_start[edge_mask]
+        edge_end = edge_end[edge_mask]
+
+    n_edges = edge_start.shape[0]
+
+    x_edges = np.stack(
+        (edge_start[:, 0], edge_end[:, 0], np.full(n_edges, None)), axis=1
+    ).flatten()
+    y_edges = np.stack(
+        (edge_start[:, 1], edge_end[:, 1], np.full(n_edges, None)), axis=1
+    ).flatten()
+    z_edges = np.stack(
+        (edge_start[:, 2], edge_end[:, 2], np.full(n_edges, None)), axis=1
+    ).flatten()
+
+    return go.Scatter3d(
+        x=x_edges,
+        y=y_edges,
+        z=z_edges,
+        mode="lines",
+        line={"color": color, "width": width},
+        name=label,
+    )
+
+
+def create_node_plot(
+    node_lat_lon, label, color="blue", size=1, radius=1, pos_filter_func=None
+):
+    """
+    Create a plotly object showing nodes
+
+    node_lat_lon: (N, 2)
+    label: str, label of plot object
+    """
+    node_pos = gutils.node_lat_lon_to_cart(node_lat_lon) * radius
+    if pos_filter_func is not None:
+        # Filter nodes before plotting
+        node_pos = node_pos[pos_filter_func(node_lat_lon)]
+
+    # Plotly 3d can not render large amounts of points in some browsers, so
+    # for very large node sets we need to somehow subsample it before plotting.
+    # This is a simple solution
+    num_nodes = node_pos.shape[0]
+    subsample = num_nodes > NODE_PLOT_LIMIT
+    if subsample:
+        # Figure out how much to subsample by
+        subsampling_factor = int(num_nodes / NODE_PLOT_LIMIT)
+        node_pos = node_pos[::subsampling_factor]  # Simple subsampling
+
+    return go.Scatter3d(
+        x=node_pos[:, 0],
+        y=node_pos[:, 1],
+        z=node_pos[:, 2],
+        mode="markers",
+        marker={"color": color, "size": size},
+        name=f"{label} (subsampled)" if subsample else label,
+    )

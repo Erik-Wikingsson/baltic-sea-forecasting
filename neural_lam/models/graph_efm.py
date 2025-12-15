@@ -3,7 +3,6 @@ from typing import Union
 
 # Third-party
 import matplotlib.pyplot as plt
-import numpy as np
 import torch
 import torch.nn as nn
 import wandb
@@ -53,7 +52,8 @@ class GraphEFM(ARProbModel):
         # Load graph with static features
         graph_dir_path = datastore.root_path / "graph" / args.graph
         self.hierarchical_graph, graph_ldict = utils.load_graph(
-            graph_dir_path=graph_dir_path
+            graph_dir_path=graph_dir_path,
+            datastore=datastore,
         )
         for name, attr_value in graph_ldict.items():
             # NOTE: It would be good to rescale mesh node position features in
@@ -148,7 +148,7 @@ class GraphEFM(ARProbModel):
                 if level_index < (num_levels - 1):
                     up_edges = self.mesh_up_features[level_index].shape[0]
                     down_edges = self.mesh_down_features[level_index].shape[0]
-                    print(f"  {level_index}<->{level_index+1}")
+                    print(f"  {level_index}<->{level_index + 1}")
                     print(f" - {up_edges} up edges, {down_edges} down edges")
 
             # Embedders

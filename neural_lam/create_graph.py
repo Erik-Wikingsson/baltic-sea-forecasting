@@ -108,9 +108,6 @@ def create_graph(
 
     print(f"Writing graph components to {graph_dir_path}")
 
-    grid_xy = torch.tensor(xy)
-    pos_max = torch.max(torch.abs(grid_xy))
-
     #
     # Mesh
     #
@@ -152,9 +149,6 @@ def create_graph(
     # Save all graphs
     for graph_name, graph in save_graphs.items():
         saving.save_edges_list(graph, graph_name, graph_dir_path)
-
-    # Divide mesh node pos by max coordinate of grid cell
-    mesh_pos = [pos / pos_max for pos in mesh_pos]
 
     # Save mesh positions
     torch.save(
@@ -301,10 +295,8 @@ def create_graph_from_datastore(
     graph_type: str = "hierarchical",
     create_plot: bool = False,
 ):
-    interior_mask = datastore.get_mask(
-        surface=True, stacked=False, invert=False
-    )
-    xy_interior = datastore.get_projected_xy("state", stacked=False)
+    interior_mask = datastore.get_mask(surface=True, stacked=True, invert=False)
+    xy_interior = datastore.get_projected_xy("state", stacked=True)
 
     boundary_mask = datastore_boundary.get_mask(
         surface=True, stacked=True, invert=False
@@ -319,14 +311,6 @@ def create_graph_from_datastore(
     )
 
     # Node ordering is: 1) interior, 2) boundary, 3) atmosphere
-    #  xy_aux = np.concatenate(
-    #  (
-    #  xy_boundary[boundary_mask],
-    #  xy_atmosphere[atmosphere_mask],
-    #  ),
-    #  axis=0,
-    #  )  # (num_aux_grid_nodes, 2)
-
     create_graph(
         graph_dir_path=output_root_path,
         xy=xy_interior[interior_mask],
@@ -409,7 +393,7 @@ def cli(input_args=None):
         datastore=datastore,
         datastore_boundary=datastore_boundary,
         datastore_atmosphere=datastore_atmosphere,
-        output_root_path=os.path.join(datastore.root_path, "graph", args.name),
+        output_root_path=os.path.join(datastore.root_path, "graphs", args.name),
         g2m_radius=args.g2m_radius,
         g2m_radius_atm=args.g2m_radius_atm,
         mesh_node_distance=args.mesh_node_distance,

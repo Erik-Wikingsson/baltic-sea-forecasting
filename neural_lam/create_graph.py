@@ -242,10 +242,6 @@ def create_graph(
                 grid_node_pos, dm * connect_radius
             )
 
-            #  assert len(neigh_idxs) > 0, (
-            #  f"Grid node {grid_node} not connected to mesh in g2m, "
-            #  f"increase radius {connect_radius}"
-            #  )
             # Add edges for each mesh node within radius
             for mesh_node_i in neigh_idxs:
                 mesh_node = vm_list[mesh_node_i]

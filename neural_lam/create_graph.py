@@ -8,6 +8,7 @@ import networkx
 import numpy as np
 import scipy.spatial
 import torch
+from torch_geometric.utils import degree
 from torch_geometric.utils.convert import from_networkx
 
 # Local
@@ -29,6 +30,7 @@ def create_graph(
     n_max_levels: int | None = None,
     graph_type: str = "hierarchical",
     create_plot: bool = False,
+    allow_disconnected: bool = False,
 ):
     """
     Create graph components from `xy` grid coordinates and store in
@@ -108,6 +110,9 @@ def create_graph(
         What type of graph to generate multiscale/hierarchical/cluster
     create_plot : bool
         If graphs should be plotted during generation (default: False).
+    allow_disconnected : bool
+        Allow disconnected nodes in g2m. If False, will exit when disconnected
+        grid or mesh nodes are found in g2m.
 
     Returns
     -------
@@ -254,6 +259,24 @@ def create_graph(
 
     pyg_g2m = from_networkx(G_g2m)
 
+    # Find potentially disconnected nodes in g2m
+    disc_msg = ""  # Compile disconnected warning/errors in msg string
+    for node_set, ei in zip(("grid", "mesh"), pyg_g2m.edge_index):
+        disc_node_indices = torch.nonzero(degree(ei) == 0).flatten()
+        num_disc = len(disc_node_indices)
+        if num_disc > 0:
+            disc_msg += (
+                f"{num_disc} disconnected {node_set} nodes: "
+                f"{disc_node_indices}\n"
+            )
+    if disc_msg:
+        # Some disconnected nodes detected
+        disc_msg = "Disconnected nodes found in G2M\n" + disc_msg
+        if allow_disconnected:  # Only warning
+            print(f"Warning: {disc_msg}")
+        else:  # Raise error
+            raise ValueError(disc_msg)
+
     if create_plot:
         vis.plot_graph(pyg_g2m, "Grid-to-mesh", graph_dir_path)
         plt.show()
@@ -394,6 +417,12 @@ def cli(input_args=None):
         help="Which type of graph structure to generate",
         choices=["multiscale", "hierarchical", "cluster"],
     )
+    parser.add_argument(
+        "--allow_disconnected",
+        action="store_true",
+        help="Allow disconnected nodes in g2m. This is generally a bad idea and"
+        "should only be used for testing purposes.",
+    )
     args = parser.parse_args(input_args)
 
     assert (
@@ -418,6 +447,7 @@ def cli(input_args=None):
         n_max_levels=args.levels,
         graph_type=args.type,
         create_plot=args.plot,
+        allow_disconnected=args.allow_disconnected,
     )
 
 

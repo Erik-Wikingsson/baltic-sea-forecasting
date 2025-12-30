@@ -1,7 +1,9 @@
 # Third-party
 import networkx
 import numpy as np
+import scipy
 import torch
+import torch_geometric as pyg
 from torch_geometric.utils.convert import from_networkx
 
 
@@ -65,3 +67,42 @@ def add_edge_features_pyg(graph):
         graph.pos[graph.edge_index[1]] - graph.pos[graph.edge_index[0]]
     )
     graph["len"] = torch.norm(graph["vdiff"], dim=-1)
+
+
+def filter_edges_land(
+    graph: pyg.data.Data,
+    sea_xy: np.ndarray,
+    land_xy: np.ndarray,
+    max_edge_len: float = 50000,  # in m
+):
+    """
+    Filter edge set to only keep edges not crossing land.
+    `graph` is pyg Data object with `edge_index` and `pos` attributes
+    """
+    # Compute (in pytorch) midpoint of each edge
+    send_pos = graph.pos[graph.edge_index[0]]
+    rec_pos = graph.pos[graph.edge_index[1]]
+    midpoint_pos = (send_pos + rec_pos) / 2
+    edge_len = torch.norm(rec_pos - send_pos, dim=1)
+
+    # First filter, absolute edge length
+    # NOTE: This is directly in meters
+    edge_len_filter = edge_len < max_edge_len
+
+    # Second filter, middle of edge
+    # Look up (using numpy and scipy) closest gridpoint
+    midpoint_pos_np = midpoint_pos.numpy()
+    grid_point_kdt = scipy.spatial.KDTree(
+        np.concatenate((sea_xy, land_xy), axis=0)
+    )
+    closest_grid_index = grid_point_kdt.query(midpoint_pos_np)[1]
+    # As sea points come first, can only check magnitude
+    # of index of closest point
+    midpoint_over_sea = closest_grid_index < sea_xy.shape[0]  # bool np array
+    midpoint_filter = torch.tensor(midpoint_over_sea, dtype=bool)
+
+    edge_filter = edge_len_filter & midpoint_filter
+    new_edge_index = graph.edge_index[:, edge_filter]
+
+    # Change graph in-place
+    graph.edge_index = new_edge_index

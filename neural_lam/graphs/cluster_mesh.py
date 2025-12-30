@@ -25,6 +25,7 @@ def build_graph_from_node_pos(node_pos):
 
 def build_cluster_mesh_graph(
     xy,
+    xy_land,
     mesh_refinement_factor=9,
     grid_to_first_mesh_refinement=25,
     limit_mesh_levels=None,
@@ -68,6 +69,8 @@ def build_cluster_mesh_graph(
 
         # m2m
         level_graph = build_graph_from_node_pos(mesh_ref_model.cluster_centers_)
+        # Filter out edges crossing land
+        gutils.filter_edges_land(level_graph, xy, xy_land)
         gutils.add_edge_features_pyg(level_graph)
         mesh_level_graphs.append(level_graph)
 
@@ -121,8 +124,6 @@ def build_cluster_mesh_graph(
                     up_graph,
                     f"Up graph, {level_i - 1} -> {level_i}",
                 )
-
-    # TODO Deal with edges over land
 
     # Compile mesh positions
     mesh_pos = [mesh.pos for mesh in mesh_level_graphs]

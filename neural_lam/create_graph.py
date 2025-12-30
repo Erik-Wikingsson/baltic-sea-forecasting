@@ -14,7 +14,9 @@ from torch_geometric.utils.convert import from_networkx
 # Local
 from .config import load_config_and_datastores
 from .datastore.base import BaseRegularGridDatastore
-from .graphs import cluster_mesh, regular_mesh, saving, vis
+from .graphs import cluster_mesh, regular_mesh, saving
+from .graphs import utils as gutils
+from .graphs import vis
 
 
 def create_graph(
@@ -22,6 +24,7 @@ def create_graph(
     xy: np.ndarray,
     xy_boundary: np.ndarray,
     xy_atmosphere: np.ndarray,
+    xy_land: np.ndarray,
     g2m_radius: float,
     g2m_radius_atm: float,
     mesh_node_distance: float,
@@ -113,6 +116,9 @@ def create_graph(
     allow_disconnected : bool
         Allow disconnected nodes in g2m. If False, will exit when disconnected
         grid or mesh nodes are found in g2m.
+    xy_land: np.ndarray
+        Grid coordinates of land points, for edge filtering for cluster graph.
+        Expected to be of shape (num_grid, 2).
 
     Returns
     -------
@@ -146,6 +152,7 @@ def create_graph(
         mesh_pos, G_bottom_mesh, save_graphs = (
             cluster_mesh.build_cluster_mesh_graph(
                 xy_for_mesh,
+                xy_land=xy_land,
                 limit_mesh_levels=n_max_levels,
                 grid_to_first_mesh_refinement=grid_to_first_mesh_refinement,
                 mesh_refinement_factor=mesh_refinement_factor,
@@ -301,6 +308,9 @@ def create_graph(
 
     pyg_m2g = from_networkx(G_m2g)
 
+    # Remove m2g edges over land
+    gutils.filter_edges_land(pyg_m2g, xy, xy_land)
+
     if create_plot:
         vis.plot_graph(
             pyg_m2g, "Mesh-to-grid", graph_dir_path, reindex_edges=False
@@ -338,6 +348,7 @@ def create_graph_from_datastore(
     # Node ordering is: 1) interior, 2) boundary, 3) atmosphere
     create_graph(
         xy=xy_interior[interior_mask],
+        xy_land=xy_interior[~interior_mask],  # Coordinates of land points
         xy_boundary=xy_boundary[
             boundary_mask
         ],  # Only encode from these additional grid nodes

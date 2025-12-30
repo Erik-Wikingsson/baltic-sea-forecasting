@@ -75,9 +75,19 @@ def build_regular_mesh_graph(
     limit_mesh_levels,
     hierarchical,
     mesh_plot_function,
+    mesh_refinement_factor=9,
 ):
     save_graphs = {}
-    level_refinement_factor = 3  # Hard-coded for now
+
+    # Must be a squared number, convert to integer
+    mrf_1d_float = np.sqrt(mesh_refinement_factor)
+    mesh_refinement_factor_1d = mrf_1d_float.round().astype(int)
+    assert np.isclose(mrf_1d_float, mesh_refinement_factor_1d), (
+        "For regular mesh, the mesh refinement factor must be a squared number"
+        " (e.g. 4, 9, ...) as we take the square root when laying out "
+        "mesh nodes in each direction. "
+        f"Got {mesh_refinement_factor} with square root {mrf_1d_float}."
+    )
 
     # Below computation is copied from wmg
     # Compute the size along x and y direction of area to cover with graph
@@ -89,13 +99,13 @@ def build_regular_mesh_graph(
 
     # Find the number of mesh levels possible in x- and y-direction,
     # and the number of leaf nodes that would correspond to
-    # max_nodes_bottom/(level_refinement_factor^mesh_levels) = 1
+    # max_nodes_bottom/(mesh_refinement_factor_1d^mesh_levels) = 1
     max_mesh_levels_float = np.log(max_nodes_bottom) / np.log(
-        level_refinement_factor
+        mesh_refinement_factor_1d
     )
 
     max_mesh_levels = max_mesh_levels_float.astype(int)  # (2,)
-    nleaf = level_refinement_factor**max_mesh_levels
+    nleaf = mesh_refinement_factor_1d**max_mesh_levels
     # leaves at the bottom in each direction, if using max_mesh_levels
 
     # As we can not instantiate different number of mesh levels in each
@@ -111,7 +121,9 @@ def build_regular_mesh_graph(
     G = []
     for lev in range(mesh_levels_to_create):  # 0-index mesh levels
         # Compute number of nodes on level separate for each direction
-        nodes_x, nodes_y = (nleaf / (level_refinement_factor**lev)).astype(int)
+        nodes_x, nodes_y = (nleaf / (mesh_refinement_factor_1d**lev)).astype(
+            int
+        )
         g = mk_2d_graph(xy, nodes_x, nodes_y)
         if mesh_plot_function is not None:
             mesh_plot_function(from_networkx(g), f"Mesh graph, level {lev}")

@@ -8,10 +8,6 @@ from sklearn.cluster import KMeans
 # Local
 from . import utils as gutils
 
-# TODO Make arguments
-G2M_REDUCTION = 25
-MESH_REDUCTION = 9
-
 
 def build_graph_from_node_pos(node_pos):
     """
@@ -29,11 +25,14 @@ def build_graph_from_node_pos(node_pos):
 
 def build_cluster_mesh_graph(
     xy,
+    mesh_refinement_factor=9,
+    grid_to_first_mesh_refinement=25,
     limit_mesh_levels=None,
     mesh_plot_function=None,
 ):
     possible_mesh_levels = np.floor(
-        np.log(xy.shape[0] / G2M_REDUCTION) / np.log(MESH_REDUCTION)
+        np.log(xy.shape[0] / grid_to_first_mesh_refinement)
+        / np.log(mesh_refinement_factor)
     ).astype(int)
     if limit_mesh_levels is None:
         num_mesh_levels = possible_mesh_levels
@@ -49,12 +48,12 @@ def build_cluster_mesh_graph(
         if level_i == 0:
             prev_level_pos = xy
             num_clusters = np.round(
-                prev_level_pos.shape[0] / G2M_REDUCTION
+                prev_level_pos.shape[0] / grid_to_first_mesh_refinement
             ).astype(int)
         else:
             prev_level_pos = mesh_level_graphs[-1].pos.numpy()
             num_clusters = np.round(
-                prev_level_pos.shape[0] / MESH_REDUCTION
+                prev_level_pos.shape[0] / mesh_refinement_factor
             ).astype(int)
 
         mesh_ref_model = KMeans(

@@ -1,6 +1,6 @@
 # Standard library
 import os
-from argparse import ArgumentParser
+from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 
 # Third-party
 import matplotlib.pyplot as plt
@@ -24,9 +24,11 @@ def create_graph(
     g2m_radius: float,
     g2m_radius_atm: float,
     mesh_node_distance: float,
-    n_max_levels: int,
-    graph_type: str,
-    create_plot: bool,
+    mesh_refinement_factor: float,
+    grid_to_first_mesh_refinement: float,
+    n_max_levels: int | None = None,
+    graph_type: str = "hierarchical",
+    create_plot: bool = False,
 ):
     """
     Create graph components from `xy` grid coordinates and store in
@@ -91,6 +93,14 @@ def create_graph(
         Radius to connect interior and boundary nodes within for g2m
     g2m_radius_atm : float
         Radius to connect atmospheric nodes within for g2m
+    mesh_node_distance: float,
+        (For hierarchical/multiscale graphs) Distance between mesh nodes,
+        in meters
+    mesh_refinement_factor: float,
+        Factor between number of mesh nodes at each level in hierarchy
+    grid_to_first_mesh_refinement: float,
+        (For cluster graphs) Factor between number of grid nodes and number of
+        mesh nodes at bottom level.
     n_max_levels : int
         Limit multi-scale mesh to given number of levels, from bottom up
         (default: None (no limit)).
@@ -132,6 +142,8 @@ def create_graph(
             cluster_mesh.build_cluster_mesh_graph(
                 xy_for_mesh,
                 limit_mesh_levels=n_max_levels,
+                grid_to_first_mesh_refinement=grid_to_first_mesh_refinement,
+                mesh_refinement_factor=mesh_refinement_factor,
                 mesh_plot_function=mesh_plot_func,
             )
         )
@@ -140,6 +152,7 @@ def create_graph(
             regular_mesh.build_regular_mesh_graph(
                 xy_for_mesh,
                 mesh_node_distance=mesh_node_distance,
+                mesh_refinement_factor=mesh_refinement_factor,
                 limit_mesh_levels=n_max_levels,
                 hierarchical=(graph_type == "hierarchical"),
                 mesh_plot_function=mesh_plot_func,
@@ -286,14 +299,7 @@ def create_graph_from_datastore(
     datastore: BaseRegularGridDatastore,
     datastore_boundary: BaseRegularGridDatastore,
     datastore_atmosphere: BaseRegularGridDatastore,
-    output_root_path: str,
-    g2m_radius: float,
-    g2m_radius_atm: float,
-    mesh_node_distance: float,
-    n_max_levels: int = None,
-    hierarchical: bool = False,
-    graph_type: str = "hierarchical",
-    create_plot: bool = False,
+    **kwargs,
 ):
     interior_mask = datastore.get_mask(surface=True, stacked=True, invert=False)
     xy_interior = datastore.get_projected_xy("state", stacked=True)
@@ -312,23 +318,20 @@ def create_graph_from_datastore(
 
     # Node ordering is: 1) interior, 2) boundary, 3) atmosphere
     create_graph(
-        graph_dir_path=output_root_path,
         xy=xy_interior[interior_mask],
         xy_boundary=xy_boundary[
             boundary_mask
         ],  # Only encode from these additional grid nodes
         xy_atmosphere=xy_atmosphere[atmosphere_mask],
-        g2m_radius=g2m_radius,
-        g2m_radius_atm=g2m_radius_atm,
-        mesh_node_distance=mesh_node_distance,
-        n_max_levels=n_max_levels,
-        graph_type=graph_type,
-        create_plot=create_plot,
+        **kwargs,
     )
 
 
 def cli(input_args=None):
-    parser = ArgumentParser(description="Graph generation arguments")
+    parser = ArgumentParser(
+        description="Graph generation arguments",
+        formatter_class=ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument(
         "--config_path",
         type=str,
@@ -338,39 +341,52 @@ def cli(input_args=None):
         "--name",
         type=str,
         default="multiscale",
-        help="Name to save graph as (default: multiscale)",
+        help="Name to save graph as",
     )
     parser.add_argument(
         "--plot",
         action="store_true",
-        help="If graphs should be plotted during generation "
-        "(default: False)",
+        help="If graphs should be plotted during generation",
     )
     parser.add_argument(
         "--levels",
         type=int,
         help="Limit multi-scale mesh to given number of levels, "
-        "from bottom up (default: None (no limit))",
+        "from bottom up",
     )
     parser.add_argument(
         "--g2m_radius",
         type=float,
         default=0.67,
         help="Radius within which to connect grid nodes (interior and boundary)"
-        "to mesh, a multiple of mean edge length in mesh (default: 0.67)",
+        "to mesh, a multiple of mean edge length in mesh",
     )
     parser.add_argument(
         "--g2m_radius_atm",
         type=float,
         default=0.67,
         help="Radius within which to connect grid nodes (atmospheric)"
-        "to mesh, a multiple of mean edge length in mesh (default: 0.67)",
+        "to mesh, a multiple of mean edge length in mesh",
     )
     parser.add_argument(
         "--mesh_node_distance",
         type=float,
         default=20000,
-        help="Distanc between mesh nodes, in m (default: 20000)",
+        help="(For hierarchical/multiscale graphs) "
+        "Distance between mesh nodes, in meters",
+    )
+    parser.add_argument(
+        "--mesh_refinement_factor",
+        type=float,
+        default=9,
+        help="Factor between number of mesh nodes at each level in hierarchy.",
+    )
+    parser.add_argument(
+        "--grid_to_first_mesh_refinement",
+        type=float,
+        default=25,
+        help="(For cluster graphs) Factor between number of grid nodes "
+        "and number of mesh nodes at bottom level.",
     )
     parser.add_argument(
         "--type",
@@ -393,10 +409,12 @@ def cli(input_args=None):
         datastore=datastore,
         datastore_boundary=datastore_boundary,
         datastore_atmosphere=datastore_atmosphere,
-        output_root_path=os.path.join(datastore.root_path, "graphs", args.name),
+        graph_dir_path=os.path.join(datastore.root_path, "graphs", args.name),
         g2m_radius=args.g2m_radius,
         g2m_radius_atm=args.g2m_radius_atm,
         mesh_node_distance=args.mesh_node_distance,
+        mesh_refinement_factor=args.mesh_refinement_factor,
+        grid_to_first_mesh_refinement=args.grid_to_first_mesh_refinement,
         n_max_levels=args.levels,
         graph_type=args.type,
         create_plot=args.plot,

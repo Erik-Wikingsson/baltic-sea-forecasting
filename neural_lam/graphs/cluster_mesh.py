@@ -1,16 +1,14 @@
 # Third-party
-import networkx
 import numpy as np
-import scipy
 import torch
 import torch_geometric as pyg
 import torch_geometric.transforms as pygt
 from sklearn.cluster import KMeans
-from torch_geometric.utils.convert import from_networkx
 
 # Local
 from . import utils as gutils
 
+# TODO Make arguments
 G2M_REDUCTION = 25
 MESH_REDUCTION = 9
 
@@ -31,34 +29,25 @@ def build_graph_from_node_pos(node_pos):
 
 def build_cluster_mesh_graph(
     xy,
-    land_mask,
-    max_mesh_levels,
-    mesh_plot_function,
+    limit_mesh_levels=None,
+    mesh_plot_function=None,
 ):
-    # TODO Work on projected lat-lons here, rather than toy coordinates in xy
-    sea_point_coords = xy.reshape(2, -1)[:, ~land_mask.flatten()].T  # (N, 2)
-    sea_coords_proj = sea_point_coords[:10000]
-
-    # As projection means we have fewer points at low latitudes,
-    # we can weigh these up in the k-means alg.
-    # sea_coords_lat_weights = np.cos(np.deg2rad(sea_coords[:, 0]))  # Not normalized
-    sea_coords_lat_weights = None
-
-    num_coords = sea_coords_proj.shape[0]
-
     possible_mesh_levels = np.floor(
-        np.log(sea_coords_proj.shape[0] / G2M_REDUCTION)
-        / np.log(MESH_REDUCTION)
+        np.log(xy.shape[0] / G2M_REDUCTION) / np.log(MESH_REDUCTION)
     ).astype(int)
-    num_mesh_levels = min(possible_mesh_levels, max_mesh_levels)
+    if limit_mesh_levels is None:
+        num_mesh_levels = possible_mesh_levels
+    else:
+        num_mesh_levels = min(possible_mesh_levels, limit_mesh_levels)
 
     # Construct mesh levels
     mesh_level_graphs = []
     mesh_up_graphs = []
+    mesh_down_graphs = []
     for level_i in range(0, num_mesh_levels):
         print(f"Running kmeans for level {level_i}...")
         if level_i == 0:
-            prev_level_pos = sea_coords_proj
+            prev_level_pos = xy
             num_clusters = np.round(
                 prev_level_pos.shape[0] / G2M_REDUCTION
             ).astype(int)
@@ -76,24 +65,28 @@ def build_cluster_mesh_graph(
 
         closest_cluster_index = mesh_ref_model.fit_predict(
             prev_level_pos,
-            sample_weight=sea_coords_lat_weights if level_i == 0 else None,
         )
 
         # m2m
         level_graph = build_graph_from_node_pos(mesh_ref_model.cluster_centers_)
+        gutils.add_edge_features_pyg(level_graph)
         mesh_level_graphs.append(level_graph)
+
+        if mesh_plot_function is not None:
+            mesh_plot_function(level_graph, f"Mesh graph, level {level_i}")
 
         if level_i > 0:
             # up
-            up_graph = pyg.data.Data(
-                edge_index=torch.stack(
-                    (
-                        torch.arange(prev_level_pos.shape[0], dtype=torch.long),
-                        prev_level_pos.shape[0]
-                        + torch.tensor(closest_cluster_index, dtype=torch.long),
-                    ),
-                    dim=0,
+            up_edge_index = torch.stack(
+                (
+                    torch.arange(prev_level_pos.shape[0], dtype=torch.long),
+                    prev_level_pos.shape[0]
+                    + torch.tensor(closest_cluster_index, dtype=torch.long),
                 ),
+                dim=0,
+            )
+            up_graph = pyg.data.Data(
+                edge_index=up_edge_index,
                 pos=torch.cat(
                     (
                         mesh_level_graphs[level_i - 1].pos,
@@ -102,32 +95,54 @@ def build_cluster_mesh_graph(
                     dim=0,
                 ),
             )
-            # TODO
+            gutils.add_edge_features_pyg(up_graph)
+            mesh_up_graphs.append(up_graph)
 
-            # down
-            # TODO
-
-        if mesh_plot_function is not None:
-            mesh_plot_function(level_graph, f"Mesh graph, level {level_i}")
-
-    # Add edge features and convert to networkx
-    mesh_levels_nx = []
-    for mesh_level in mesh_level_graphs:
-        mesh_level["vdiff"] = (
-            mesh_level.pos[mesh_level.edge_index[1]]
-            - mesh_level.pos[mesh_level.edge_index[0]]
-        )
-        mesh_level["len"] = torch.norm(mesh_level["vdiff"], dim=-1)
-
-        mesh_levels_nx.append(
-            pyg.utils.to_networkx(
-                mesh_level,
-                node_attrs=["pos"],
-                edge_attrs=["vdiff", "len"],
+            # down, reverse up edges
+            reversed_up_edge_index = torch.stack(
+                (
+                    up_edge_index[1],
+                    up_edge_index[0],
+                ),
+                dim=0,
             )
-        )
+            down_graph = pyg.data.Data(
+                edge_index=reversed_up_edge_index,
+                pos=up_graph.pos,  # same node indices, keep pos as is
+            )
+            gutils.add_edge_features_pyg(down_graph)
+            mesh_down_graphs.append(down_graph)
 
-    # Connect mesh levels
+            if mesh_plot_function is not None:
+                mesh_plot_function(
+                    down_graph,
+                    f"Down graph, {level_i} -> {level_i - 1}",
+                )
+                mesh_plot_function(
+                    up_graph,
+                    f"Up graph, {level_i - 1} -> {level_i}",
+                )
 
-    # TODO
-    return None, None, None
+    # TODO Deal with edges over land
+
+    # Compile mesh positions
+    mesh_pos = [mesh.pos for mesh in mesh_level_graphs]
+
+    # Compile graphs to save
+    save_graphs = {
+        "mesh_up": mesh_up_graphs,
+        "mesh_down": mesh_down_graphs,
+        "m2m": mesh_level_graphs,
+    }
+
+    # Convert bottom mesh to networkx
+    bottom_mesh_nx = pyg.utils.to_networkx(
+        mesh_level_graphs[0],
+        node_attrs=["pos"],
+    )
+    # Change pos attribute to be a numpy array instead of list
+    for node_id in bottom_mesh_nx.nodes:
+        pos_list = bottom_mesh_nx.nodes[node_id]["pos"]
+        bottom_mesh_nx.nodes[node_id]["pos"] = np.array(pos_list)
+
+    return mesh_pos, bottom_mesh_nx, save_graphs

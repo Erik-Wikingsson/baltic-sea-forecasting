@@ -1,6 +1,7 @@
 # Third-party
 import networkx
 import numpy as np
+import torch
 from torch_geometric.utils.convert import from_networkx
 
 
@@ -52,3 +53,15 @@ def from_networkx_with_start_index(nx_graph, start_index):
     pyg_graph = from_networkx(nx_graph)
     pyg_graph.edge_index += start_index
     return pyg_graph
+
+
+def add_edge_features_pyg(graph):
+    """
+    Adds `len` and `vdiff` edge features to given pyg graph
+    with a `pos` attribute.
+    Modifies graph in-place.
+    """
+    graph["vdiff"] = (
+        graph.pos[graph.edge_index[1]] - graph.pos[graph.edge_index[0]]
+    )
+    graph["len"] = torch.norm(graph["vdiff"], dim=-1)

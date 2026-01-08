@@ -446,11 +446,18 @@ def main():
     if not args.show_axis:
         # Hide axis
         fig.update_layout(
+            margin=dict(l=0, r=0, t=0, b=0),
+            legend=dict(
+                yanchor="bottom",
+                y=0.01,
+                xanchor="right",
+                x=0.99,
+            ),
             scene={
                 "xaxis": {"visible": False},
                 "yaxis": {"visible": False},
                 "zaxis": {"visible": False},
-            }
+            },
         )
 
     if args.save:

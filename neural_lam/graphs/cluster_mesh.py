@@ -8,7 +8,8 @@ from sklearn.cluster import KMeans
 # Local
 from . import utils as gutils
 
-BASE_MAX_EDGE_LEN = 50000 # m
+BASE_MAX_EDGE_LEN = 50000  # m
+
 
 def build_graph_from_node_pos(node_pos):
     """
@@ -31,6 +32,7 @@ def build_cluster_mesh_graph(
     grid_to_first_mesh_refinement=25,
     limit_mesh_levels=None,
     mesh_plot_function=None,
+    random_state=42,
 ):
     possible_mesh_levels = np.floor(
         np.log(xy.shape[0] / grid_to_first_mesh_refinement)
@@ -62,6 +64,7 @@ def build_cluster_mesh_graph(
             n_clusters=num_clusters,
             init="k-means++",
             n_init=1,
+            random_state=random_state,
         )
 
         closest_cluster_index = mesh_ref_model.fit_predict(
@@ -71,8 +74,12 @@ def build_cluster_mesh_graph(
         # m2m
         level_graph = build_graph_from_node_pos(mesh_ref_model.cluster_centers_)
         # Filter out edges crossing land
-        max_edge_len = BASE_MAX_EDGE_LEN * (mesh_refinement_factor ** (0.5 * level_i))
-        gutils.filter_edges_land(level_graph, xy, xy_land, max_edge_len=max_edge_len)
+        max_edge_len = BASE_MAX_EDGE_LEN * (
+            mesh_refinement_factor ** (0.5 * level_i)
+        )
+        gutils.filter_edges_land(
+            level_graph, xy, xy_land, max_edge_len=max_edge_len
+        )
         gutils.add_edge_features_pyg(level_graph)
         mesh_level_graphs.append(level_graph)
 

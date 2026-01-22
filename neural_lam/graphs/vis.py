@@ -214,3 +214,79 @@ def create_node_plot(
         marker={"color": color, "size": size},
         name=f"{label} (subsampled)" if subsample else label,
     )
+
+
+def plot_disconnected_nodes(
+    pos,
+    is_mesh,
+    is_any_grid,
+    disc_grid_indices,
+    disc_mesh_indices,
+    graph_dir_path,
+    title="g2m_disconnected",
+):
+    """
+    Plot disconnected nodes in g2m graph.
+
+    Parameters
+    ----------
+    pos : np.ndarray
+        Node positions, shape (N, 2)
+    is_mesh : np.ndarray
+        Boolean mask for mesh nodes
+    is_any_grid : np.ndarray
+        Boolean mask for all grid nodes
+    disc_grid_indices : np.ndarray
+        Indices of disconnected grid nodes
+    disc_mesh_indices : np.ndarray
+        Indices of disconnected mesh nodes
+    graph_dir_path : str
+        Path to save plot
+    title : str
+        Title and filename for plot
+    """
+    fig, axis = plt.subplots(figsize=(8, 8), dpi=200)
+
+    # Plot all grid nodes
+    axis.scatter(
+        pos[is_any_grid, 0],
+        pos[is_any_grid, 1],
+        s=1,
+        label="all grids",
+        color="lightblue",
+    )
+
+    # Plot all mesh nodes
+    axis.scatter(
+        pos[is_mesh, 0],
+        pos[is_mesh, 1],
+        s=1,
+        label="mesh",
+        color="green",
+    )
+
+    # Plot disconnected grid nodes
+    if len(disc_grid_indices) > 0:
+        axis.scatter(
+            pos[disc_grid_indices, 0],
+            pos[disc_grid_indices, 1],
+            s=6,
+            label="disconnected grid",
+            color="red",
+        )
+
+    # Plot disconnected mesh nodes
+    if len(disc_mesh_indices) > 0:
+        axis.scatter(
+            pos[disc_mesh_indices, 0],
+            pos[disc_mesh_indices, 1],
+            s=8,
+            label="disconnected mesh",
+            color="darkred",
+        )
+
+    axis.legend()
+    axis.set_title(title)
+
+    plt.savefig(os.path.join(graph_dir_path, f"{title}.png"))
+    plt.close()

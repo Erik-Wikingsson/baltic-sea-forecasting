@@ -26,6 +26,7 @@ def create_graph(
     xy_atmosphere: np.ndarray,
     xy_land: np.ndarray,
     g2m_radius: float,
+    g2m_radius_boundary: float,
     g2m_radius_atm: float,
     mesh_node_distance: float,
     mesh_refinement_factor: float,
@@ -238,8 +239,8 @@ def create_graph(
     # add edges from each grid node set to mesh
     for node_list, connect_radius in (
         (G_interior.nodes(data=True), g2m_radius),
-        (boundary_nodes, g2m_radius),
-        (atmospheric_nodes, g2m_radius),
+        (boundary_nodes, g2m_radius_boundary),
+        (atmospheric_nodes, g2m_radius_atm),
     ):
         # Note: Below could likely be vectorized, if networkx can play along
         for grid_node, node_attrs in node_list:
@@ -260,25 +261,71 @@ def create_graph(
                 G_g2m.edges[grid_node, mesh_node]["len"] = d
                 G_g2m.edges[grid_node, mesh_node]["vdiff"] = vdiff
 
+    node_list = list(G_g2m.nodes)
+    node_to_idx = {n: i for i, n in enumerate(node_list)}
+
+    # Build boolean masks per node category
+    is_mesh = np.array(
+        [not isinstance(n, tuple) for n in node_list]
+    )  # mesh nodes are not tuples
+    is_grid_interior = np.array(
+        [isinstance(n, tuple) and n[0] == 1 for n in node_list]
+    )
+    is_grid_boundary = np.array(
+        [isinstance(n, tuple) and n[0] == 2 for n in node_list]
+    )
+    is_grid_atm = np.array(
+        [isinstance(n, tuple) and n[0] == 3 for n in node_list]
+    )
+    is_any_grid = is_grid_interior | is_grid_boundary | is_grid_atm
+
     pyg_g2m = from_networkx(G_g2m)
 
-    # Find potentially disconnected nodes in g2m
-    disc_msg = ""  # Compile disconnected warning/errors in msg string
-    for node_set, ei in zip(("grid", "mesh"), pyg_g2m.edge_index):
-        disc_node_indices = torch.nonzero(degree(ei) == 0).flatten()
-        num_disc = len(disc_node_indices)
-        if num_disc > 0:
-            disc_msg += (
-                f"{num_disc} disconnected {node_set} nodes: "
-                f"{disc_node_indices}\n"
-            )
-    if disc_msg:
-        # Some disconnected nodes detected
-        disc_msg = "Disconnected nodes found in G2M\n" + disc_msg
-        if allow_disconnected:  # Only warning
-            print(f"Warning: {disc_msg}")
-        else:  # Raise error
-            raise ValueError(disc_msg)
+    # Check for disconnected nodes in g2m
+    src = pyg_g2m.edge_index[0]
+    dst = pyg_g2m.edge_index[1]
+    num_nodes = pyg_g2m.num_nodes
+
+    outdeg = degree(src, num_nodes=num_nodes)
+    indeg = degree(dst, num_nodes=num_nodes)
+
+    # Convert masks to torch
+    grid_mask_t = torch.as_tensor(is_any_grid, device=outdeg.device)
+    mesh_mask_t = torch.as_tensor(is_mesh, device=outdeg.device)
+
+    # Find grid nodes with no outgoing edges and mesh nodes with no incoming edges
+    disc_grid = torch.where((outdeg == 0) & grid_mask_t)[0]
+    disc_mesh = torch.where((indeg == 0) & mesh_mask_t)[0]
+
+    if len(disc_grid) > 0 or len(disc_mesh) > 0:
+        msg = "Disconnected nodes found in G2M\n"
+        msg += f"{len(disc_grid)} disconnected grid nodes (outdeg==0)\n"
+        msg += f"{len(disc_mesh)} disconnected mesh nodes (indeg==0)"
+        if allow_disconnected:
+            print("Warning:", msg)
+        else:
+            raise ValueError(msg)
+
+    # Plot disconnected nodes
+    pos = pyg_g2m.pos.cpu().numpy()
+    disc_grid_np = disc_grid.cpu().numpy()
+    disc_mesh_np = disc_mesh.cpu().numpy()
+
+    # Print counts by subset among disconnected grid nodes
+    if len(disc_grid_np) > 0:
+        print("Disconnected interior:", np.sum(is_grid_interior[disc_grid_np]))
+        print("Disconnected boundary:", np.sum(is_grid_boundary[disc_grid_np]))
+        print("Disconnected atmosphere:", np.sum(is_grid_atm[disc_grid_np]))
+
+    if create_plot:
+        vis.plot_disconnected_nodes(
+            pos,
+            is_mesh,
+            is_any_grid,
+            disc_grid_np,
+            disc_mesh_np,
+            graph_dir_path,
+        )
 
     if create_plot:
         vis.plot_graph(pyg_g2m, "Grid-to-mesh", graph_dir_path)
@@ -310,6 +357,45 @@ def create_graph(
 
     # Remove m2g edges over land
     gutils.filter_edges_land(pyg_m2g, xy, xy_land)
+
+    # Check for disconnected nodes in m2g
+    m2g_node_list = list(G_m2g.nodes)
+    m2g_is_mesh = np.array([not isinstance(n, tuple) for n in m2g_node_list])
+    m2g_is_grid = np.array(
+        [isinstance(n, tuple) and n[0] == 1 for n in m2g_node_list]
+    )
+
+    m2g_dst = pyg_m2g.edge_index[1]
+    m2g_num_nodes = pyg_m2g.num_nodes
+
+    m2g_indeg = degree(m2g_dst, num_nodes=m2g_num_nodes)
+    m2g_grid_mask_t = torch.as_tensor(m2g_is_grid, device=m2g_indeg.device)
+
+    # Find grid nodes with no incoming edges from mesh
+    m2g_disc_grid = torch.where((m2g_indeg == 0) & m2g_grid_mask_t)[0]
+
+    if len(m2g_disc_grid) > 0:
+        msg = "Disconnected nodes found in M2G\n"
+        msg += f"{len(m2g_disc_grid)} disconnected grid nodes (indeg==0)"
+        if allow_disconnected:
+            print("Warning:", msg)
+        else:
+            raise ValueError(msg)
+
+    if create_plot:
+        # Plot disconnected nodes
+        m2g_pos = pyg_m2g.pos.cpu().numpy()
+        m2g_disc_grid_np = m2g_disc_grid.cpu().numpy()
+
+        vis.plot_disconnected_nodes(
+            m2g_pos,
+            m2g_is_mesh,
+            m2g_is_grid,
+            m2g_disc_grid_np,
+            np.array([], dtype=int),  # No disconnected mesh nodes in m2g
+            graph_dir_path,
+            title="m2g_disconnected",
+        )
 
     if create_plot:
         vis.plot_graph(
@@ -392,6 +478,13 @@ def cli(input_args=None):
         "to mesh, a multiple of mean edge length in mesh",
     )
     parser.add_argument(
+        "--g2m_radius_boundary",
+        type=float,
+        default=0.67,
+        help="Radius within which to connect grid nodes (boundary)"
+        "to mesh, a multiple of mean edge length in mesh",
+    )
+    parser.add_argument(
         "--g2m_radius_atm",
         type=float,
         default=0.67,
@@ -447,6 +540,7 @@ def cli(input_args=None):
         datastore_atmosphere=datastore_atmosphere,
         graph_dir_path=os.path.join(datastore.root_path, "graphs", args.name),
         g2m_radius=args.g2m_radius,
+        g2m_radius_boundary=args.g2m_radius_boundary,
         g2m_radius_atm=args.g2m_radius_atm,
         mesh_node_distance=args.mesh_node_distance,
         mesh_refinement_factor=args.mesh_refinement_factor,

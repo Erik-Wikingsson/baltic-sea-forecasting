@@ -31,7 +31,9 @@ class FM(EDM):
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
     ):
-        super().__init__(args, config, datastore, datastore_boundary, datastore_atmosphere)
+        super().__init__(
+            args, config, datastore, datastore_boundary, datastore_atmosphere
+        )
 
     # Evaluation
     def predict_step(
@@ -93,7 +95,7 @@ class FM(EDM):
         forcing,
         boundary_forcing,
         atmosphere_forcing,
-        target_state
+        target_state,
     ):
         """
         Predict weather state one time step ahead
@@ -128,7 +130,8 @@ class FM(EDM):
 
         # Shape (B, d_state, N_x, N_y)
         pred_drift = self.model(
-            zt, t, input_grid, boundary_forcing, atmosphere_forcing)
+            zt, t, input_grid, boundary_forcing, atmosphere_forcing
+        )
 
         # This predicts the drift b
         drift = z1 - z0
@@ -191,14 +194,20 @@ class FM(EDM):
 
             # Euler step.
             x_cur = x_next
-            d_cur = self.model(x_cur, t_cur, class_labels,
-                               boundary_forcing, atmosphere_forcing)
+            d_cur = self.model(
+                x_cur, t_cur, class_labels, boundary_forcing, atmosphere_forcing
+            )
             x_next = x_cur + (t_next - t_cur) * d_cur
 
             # Apply 2nd order correction.
             if i < num_steps - 1:
                 d_prime = self.model(
-                    x_next, t_next, class_labels, boundary_forcing, atmosphere_forcing)
+                    x_next,
+                    t_next,
+                    class_labels,
+                    boundary_forcing,
+                    atmosphere_forcing,
+                )
                 x_next = x_cur + (t_next - t_cur) * (
                     0.5 * d_cur + 0.5 * d_prime
                 )
@@ -231,8 +240,9 @@ class FM(EDM):
             beta_dot_t = -1
             eps_t = eps * beta_t
 
-            b = self.model(zt, t, class_labels,
-                           boundary_forcing, atmosphere_forcing)
+            b = self.model(
+                zt, t, class_labels, boundary_forcing, atmosphere_forcing
+            )
             s = (alpha_t * b - alpha_dot_t * zt) / (
                 beta_t * gamma_t
             )  # s = (t * b - zt) / (1 - t)

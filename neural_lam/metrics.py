@@ -338,7 +338,7 @@ def afcrps_ens(
     """
     (Negative) Almost Fair Continuous Ranked Probability Score (CRPS)
 
-    (..., M, ...,) is any number of batch dimensions, including ensemble dimension M
+    (..., M, ...,) is any number of batch dimensions, including ens dimension M
 
     pred: (..., M, D, X, Y), prediction
     target: (..., D, X, Y), target
@@ -354,7 +354,7 @@ def afcrps_ens(
         pred = pred.unsqueeze(ens_dim)
 
     num_ens = pred.shape[ens_dim]  # Number of ensemble members
-    eps = (1-alpha) / num_ens
+    eps = (1 - alpha) / num_ens
     if num_ens == 1:
         # With one sample CRPS reduces to MAE
         return mae(
@@ -375,7 +375,7 @@ def afcrps_ens(
             pred.select(ens_dim, 0) - pred.select(ens_dim, 1)
         )
 
-        crps_estimator = mean_mae + (1-eps) * pair_diffs_term
+        crps_estimator = mean_mae + (1 - eps) * pair_diffs_term
     elif num_ens < 10:
         # This is the rank-based implementation with O(M*log(M)) compute and
         # O(M) memory. See Zamo and Naveau and WB2 for explanation.
@@ -392,7 +392,7 @@ def afcrps_ens(
             dim=ens_dim,
         )
 
-        crps_estimator = mean_mae + (1-eps) * pair_diffs_term
+        crps_estimator = mean_mae + (1 - eps) * pair_diffs_term
     else:
         # For large ensembles we batch this over the variable dimension
         crps_res = []
@@ -412,7 +412,7 @@ def afcrps_ens(
                 (num_ens + 1 - 2 * ranks) * pred_var,
                 dim=ens_dim,
             )
-            crps_res.append(mean_mae + (1-eps) * pair_diffs_term)
+            crps_res.append(mean_mae + (1 - eps) * pair_diffs_term)
 
         crps_estimator = torch.stack(crps_res, dim=-3)  # (..., D, X, Y)
 

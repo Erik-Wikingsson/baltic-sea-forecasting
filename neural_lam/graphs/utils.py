@@ -265,7 +265,7 @@ def _search_single_g2m_radius(
     Parameters
     ----------
     base_radii : list or None
-        Base radii to use for other radius types. If None, uses [None, None, None].
+        Base radii to use for other radius types.
     """
     # Determine which grid type we're searching for
     check_interior = radius_idx == 0
@@ -340,12 +340,12 @@ def _search_single_g2m_radius(
             check_boundary=check_boundary,
             check_atm=check_atm,
         )
-        total_disc = num_disc_grid + num_disc_mesh
         connected_frac = (
             1.0 - (num_disc_grid / total_nodes) if total_nodes > 0 else 1.0
         )
         print(
-            f"  {radius_name}: {mid:.2f} -> {num_disc_grid} disconnected ({connected_frac:.1%} connected)"
+            f"{radius_name}: {mid:.2f} -> {num_disc_grid} disconnected"
+            f"({connected_frac:.1%} connected)"
         )
 
         if num_disc_grid <= max_disconnected:
@@ -354,7 +354,7 @@ def _search_single_g2m_radius(
         else:
             low = mid  # Need larger
 
-    # After binary search, find the minimum value with fraction connected at 2-decimal precision
+    # After binary search, find the minimum value with fraction connected
     if best_radius is None:
         best_radius = high
     else:
@@ -463,7 +463,8 @@ def search_g2m_radii(
     )
 
     print(
-        f"Found optimal radii: g2m={g2m_radius:.2f}, boundary={g2m_radius_boundary:.2f}, atm={g2m_radius_atm:.2f}"
+        f"Found optimal radii: g2m={g2m_radius:.2f},"
+        f"boundary={g2m_radius_boundary:.2f}, atm={g2m_radius_atm:.2f}"
     )
     return g2m_radius, g2m_radius_boundary, g2m_radius_atm
 
@@ -478,7 +479,8 @@ def search_m2g_k(
     limit=10,
 ):
     """
-    Search for smallest integer k that results in fraction of nodes connected in m2g.
+    Search for smallest integer k that results in
+    a given fraction of nodes connected in m2g.
     Returns k.
 
     Parameters
@@ -497,7 +499,8 @@ def search_m2g_k(
             1.0 - (num_disc / total_nodes) if total_nodes > 0 else 1.0
         )
         print(
-            f"  k={k} -> {num_disc} disconnected grid nodes ({connected_frac:.1%} connected)"
+            f"k={k} -> {num_disc} disconnected"
+            f"grid nodes ({connected_frac:.1%} connected)"
         )
 
         if num_disc <= max_disconnected:

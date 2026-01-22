@@ -128,9 +128,11 @@ def create_graph(
     m2g_k : int
         Number of nearest mesh neighbors to connect to each grid node in m2g.
     search_g2m_radii : bool
-        If True, search for optimal g2m radii that result in fraction of nodes connected.
+        If True, search for optimal g2m radii that result in fraction of
+        nodes connected.
     search_m2g_k : bool
-        If True, search for smallest integer k that results in fraction of nodes connected in m2g.
+        If True, search for smallest integer k that results in fraction of
+        nodes connected in m2g.
     search_fraction : float
         Fraction of nodes that must be connected during search (default: 0.95).
     connect_disconnected : bool
@@ -292,7 +294,6 @@ def create_graph(
                 G_g2m.edges[grid_node, mesh_node]["vdiff"] = vdiff
 
     node_list = list(G_g2m.nodes)
-    node_to_idx = {n: i for i, n in enumerate(node_list)}
 
     # Build boolean masks per node category
     is_mesh = np.array(
@@ -323,7 +324,8 @@ def create_graph(
     grid_mask_t = torch.as_tensor(is_any_grid, device=outdeg.device)
     mesh_mask_t = torch.as_tensor(is_mesh, device=outdeg.device)
 
-    # Find grid nodes with no outgoing edges and mesh nodes with no incoming edges
+    # Find grid nodes with no outgoing edges and mesh nodes
+    # with no incoming edges
     disc_grid = torch.where((outdeg == 0) & grid_mask_t)[0]
     disc_mesh = torch.where((indeg == 0) & mesh_mask_t)[0]
 
@@ -629,23 +631,26 @@ def cli(input_args=None):
         "--m2g_k",
         type=int,
         default=4,
-        help="Number of nearest mesh neighbors to connect to each grid node in m2g.",
+        help="Number of nearest mesh nodes connected to each grid node in m2g.",
     )
     parser.add_argument(
         "--search_g2m_radii",
         action="store_true",
-        help="Search for optimal g2m radii (precision 0.01) that result in fraction of nodes connected.",
+        help="Search for optimal g2m radii that result in a given fraction"
+        "of nodes connected.",
     )
     parser.add_argument(
         "--search_m2g_k",
         action="store_true",
-        help="Search for smallest integer k that results in fraction of nodes connected in m2g.",
+        help="Search for smallest integer k that results in fraction"
+        "of nodes connected in m2g.",
     )
     parser.add_argument(
         "--search_fraction",
         type=float,
         default=0.95,
-        help="Fraction of nodes that must be connected during search (default: 0.95).",
+        help="Fraction of nodes that must be connected during search"
+        "(default: 0.95).",
     )
     parser.add_argument(
         "--connect_disconnected",

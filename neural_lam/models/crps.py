@@ -11,8 +11,8 @@ import xarray as xr
 
 # First-party
 from neural_lam import metrics, vis
-from neural_lam.models.EDM import EDM
 from neural_lam.models.ar_prob_model import ARProbModel
+from neural_lam.models.EDM import EDM
 from neural_lam.models.graph_diff import GraphDiff
 
 # Local
@@ -33,7 +33,9 @@ class CRPS(ARProbModel):
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
     ):
-        super().__init__(args, config, datastore, datastore_boundary, datastore_atmosphere)
+        super().__init__(
+            args, config, datastore, datastore_boundary, datastore_atmosphere
+        )
         self.val_metrics.update(
             {
                 "ens_crps": [],
@@ -43,7 +45,12 @@ class CRPS(ARProbModel):
         if args.backbone_model == "graph_diff":
             print("Using GraphDiff")
             self.model = GraphDiff(
-                args, config, datastore, datastore_boundary, datastore_atmosphere)
+                args,
+                config,
+                datastore,
+                datastore_boundary,
+                datastore_atmosphere,
+            )
         else:
             raise NotImplementedError(
                 f"Unknown backbone model: {args.backbone_model}"
@@ -70,19 +77,27 @@ class CRPS(ARProbModel):
         next_state: (B, N_grid, d_state),
             predicted weather state X_{t+1} at time t+1
         """
-        input_grid = torch.cat((prev_state, prev_prev_state, forcing),
-                               dim=-1)  # (B, N_grid, d_input)
+        input_grid = torch.cat(
+            (prev_state, prev_prev_state, forcing), dim=-1
+        )  # (B, N_grid, d_input)
 
         z = torch.randn(
-            prev_state.shape[0], self.model.noise_dim, device=prev_state.device)
+            prev_state.shape[0], self.model.noise_dim, device=prev_state.device
+        )
 
         next_state = self.model(
-            input_grid, noise_level=z, cond=None, boundary_forcing=boundary_forcing, atmosphere_forcing=atmosphere_forcing)  # (B, N_grid, d_f)
+            input_grid,
+            noise_level=z,
+            cond=None,
+            boundary_forcing=boundary_forcing,
+            atmosphere_forcing=atmosphere_forcing,
+        )  # (B, N_grid, d_f)
 
         # Add residual if needed
         if self.args.pred_residual:
-            next_state = (next_state * self.diff_std) + \
-                self.diff_mean  # Unormalize residual
+            next_state = (
+                next_state * self.diff_std
+            ) + self.diff_mean  # Unormalize residual
             next_state = prev_state + next_state
 
         return next_state, self.per_var_std
@@ -98,8 +113,14 @@ class CRPS(ARProbModel):
             (B, pred_steps, num_boundary_nodes, d_boundary_forcing),
             where index 0 corresponds to index 1 of init_states
         """
-        (init_states, target_states, forcing,
-         boundary_forcing, atmosphere_forcing, _) = batch
+        (
+            init_states,
+            target_states,
+            forcing,
+            boundary_forcing,
+            atmosphere_forcing,
+            _,
+        ) = batch
 
         trajectories = self.sample_trajectories(
             init_states,
@@ -121,7 +142,11 @@ class CRPS(ARProbModel):
         # pred_std: (B, pred_steps, num_interior_nodes, d_f) or (d_f,)
         # loss_batch: (B, pred_steps)
         loss_batch = metrics.mask_and_reduce_metric(
-            crps_batch / self.per_var_std, mask=self.interior_mask_bool, average_grid=True, sum_vars=True)
+            crps_batch / self.per_var_std,
+            mask=self.interior_mask_bool,
+            average_grid=True,
+            sum_vars=True,
+        )
 
         # Compute loss - mean over unrolled times and batch
         batch_loss = torch.mean(loss_batch)
@@ -150,14 +175,17 @@ class CRPS(ARProbModel):
         ) = self.ensemble_step(batch)
         self.val_metrics["spread_squared"].append(spread_squared_batch)
         self.val_metrics["ens_mse"].append(ens_mse_batch)
-        crps_batch = metrics.crps_ens(trajectories, target_states, None,
-                                      mask=self.interior_mask_bool, average_grid=True, sum_vars=False)
+        crps_batch = metrics.crps_ens(
+            trajectories,
+            target_states,
+            None,
+            mask=self.interior_mask_bool,
+            average_grid=True,
+            sum_vars=False,
+        )
         self.val_metrics["ens_crps"].append(crps_batch)
 
-        if (
-            self.trainer.is_global_zero
-            and self.n_example_pred > 0
-        ):
+        if self.trainer.is_global_zero and self.n_example_pred > 0:
             # For now use val_steps_to_log to determine which steps
             # to make these plots for
             plot_log_steps = list(

@@ -6,10 +6,9 @@ from typing import Union
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn.functional as F
 import wandb
 import xarray as xr
-import torch.nn.functional as F
-
 
 # First-party
 from neural_lam import metrics, vis
@@ -37,16 +36,25 @@ class SI(EDM):
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
     ):
-        super().__init__(args, config, datastore, datastore_boundary, datastore_atmosphere)
+        super().__init__(
+            args, config, datastore, datastore_boundary, datastore_atmosphere
+        )
         self.GT = None
         self.sampler = "euler"  # TODO: Only euler for now
         # TODO: Should be able to change sigma_coef
-        self.I = Interpolant(sigma_coef=1, beta_fn='t^2')
+        self.I = Interpolant(sigma_coef=1, beta_fn="t^2")
         self.t_min_sampling = 0.0  # no min time needed
-        self.t_max_sampling = .999
+        self.t_max_sampling = 0.999
 
     # Evaluation
-    def EM(self, base=None, cond=None, boundary_forcing=None, atmosphere_forcing=None, diffusion_fn=None):
+    def EM(
+        self,
+        base=None,
+        cond=None,
+        boundary_forcing=None,
+        atmosphere_forcing=None,
+        diffusion_fn=None,
+    ):
         steps = self.sampler_steps
         tmin, tmax = self.t_min_sampling, self.t_max_sampling
         ts = torch.linspace(tmin, tmax, steps).type_as(base)
@@ -61,17 +69,17 @@ class SI(EDM):
         # the correct drift coefficient
 
         def step_fn(xt, t):
-            D = self.I.interpolant_coefs({'t': t, 'zt': xt, 'z0': base})
+            D = self.I.interpolant_coefs({"t": t, "zt": xt, "z0": base})
 
             bF = self.model(xt, t, cond, boundary_forcing, atmosphere_forcing)
-            D['bF'] = bF
+            D["bF"] = bF
             sigma = self.I.sigma(t)
 
             # specified diffusion func
             if diffusion_fn is not None:
                 g = diffusion_fn(t)
                 s = self.drift_to_score(D)
-                f = bF + .5 * (g.pow(2) - sigma.pow(2)) * s
+                f = bF + 0.5 * (g.pow(2) - sigma.pow(2)) * s
 
             # default diffusion func
             else:
@@ -88,8 +96,9 @@ class SI(EDM):
 
             mu1 = xt + bF * dt
 
-            bF2 = self.model(mu1, t1, cond, boundary_forcing,
-                             atmosphere_forcing)
+            bF2 = self.model(
+                mu1, t1, cond, boundary_forcing, atmosphere_forcing
+            )
 
             f = 0.5 * (bF + bF2)
 
@@ -109,8 +118,8 @@ class SI(EDM):
                 # can skip this
                 tscalar = ts[1]  # 0 + (1/500)
 
-            if self.sampler == 'euler_2' and i < len(ts) - 1:
-                xt, mu = step_fn_2(xt, tscalar * ones, ts[i+1] * ones)
+            if self.sampler == "euler_2" and i < len(ts) - 1:
+                xt, mu = step_fn_2(xt, tscalar * ones, ts[i + 1] * ones)
             else:
                 xt, mu = step_fn(xt, tscalar * ones)
 
@@ -140,18 +149,23 @@ class SI(EDM):
             predicted weather state X_{t+1} at time t+1
         """
         input_grid = torch.cat(
-            (prev_state, prev_prev_state, forcing), dim=-1)  # (B, N_grid, d_input)
+            (prev_state, prev_prev_state, forcing), dim=-1
+        )  # (B, N_grid, d_input)
 
         # definitely_sample
-        EM_args = {'base': prev_state, 'cond': input_grid,
-                   'boundary_forcing': boundary_forcing, 'atmosphere_forcing': atmosphere_forcing}
+        EM_args = {
+            "base": prev_state,
+            "cond": input_grid,
+            "boundary_forcing": boundary_forcing,
+            "atmosphere_forcing": atmosphere_forcing,
+        }
 
         # list diffusion funcs
         # None means use the one you trained with
         diffusion_fns = {
-            'g_sigma': None,
-            'g_sigma_01': lambda t: self.sigma_coef * self.wide(1-t) * 0.1,
-            'g_other': lambda t: self.sigma_coef * self.wide(1-t).pow(4),
+            "g_sigma": None,
+            "g_sigma_01": lambda t: self.sigma_coef * self.wide(1 - t) * 0.1,
+            "g_other": lambda t: self.sigma_coef * self.wide(1 - t).pow(4),
         }
 
         # None because we want to use the diffusion function we trained with, TODO: Experiment with this later
@@ -167,7 +181,7 @@ class SI(EDM):
         forcing,
         boundary_forcing,
         atmosphere_forcing,
-        target_state
+        target_state,
     ):
         """
         Predict weather state one time step ahead
@@ -189,29 +203,38 @@ class SI(EDM):
         input_grid = torch.cat((prev_state, prev_prev_state, forcing), dim=-1)
 
         # Prepare batch
-        D = {'z0': prev_state, 'z1': target_state,
-             'label': None, 'N': prev_state.shape[0]}
+        D = {
+            "z0": prev_state,
+            "z1": target_state,
+            "label": None,
+            "N": prev_state.shape[0],
+        }
 
         # Get random batch of times
-        D['t'] = torch.rand(prev_state.shape[0], device=prev_state.device)
+        D["t"] = torch.rand(prev_state.shape[0], device=prev_state.device)
 
         # Interpolant noise
-        D['noise'] = torch.randn_like(prev_state, device=prev_state.device)
+        D["noise"] = torch.randn_like(prev_state, device=prev_state.device)
 
         # Get alpha, beta, etc
         D = self.I.interpolant_coefs(D)
 
         # zt
-        D['zt'] = self.I.compute_zt(D)
+        D["zt"] = self.I.compute_zt(D)
 
         # Target
-        D['drift_target'] = self.I.compute_target(D)
+        D["drift_target"] = self.I.compute_target(D)
 
-        output = self.model(D['zt'], D['t'].reshape(
-            D['zt'].shape[0]), input_grid, boundary_forcing, atmosphere_forcing)  # Shape (B, d_state, N_x, N_y)
+        output = self.model(
+            D["zt"],
+            D["t"].reshape(D["zt"].shape[0]),
+            input_grid,
+            boundary_forcing,
+            atmosphere_forcing,
+        )  # Shape (B, d_state, N_x, N_y)
 
         # Calculate loss
-        loss = F.mse_loss(output, D['drift_target'], reduction='none')
+        loss = F.mse_loss(output, D["drift_target"], reduction="none")
 
         loss = loss / (self.per_var_std**2)
 
@@ -220,7 +243,7 @@ class SI(EDM):
 
 class Interpolant:
 
-    def __init__(self, sigma_coef=1, beta_fn='t^2'):
+    def __init__(self, sigma_coef=1, beta_fn="t^2"):
         self.sigma_coef = sigma_coef
         self.beta_fn = beta_fn
 
@@ -228,24 +251,24 @@ class Interpolant:
         return t[:, None, None]
 
     def alpha(self, t):
-        return self.wide(1-t)
+        return self.wide(1 - t)
 
     def alpha_dot(self, t):
         return self.wide(-1.0 * torch.ones_like(t))
 
     def beta(self, t):
-        is_squared = self.beta_fn == 't^2'
+        is_squared = self.beta_fn == "t^2"
         return self.wide(t.pow(2) if is_squared else t)
 
     def beta_dot(self, t):
-        is_squared = self.beta_fn == 't^2'
+        is_squared = self.beta_fn == "t^2"
         return self.wide(2.0 * t if is_squared else torch.ones_like(t))
 
     # we sometimes multiply sigma + sigma_dot by avg pixel norm,
     # but when standardized (centered cifar),
     # or when norm 1 (we rescale nse), not needed
     def sigma(self, t):
-        return self.sigma_coef * self.wide(1-t)
+        return self.sigma_coef * self.wide(1 - t)
 
     def sigma_dot(self, t):
         return self.sigma_coef * self.wide(-torch.ones_like(t))
@@ -254,21 +277,25 @@ class Interpolant:
         return self.wide(t.sqrt()) * self.sigma(t)
 
     def compute_zt(self, D):
-        return D['at'] * D['z0'] + D['bt'] * D['z1'] + D['gamma_t'] * D['noise']
+        return D["at"] * D["z0"] + D["bt"] * D["z1"] + D["gamma_t"] * D["noise"]
 
     def compute_target(self, D):
-        return D['adot'] * D['z0'] + D['bdot'] * D['z1'] + (D['sdot'] * D['root_t']) * D['noise']
+        return (
+            D["adot"] * D["z0"]
+            + D["bdot"] * D["z1"]
+            + (D["sdot"] * D["root_t"]) * D["noise"]
+        )
 
     def interpolant_coefs(self, D):
         return self(D)
 
     def __call__(self, D):
-        D['at'] = self.alpha(D['t'])
-        D['bt'] = self.beta(D['t'])
-        D['adot'] = self.alpha_dot(D['t'])
-        D['bdot'] = self.beta_dot(D['t'])
-        D['root_t'] = self.wide(D['t'].sqrt())
-        D['gamma_t'] = self.gamma(D['t'])
-        D['st'] = self.sigma(D['t'])
-        D['sdot'] = self.sigma_dot(D['t'])
+        D["at"] = self.alpha(D["t"])
+        D["bt"] = self.beta(D["t"])
+        D["adot"] = self.alpha_dot(D["t"])
+        D["bdot"] = self.beta_dot(D["t"])
+        D["root_t"] = self.wide(D["t"].sqrt())
+        D["gamma_t"] = self.gamma(D["t"])
+        D["st"] = self.sigma(D["t"])
+        D["sdot"] = self.sigma_dot(D["t"])
         return D

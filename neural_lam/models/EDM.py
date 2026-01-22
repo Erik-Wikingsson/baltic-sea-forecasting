@@ -1,5 +1,6 @@
 # Standard library
 import math
+from typing import Union
 
 # Third-party
 import matplotlib.pyplot as plt
@@ -7,7 +8,6 @@ import numpy as np
 import torch
 import wandb
 import xarray as xr
-from typing import Union
 
 # First-party
 from neural_lam import metrics, vis
@@ -32,7 +32,9 @@ class EDM(ARProbModel):
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
     ):
-        super().__init__(args, config, datastore, datastore_boundary, datastore_atmosphere)
+        super().__init__(
+            args, config, datastore, datastore_boundary, datastore_atmosphere
+        )
 
         # ----------------------------------------------------------------------------
         # Diffusion (EDM) parameters
@@ -51,7 +53,12 @@ class EDM(ARProbModel):
         if args.backbone_model == "graph_diff":
             print("Using GraphDiff")
             self.model = GraphDiff(
-                args, config, datastore, datastore_boundary, datastore_atmosphere)
+                args,
+                config,
+                datastore,
+                datastore_boundary,
+                datastore_atmosphere,
+            )
         else:
             raise NotImplementedError(
                 f"Unknown backbone model: {args.backbone_model}"
@@ -59,7 +66,15 @@ class EDM(ARProbModel):
 
     # ----------------------------------------------------------------------------
     # EDM model methods
-    def denoise(self, x, sigma, class_labels=None, boundary_forcing=None, atmosphere_forcing=None, **model_kwargs):
+    def denoise(
+        self,
+        x,
+        sigma,
+        class_labels=None,
+        boundary_forcing=None,
+        atmosphere_forcing=None,
+        **model_kwargs,
+    ):
         """""
         Denoising forward pass through the diffusion backbone model.
         x: (B, N_grid, d_state)
@@ -73,13 +88,17 @@ class EDM(ARProbModel):
         sigma = sigma.reshape(-1, 1, 1)
 
         c_skip = self.sigma_data**2 / (sigma**2 + self.sigma_data**2)
-        c_out = sigma * self.sigma_data / \
-            (sigma**2 + self.sigma_data**2).sqrt()
+        c_out = sigma * self.sigma_data / (sigma**2 + self.sigma_data**2).sqrt()
         c_in = 1 / (self.sigma_data**2 + sigma**2).sqrt()
         c_noise = sigma.log() / 4
 
         F_x = self.model(
-            (c_in * x), c_noise.flatten(), class_labels, boundary_forcing=boundary_forcing, atmosphere_forcing=atmosphere_forcing, **model_kwargs
+            (c_in * x),
+            c_noise.flatten(),
+            class_labels,
+            boundary_forcing=boundary_forcing,
+            atmosphere_forcing=atmosphere_forcing,
+            **model_kwargs,
         )
         D_x = c_skip * x + c_out * F_x
 
@@ -220,10 +239,7 @@ class EDM(ARProbModel):
             self.val_metrics["spread_squared"].append(spread_squared_batch)
             self.val_metrics["ens_mse"].append(ens_mse_batch)
 
-            if (
-                self.trainer.is_global_zero
-                and self.n_example_pred > 0
-            ):
+            if self.trainer.is_global_zero and self.n_example_pred > 0:
                 # For now use val_steps_to_log to determine which steps
                 # to make these plots for
                 plot_log_steps = list(
@@ -272,7 +288,7 @@ class EDM(ARProbModel):
         forcing,
         boundary_forcing,
         atmosphere_forcing,
-        target_state
+        target_state,
     ):
         """
         Predict weather state one time step ahead
@@ -327,8 +343,9 @@ class EDM(ARProbModel):
 
         # Calculate the loss
         # Weights for the loss function based on the noise level
-        weight = (sigma**2 + self.sigma_data**2) / \
-            (sigma * self.sigma_data) ** 2
+        weight = (sigma**2 + self.sigma_data**2) / (
+            sigma * self.sigma_data
+        ) ** 2
         # (B)
 
         pred_std = self.per_var_std
@@ -350,7 +367,12 @@ class EDM(ARProbModel):
         return next_state, loss
 
     def unroll_prediction_train(
-        self, init_states, forcing, boundary_forcing, atmosphere_forcing, target_states
+        self,
+        init_states,
+        forcing,
+        boundary_forcing,
+        atmosphere_forcing,
+        target_states,
     ):
         """
         Roll out prediction taking multiple autoregressive steps with model
@@ -385,7 +407,8 @@ class EDM(ARProbModel):
                 forcing_step,
                 boundary_forcing_step,
                 atmosphere_forcing_step,
-                target_state=target_states[:, i])
+                target_state=target_states[:, i],
+            )
             # state: (B, num_grid_nodes, d_f)
             # pred_std: (B, num_grid_nodes, d_f) or None
 
@@ -427,7 +450,11 @@ class EDM(ARProbModel):
         ) = batch
 
         prediction, loss = self.unroll_prediction_train(
-            init_states, forcing, boundary_forcing, atmosphere_forcing, target_states
+            init_states,
+            forcing,
+            boundary_forcing,
+            atmosphere_forcing,
+            target_states,
         )  # (B, pred_steps, num_grid_nodes, d_f)
         # prediction: (B, pred_steps, num_grid_nodes, d_f)
         # pred_std: (B, pred_steps, num_grid_nodes, d_f) or (d_f,)
@@ -528,15 +555,24 @@ class EDM(ARProbModel):
             ).sqrt() * S_noise * randn_like(x_cur, device=latents.device)
 
             # Euler step.
-            denoised = self.denoise(x_hat, t_hat, class_labels=class_labels,
-                                    boundary_forcing=boundary_forcing, atmosphere_forcing=atmosphere_forcing)
+            denoised = self.denoise(
+                x_hat,
+                t_hat,
+                class_labels=class_labels,
+                boundary_forcing=boundary_forcing,
+                atmosphere_forcing=atmosphere_forcing,
+            )
             d_cur = (x_hat - denoised) / t_hat
             x_next = x_hat + (t_next - t_hat) * d_cur
 
             # Apply 2nd order correction.
             if i < num_steps - 1:
                 denoised = self.denoise(
-                    x_next, t_next, class_labels=class_labels, boundary_forcing=boundary_forcing, atmosphere_forcing=atmosphere_forcing
+                    x_next,
+                    t_next,
+                    class_labels=class_labels,
+                    boundary_forcing=boundary_forcing,
+                    atmosphere_forcing=atmosphere_forcing,
                 )
                 d_prime = (x_next - denoised) / t_next
                 x_next = x_hat + (t_next - t_hat) * (
@@ -585,15 +621,24 @@ class EDM(ARProbModel):
         ):  # 0, ..., N-1
             x_cur = x_next
 
-            denoised = self.denoise(x_cur, t_cur, class_labels=class_labels,
-                                    boundary_forcing=boundary_forcing, atmosphere_forcing=atmosphere_forcing)
+            denoised = self.denoise(
+                x_cur,
+                t_cur,
+                class_labels=class_labels,
+                boundary_forcing=boundary_forcing,
+                atmosphere_forcing=atmosphere_forcing,
+            )
             d_cur = (x_cur - denoised) / t_cur
             x_next = x_cur + (t_next - t_cur) * d_cur
 
             # Apply 2nd order correction.
             if i < num_steps - 1:
                 denoised = self.denoise(
-                    x_next, t_next, class_labels=class_labels, boundary_forcing=boundary_forcing, atmosphere_forcing=atmosphere_forcing
+                    x_next,
+                    t_next,
+                    class_labels=class_labels,
+                    boundary_forcing=boundary_forcing,
+                    atmosphere_forcing=atmosphere_forcing,
                 )
                 d_prime = (x_next - denoised) / t_next
                 x_next = x_cur + (t_next - t_cur) * (

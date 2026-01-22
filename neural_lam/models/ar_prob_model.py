@@ -113,7 +113,14 @@ class ARProbModel(ARModel):
         ens_mse_batch: (B, pred_steps, d_f)
         """
         # Compute and store metrics for ensemble forecast
-        init_states, target_states, forcing_features, boundary_forcing, atmosphere_forcing, _ = batch
+        (
+            init_states,
+            target_states,
+            forcing_features,
+            boundary_forcing,
+            atmosphere_forcing,
+            _,
+        ) = batch
 
         trajectories = self.sample_trajectories(
             init_states,

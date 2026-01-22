@@ -35,6 +35,11 @@ def create_graph(
     graph_type: str = "hierarchical",
     create_plot: bool = False,
     allow_disconnected: bool = False,
+    m2g_k: int = 4,
+    search_g2m_radii: bool = False,
+    search_m2g_k: bool = False,
+    search_fraction: float = 0.95,
+    connect_disconnected: bool = False,
 ):
     """
     Create graph components from `xy` grid coordinates and store in
@@ -120,6 +125,16 @@ def create_graph(
     xy_land: np.ndarray
         Grid coordinates of land points, for edge filtering for cluster graph.
         Expected to be of shape (num_grid, 2).
+    m2g_k : int
+        Number of nearest mesh neighbors to connect to each grid node in m2g.
+    search_g2m_radii : bool
+        If True, search for optimal g2m radii that result in fraction of nodes connected.
+    search_m2g_k : bool
+        If True, search for smallest integer k that results in fraction of nodes connected in m2g.
+    search_fraction : float
+        Fraction of nodes that must be connected during search (default: 0.95).
+    connect_disconnected : bool
+        If True, connect remaining disconnected nodes using nearest neighbor.
 
     Returns
     -------
@@ -202,6 +217,21 @@ def create_graph(
     ]
     dm = np.mean(edge_lengths)
     print(f"dm = {dm}")
+
+    # Search for optimal parameters if requested
+    if search_g2m_radii:
+        g2m_radius, g2m_radius_boundary, g2m_radius_atm = (
+            gutils.search_g2m_radii(
+                xy,
+                xy_boundary,
+                xy_atmosphere,
+                vm_xy,
+                kdt_m,
+                dm,
+                precision=0.01,
+                fraction=search_fraction,
+            )
+        )
 
     # grid nodes
     interior_nodes = [
@@ -327,6 +357,34 @@ def create_graph(
             graph_dir_path,
         )
 
+    # Connect disconnected nodes if requested
+    if connect_disconnected and (len(disc_grid) > 0 or len(disc_mesh) > 0):
+        gutils.connect_disconnected_g2m(
+            pyg_g2m,
+            is_mesh,
+            is_grid_interior,
+            is_grid_boundary,
+            is_grid_atm,
+            vm_list,
+            vm_xy,
+            kdt_m,
+            dm,
+            g2m_radius,
+            g2m_radius_boundary,
+            g2m_radius_atm,
+        )
+        # Re-check disconnected nodes after connecting
+        src = pyg_g2m.edge_index[0]
+        dst = pyg_g2m.edge_index[1]
+        outdeg = degree(src, num_nodes=pyg_g2m.num_nodes)
+        indeg = degree(dst, num_nodes=pyg_g2m.num_nodes)
+        disc_grid = torch.where((outdeg == 0) & grid_mask_t)[0]
+        disc_mesh = torch.where((indeg == 0) & mesh_mask_t)[0]
+        if len(disc_grid) > 0 or len(disc_mesh) > 0:
+            print(
+                f"Warning: {len(disc_grid)} grid and {len(disc_mesh)} mesh nodes still disconnected after connection attempt"
+            )
+
     if create_plot:
         vis.plot_graph(pyg_g2m, "Grid-to-mesh", graph_dir_path)
         plt.show()
@@ -334,6 +392,12 @@ def create_graph(
     #
     # Mesh2Grid
     #
+
+    # Search for optimal m2g k if requested
+    if search_m2g_k:
+        m2g_k = gutils.search_m2g_k(
+            xy, vm_xy, kdt_m, xy_land, start_k=1, fraction=search_fraction
+        )
 
     # similar to Grid2Mesh, but only with grid nodes
     G_m2g = networkx.DiGraph()
@@ -343,8 +407,18 @@ def create_graph(
     # add edges from mesh to grid
     # order in vm should be same as in vm_xy
     for v in vg_list:
-        # find 4 nearest neighbours (index to vm_xy)
-        neigh_idxs = kdt_m.query(G_m2g.nodes[v]["pos"], 4)[1]
+        # find k nearest neighbours (index to vm_xy)
+        if m2g_k == 1:
+            _, neigh_idx = kdt_m.query(G_m2g.nodes[v]["pos"], k=1)
+            neigh_idxs = (
+                [neigh_idx]
+                if not isinstance(neigh_idx, np.ndarray)
+                else neigh_idx.flatten()
+            )
+        else:
+            _, neigh_idxs = kdt_m.query(G_m2g.nodes[v]["pos"], k=m2g_k)
+            if neigh_idxs.ndim > 1:
+                neigh_idxs = neigh_idxs.flatten()
         for i in neigh_idxs:
             u = vm_list[i]
             # add edge from mesh to grid
@@ -381,6 +455,27 @@ def create_graph(
             print("Warning:", msg)
         else:
             raise ValueError(msg)
+
+    # Connect disconnected nodes if requested
+    if connect_disconnected and len(m2g_disc_grid) > 0:
+        gutils.connect_disconnected_m2g(
+            pyg_m2g,
+            m2g_is_mesh,
+            m2g_is_grid,
+            xy,
+            vm_list,
+            vm_xy,
+            kdt_m,
+            xy_land,
+        )
+        # Re-check disconnected nodes after connecting
+        m2g_dst = pyg_m2g.edge_index[1]
+        m2g_indeg = degree(m2g_dst, num_nodes=pyg_m2g.num_nodes)
+        m2g_disc_grid = torch.where((m2g_indeg == 0) & m2g_grid_mask_t)[0]
+        if len(m2g_disc_grid) > 0:
+            print(
+                f"Warning: {len(m2g_disc_grid)} grid nodes still disconnected after connection attempt"
+            )
 
     if create_plot:
         # Plot disconnected nodes
@@ -523,6 +618,33 @@ def cli(input_args=None):
         help="Allow disconnected nodes in g2m. This is generally a bad idea and"
         "should only be used for testing purposes.",
     )
+    parser.add_argument(
+        "--m2g_k",
+        type=int,
+        default=4,
+        help="Number of nearest mesh neighbors to connect to each grid node in m2g.",
+    )
+    parser.add_argument(
+        "--search_g2m_radii",
+        action="store_true",
+        help="Search for optimal g2m radii (precision 0.01) that result in fraction of nodes connected.",
+    )
+    parser.add_argument(
+        "--search_m2g_k",
+        action="store_true",
+        help="Search for smallest integer k that results in fraction of nodes connected in m2g.",
+    )
+    parser.add_argument(
+        "--search_fraction",
+        type=float,
+        default=0.95,
+        help="Fraction of nodes that must be connected during search (default: 0.95).",
+    )
+    parser.add_argument(
+        "--connect_disconnected",
+        action="store_true",
+        help="Connect remaining disconnected nodes using nearest neighbor.",
+    )
     args = parser.parse_args(input_args)
 
     assert (
@@ -549,6 +671,11 @@ def cli(input_args=None):
         graph_type=args.type,
         create_plot=args.plot,
         allow_disconnected=args.allow_disconnected,
+        m2g_k=args.m2g_k,
+        search_g2m_radii=args.search_g2m_radii,
+        search_m2g_k=args.search_m2g_k,
+        search_fraction=args.search_fraction,
+        connect_disconnected=args.connect_disconnected,
     )
 
 

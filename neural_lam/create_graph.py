@@ -331,12 +331,8 @@ def create_graph(
         msg = "Disconnected nodes found in G2M\n"
         msg += f"{len(disc_grid)} disconnected grid nodes (outdeg==0)\n"
         msg += f"{len(disc_mesh)} disconnected mesh nodes (indeg==0)"
-        if allow_disconnected:
-            print("Warning:", msg)
-        else:
-            raise ValueError(msg)
+        print("Warning:", msg)
 
-    # Plot disconnected nodes
     pos = pyg_g2m.pos.cpu().numpy()
     disc_grid_np = disc_grid.cpu().numpy()
     disc_mesh_np = disc_mesh.cpu().numpy()
@@ -346,16 +342,6 @@ def create_graph(
         print("Disconnected interior:", np.sum(is_grid_interior[disc_grid_np]))
         print("Disconnected boundary:", np.sum(is_grid_boundary[disc_grid_np]))
         print("Disconnected atmosphere:", np.sum(is_grid_atm[disc_grid_np]))
-
-    if create_plot:
-        vis.plot_disconnected_nodes(
-            pos,
-            is_mesh,
-            is_any_grid,
-            disc_grid_np,
-            disc_mesh_np,
-            graph_dir_path,
-        )
 
     # Connect disconnected nodes if requested
     if connect_disconnected and (len(disc_grid) > 0 or len(disc_mesh) > 0):
@@ -380,10 +366,29 @@ def create_graph(
         indeg = degree(dst, num_nodes=pyg_g2m.num_nodes)
         disc_grid = torch.where((outdeg == 0) & grid_mask_t)[0]
         disc_mesh = torch.where((indeg == 0) & mesh_mask_t)[0]
-        if len(disc_grid) > 0 or len(disc_mesh) > 0:
-            print(
-                f"Warning: {len(disc_grid)} grid and {len(disc_mesh)} mesh nodes still disconnected after connection attempt"
-            )
+        disc_grid_np = disc_grid.cpu().numpy()
+        disc_mesh_np = disc_mesh.cpu().numpy()
+
+    # Plot disconnected nodes
+    if create_plot:
+        vis.plot_disconnected_nodes(
+            pos,
+            is_mesh,
+            is_any_grid,
+            disc_grid_np,
+            disc_mesh_np,
+            graph_dir_path,
+        )
+
+    # Check for disconnected nodes
+    if len(disc_grid) > 0 or len(disc_mesh) > 0:
+        msg = "Disconnected nodes found in G2M\n"
+        msg += f"{len(disc_grid)} disconnected grid nodes (outdeg==0)\n"
+        msg += f"{len(disc_mesh)} disconnected mesh nodes (indeg==0)"
+        if allow_disconnected:
+            print("Warning:", msg)
+        else:
+            raise ValueError(msg)
 
     if create_plot:
         vis.plot_graph(pyg_g2m, "Grid-to-mesh", graph_dir_path)
@@ -451,10 +456,7 @@ def create_graph(
     if len(m2g_disc_grid) > 0:
         msg = "Disconnected nodes found in M2G\n"
         msg += f"{len(m2g_disc_grid)} disconnected grid nodes (indeg==0)"
-        if allow_disconnected:
-            print("Warning:", msg)
-        else:
-            raise ValueError(msg)
+        print("Warning:", msg)
 
     # Connect disconnected nodes if requested
     if connect_disconnected and len(m2g_disc_grid) > 0:
@@ -472,13 +474,9 @@ def create_graph(
         m2g_dst = pyg_m2g.edge_index[1]
         m2g_indeg = degree(m2g_dst, num_nodes=pyg_m2g.num_nodes)
         m2g_disc_grid = torch.where((m2g_indeg == 0) & m2g_grid_mask_t)[0]
-        if len(m2g_disc_grid) > 0:
-            print(
-                f"Warning: {len(m2g_disc_grid)} grid nodes still disconnected after connection attempt"
-            )
 
+    # Plot disconnected nodes
     if create_plot:
-        # Plot disconnected nodes
         m2g_pos = pyg_m2g.pos.cpu().numpy()
         m2g_disc_grid_np = m2g_disc_grid.cpu().numpy()
 
@@ -491,6 +489,15 @@ def create_graph(
             graph_dir_path,
             title="m2g_disconnected",
         )
+
+    # Check for disconnected nodes
+    if len(m2g_disc_grid) > 0:
+        msg = "Disconnected nodes found in M2G\n"
+        msg += f"{len(m2g_disc_grid)} disconnected grid nodes (indeg==0)"
+        if allow_disconnected:
+            print("Warning:", msg)
+        else:
+            raise ValueError(msg)
 
     if create_plot:
         vis.plot_graph(

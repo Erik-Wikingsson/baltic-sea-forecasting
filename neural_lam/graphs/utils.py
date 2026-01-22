@@ -528,16 +528,13 @@ def connect_disconnected_g2m(
     Connect disconnected nodes in g2m graph using nearest neighbor.
     Modifies graph in-place.
     """
-    # Third-party
-    from torch_geometric.utils import degree
-
     pos = pyg_g2m.pos.cpu().numpy()
     src = pyg_g2m.edge_index[0]
     dst = pyg_g2m.edge_index[1]
     num_nodes = pyg_g2m.num_nodes
 
-    outdeg = degree(src, num_nodes=num_nodes)
-    indeg = degree(dst, num_nodes=num_nodes)
+    outdeg = pyg.utils.degree(src, num_nodes=num_nodes)
+    indeg = pyg.utils.degree(dst, num_nodes=num_nodes)
 
     # Find disconnected nodes
     is_any_grid = is_grid_interior | is_grid_boundary | is_grid_atm
@@ -605,14 +602,11 @@ def connect_disconnected_m2g(
     Connect disconnected grid nodes in m2g graph using nearest neighbor.
     Modifies graph in-place.
     """
-    # Third-party
-    from torch_geometric.utils import degree
-
     pos = pyg_m2g.pos.cpu().numpy()
     dst = pyg_m2g.edge_index[1]
     num_nodes = pyg_m2g.num_nodes
 
-    indeg = degree(dst, num_nodes=num_nodes)
+    indeg = pyg.utils.degree(dst, num_nodes=num_nodes)
     grid_mask_t = torch.as_tensor(is_grid, device=indeg.device)
 
     disc_grid = torch.where((indeg == 0) & grid_mask_t)[0].cpu().numpy()

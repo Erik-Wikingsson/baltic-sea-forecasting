@@ -402,15 +402,8 @@ class BaseGraphModel(ARModel):
         else:
             # NOTE: We here assume the order of grid node index is 1) interior,
             # 2) boundary, 3) atmosphere. This has to be followed also when
-            # constructing g2m.
-            grid_emb = torch.cat(
-                (
-                    interior_emb,
-                    boundary_emb,
-                    atmosphere_emb,
-                ),
-                dim=1,
-            )
+            # constructing g2m. Concatenates all existing embeddings.
+            grid_emb = torch.cat(grid_emb_list, dim=1)
             # (B, num_grid_nodes, d_h)
 
         # Map from grid to mesh

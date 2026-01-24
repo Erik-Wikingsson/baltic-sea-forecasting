@@ -95,12 +95,16 @@ class WeatherDataset(torch.utils.data.Dataset):
             self.da_boundary_forcing = self.datastore_boundary.get_dataarray(
                 category="forcing", split=self.split
             )
+        else:
+            self.da_boundary_forcing = None
         if self.datastore_atmosphere is not None:
             self.da_atmosphere_forcing = (
                 self.datastore_atmosphere.get_dataarray(
                     category="forcing", split=self.split
                 )
             )
+        else:
+            self.da_atmosphere_forcing = None
         self.surface_mask = self.datastore.get_mask(
             surface=True, stacked=True, invert=False
         )  # (N_lon*N_lat)
@@ -692,7 +696,8 @@ class WeatherDataset(torch.utils.data.Dataset):
         init_states = init_states[:, self.surface_mask, :]
         target_states = target_states[:, self.surface_mask, :]
         forcing = forcing[:, self.surface_mask, :]
-        boundary = boundary[:, self.surface_mask_boundary, :]
+        if self.surface_mask_boundary is not None:
+            boundary = boundary[:, self.surface_mask_boundary, :]
 
         # convert land from nan to zero
         init_states = torch.where(

@@ -463,8 +463,8 @@ def search_g2m_radii(
     )
 
     print(
-        f"Found optimal radii: g2m={g2m_radius:.2f},"
-        f"boundary={g2m_radius_boundary:.2f}, atm={g2m_radius_atm:.2f}"
+        f"Found optimal radii: interior={g2m_radius:.2f},"
+        f"boundary={g2m_radius_boundary:.2f}, atmosphere={g2m_radius_atm:.2f}"
     )
     return g2m_radius, g2m_radius_boundary, g2m_radius_atm
 

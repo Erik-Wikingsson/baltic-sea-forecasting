@@ -272,7 +272,10 @@ class ARModel(pl.LightningModule):
             datastore_atmosphere=self._datastore_atmosphere,
             split=split,
         )
-        time = np.array(time.cpu(), dtype="datetime64[ns]")
+        time = time.detach().cpu()
+        time = np.array(time, dtype="datetime64[ns]")
+
+        tensor = tensor.detach().cpu()
         da = weather_dataset.create_dataarray_from_tensor(
             tensor=tensor, time=time, category=category
         )
@@ -586,7 +589,7 @@ class ARModel(pl.LightningModule):
             prediction, target, _, _ = self.common_step(batch)
 
         target = batch[1]
-        time = batch[3]
+        time = batch[-1]
 
         # Rescale to original data scale
         prediction_rescaled = prediction * self.state_std + self.state_mean

@@ -9,7 +9,7 @@ from torch_geometric.utils.convert import from_networkx
 from . import utils as gutils
 
 
-def mk_2d_graph(xy, nx, ny):
+def mk_2d_graph(xy, nx, ny, threshold):
     # xy is (num_grid, 2)
     min_x, min_y = np.min(xy, axis=0)
     max_x, max_y = np.max(xy, axis=0)
@@ -20,12 +20,6 @@ def mk_2d_graph(xy, nx, ny):
     y_coords = np.linspace(min_y + offset_y, max_y - offset_y, ny)
 
     xy_kdtree = scipy.spatial.KDTree(xy)
-
-    # estimate spacing from subsampled grid to set threshold
-    #  dx = np.mean(np.diff(xy_coarse[:, 0, 0])) if nx_eff > 1 else 1.0
-    #  dy = np.mean(np.diff(xy_coarse[0, :, 1])) if ny_eff > 1 else 1.0
-    #  threshold = 0.5 * np.sqrt(dx**2 + dy**2)
-    threshold = np.sqrt(offset_x**2 + offset_y**2)
 
     # build base grid graph
     g = networkx.grid_2d_graph(nx, ny)
@@ -118,13 +112,21 @@ def build_regular_mesh_graph(
 
     print(f"mesh_levels: {mesh_levels_to_create}, nleaf: {nleaf}")
 
+    # Compute filtering threshold from finest level to use for all levels
+    nodes_x, nodes_y = (nleaf / (mesh_refinement_factor_1d**0)).astype(int)
+    min_x, min_y = np.min(xy, axis=0)
+    max_x, max_y = np.max(xy, axis=0)
+    offset_x = (max_x - min_x) / (2 * nodes_x)
+    offset_y = (max_y - min_y) / (2 * nodes_y)
+    threshold = np.sqrt(offset_x**2 + offset_y**2)
+
     G = []
     for lev in range(mesh_levels_to_create):  # 0-index mesh levels
         # Compute number of nodes on level separate for each direction
         nodes_x, nodes_y = (nleaf / (mesh_refinement_factor_1d**lev)).astype(
             int
         )
-        g = mk_2d_graph(xy, nodes_x, nodes_y)
+        g = mk_2d_graph(xy, nodes_x, nodes_y, threshold)
         if mesh_plot_function is not None:
             mesh_plot_function(from_networkx(g), f"Mesh graph, level {lev}")
 

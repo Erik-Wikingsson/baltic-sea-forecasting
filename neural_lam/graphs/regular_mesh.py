@@ -237,39 +237,52 @@ def build_regular_mesh_graph(
         # For use in g2m and m2g
         G_bottom_mesh = G[0]
     else:
-        # TODO Non-hierarchical implementation
-        raise NotImplementedError(
-            "Non-hierarchical mesh graph not implemented with proper "
-            "oceanographic masking"
+        # Non-hierarchical graph that combines all resolutions into one mesh
+        G_tot = G[0].copy()
+        G_tot = networkx.DiGraph(G_tot)
+
+        # Build KDTree for position matching
+        # Collect all positions from finest level for nearest neighbor lookup
+        fine_nodes = list(G_tot.nodes)
+        fine_positions = np.array(
+            [G_tot.nodes[node]["pos"] for node in fine_nodes]
         )
+        fine_kdtree = scipy.spatial.KDTree(fine_positions)
 
-        # combine all levels to one graph
-        G_tot = G[0]
+        # For each coarser level, map nodes to finest level and compose
         for lev in range(1, len(G)):
-            nodes = list(G[lev - 1].nodes)
-            n = int(np.sqrt(len(nodes)))
-            nx = 3  # TODO Dummy
-            ij = (
-                np.array(nodes)
-                .reshape((n, n, 2))[1::nx, 1::nx, :]
-                .reshape(int(n / nx) ** 2, 2)
+            g_level = G[lev].copy()
+            g_level = networkx.DiGraph(g_level)
+
+            # Map each node in this level to the corresponding node in finest level
+            node_mapping = {}
+            for node in g_level.nodes:
+                node_pos = g_level.nodes[node]["pos"]
+                # Find nearest node in finest level using KDTree
+                dist, idx = fine_kdtree.query(node_pos, k=1)
+                nearest_fine_node = fine_nodes[idx]
+                node_mapping[node] = nearest_fine_node
+
+            # Relabel coarser level nodes to match finest level nodes
+            g_level_relabeled = networkx.relabel_nodes(
+                g_level, node_mapping, copy=True
             )
-            ij = [tuple(x) for x in ij]
-            G[lev] = networkx.relabel_nodes(G[lev], dict(zip(G[lev].nodes, ij)))
-            G_tot = networkx.compose(G_tot, G[lev])
 
-        # Relabel mesh nodes to start with 0
-        G_tot = gutils.prepend_node_index(G_tot, 0)
+            # Add edges from coarser level
+            for u, v, edge_data in g_level_relabeled.edges(data=True):
+                if not G_tot.has_edge(u, v):
+                    G_tot.add_edge(u, v, **edge_data)
 
-        # relabel nodes to integers (sorted)
+        # Relabel nodes to sorted integers
         G_int = networkx.convert_node_labels_to_integers(
             G_tot, first_label=0, ordering="sorted"
         )
+        G_int = gutils.sort_nodes_internally(G_int)
 
         # Graph to use in g2m and m2g
-        G_bottom_mesh = G_tot
+        G_bottom_mesh = G_int
 
-        # export the nx graph to PyTorch geometric
+        # Export the nx graph to PyTorch geometric
         pyg_m2m = from_networkx(G_int)
         m2m_graphs = [pyg_m2m]
         mesh_pos = [pyg_m2m.pos.to(torch.float32)]

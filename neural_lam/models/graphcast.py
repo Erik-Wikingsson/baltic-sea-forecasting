@@ -1,3 +1,6 @@
+# Standard library
+from typing import Union
+
 # Third-party
 import torch_geometric as pyg
 
@@ -16,8 +19,21 @@ class GraphCast(BaseGraphModel):
     Keisler (2022) is almost identical.
     """
 
-    def __init__(self, args, config: NeuralLAMConfig, datastore: BaseDatastore):
-        super().__init__(args, config=config, datastore=datastore)
+    def __init__(
+        self,
+        args,
+        config: NeuralLAMConfig,
+        datastore: BaseDatastore,
+        datastore_boundary: Union[BaseDatastore, None] = None,
+        datastore_atmosphere: Union[BaseDatastore, None] = None,
+    ):
+        super().__init__(
+            args,
+            config=config,
+            datastore=datastore,
+            datastore_boundary=datastore_boundary,
+            datastore_atmosphere=datastore_atmosphere,
+        )
 
         assert (
             not self.hierarchical

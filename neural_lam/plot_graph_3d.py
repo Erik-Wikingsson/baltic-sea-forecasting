@@ -369,13 +369,24 @@ def main():
         # Connect g2m and m2g only to bottom level
         grid_con_lat_lon = mesh_lat_lon_level[0]
     else:
-        mesh_lat_lon = graph_ldict["mesh_lat_lon"].numpy()
-
         # Non-hierarchical
+        mesh_lat_lon = graph_ldict["mesh_lat_lon"][0].numpy()
         m2m_edge_index = graph_ldict["m2m_edge_index"].numpy()
-        # TODO Degree-dependent node size option?
-        #  mesh_degrees = pyg.utils.degree(m2m_edge_index[1]).numpy()
-        #  mesh_node_size = mesh_degrees / 2
+
+        # Calculate degree-dependent node sizes
+        num_mesh_nodes = mesh_lat_lon.shape[0]
+        mesh_degrees = np.zeros(num_mesh_nodes, dtype=int)
+        # Count edges where node is source (outgoing)
+        np.add.at(mesh_degrees, m2m_edge_index[0], 1)
+        # Count edges where node is target (incoming)
+        np.add.at(mesh_degrees, m2m_edge_index[1], 1)
+        # Use degrees to scale node sizes
+        if mesh_degrees.max() > 0:
+            # Normalize degrees to [0.5, 2.0] range and multiply by base size
+            normalized_degrees = 0.5 + 1.5 * (mesh_degrees / mesh_degrees.max())
+            mesh_node_size = normalized_degrees * args.mesh_node_size
+        else:
+            mesh_node_size = args.mesh_node_size
 
         data_objs.append(
             vis.create_node_plot(
@@ -383,7 +394,7 @@ def main():
                 "Mesh Nodes",
                 radius=mesh_radius,
                 color=args.mesh_color,
-                size=args.mesh_node_size,
+                size=mesh_node_size,
                 pos_filter_func=corner_filter_func,
             )
         )

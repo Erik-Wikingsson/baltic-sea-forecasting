@@ -254,7 +254,7 @@ def build_regular_mesh_graph(
             g_level = G[lev].copy()
             g_level = networkx.DiGraph(g_level)
 
-            # Map each node in this level to the corresponding node in finest level
+            # Map each node in this level to the corresponding finest level node
             node_mapping = {}
             for node in g_level.nodes:
                 node_pos = g_level.nodes[node]["pos"]

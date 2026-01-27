@@ -175,9 +175,14 @@ class ARModel(pl.LightningModule):
 
         if self.atmosphere_forced:
             # Load static features for atmosphere
+            atmosphere_mask = datastore_atmosphere.get_atmosphere_mask(
+                stacked=True, invert=False
+            )
             da_atmosphere_static_features = datastore_atmosphere.get_dataarray(
                 category="static", split=None, standardize=True
-            )
+            )[
+                atmosphere_mask
+            ]  # mask static features
             self.register_buffer(
                 "atmosphere_static_features",
                 torch.tensor(

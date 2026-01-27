@@ -131,6 +131,14 @@ class WeatherDataset(torch.utils.data.Dataset):
         else:
             self.surface_mask_boundary = None
             self.land_mask_bool_boundary = None
+        if self.datastore_atmosphere is not None:
+            self.mask_atmosphere = (
+                self.datastore_atmosphere.get_atmosphere_mask(
+                    stacked=True, invert=False
+                )
+            )  # (N_lon_atmosphere*N_lat_atmosphere)
+        else:
+            self.mask_atmosphere = None
 
         # check that with the provided data-arrays and ar_steps that we have a
         # non-zero amount of samples
@@ -698,6 +706,8 @@ class WeatherDataset(torch.utils.data.Dataset):
         forcing = forcing[:, self.surface_mask, :]
         if self.surface_mask_boundary is not None:
             boundary = boundary[:, self.surface_mask_boundary, :]
+        if self.mask_atmosphere is not None:
+            atmosphere = atmosphere[:, self.mask_atmosphere, :]
 
         # convert land from nan to zero
         init_states = torch.where(

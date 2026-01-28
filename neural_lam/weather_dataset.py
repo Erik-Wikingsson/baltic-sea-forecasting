@@ -786,7 +786,7 @@ class WeatherDataset(torch.utils.data.Dataset):
         and number of times provided and add the x/y coordinates from the
         datastore.
 
-        The number if times provided is expected to match the shape of the
+        The number of times provided is expected to match the shape of the
         tensor. For a 2D tensor, the dimensions are assumed to be (grid_index,
         {category}_feature) and only a single time should be provided. For a 3D
         tensor, the dimensions are assumed to be (time, grid_index,
@@ -860,7 +860,7 @@ class WeatherDataset(torch.utils.data.Dataset):
                 self.land_mask[np.newaxis, ...], np.nan, full_array
             )
         else:
-            full_array = np.zeros(self.full_mask.shape)
+            full_array = np.zeros((d_full_grid, d_features))
             full_array[self.surface_mask, :] = array
             full_array = np.where(self.land_mask, np.nan, full_array)
 

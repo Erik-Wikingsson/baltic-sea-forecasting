@@ -52,8 +52,11 @@ class BaseGraphModel(ARModel):
         # Specify dimensions of data
         self.num_mesh_nodes, _ = self.get_num_mesh()
         utils.rank_zero_print(
-            f"Loaded graph with {self.num_grid_nodes + self.num_mesh_nodes} "
-            f"nodes ({self.num_grid_nodes} grid, {self.num_mesh_nodes} mesh)"
+            f"Loaded graph with {self.num_total_grid_nodes + self.num_mesh_nodes} "
+            f"nodes ({self.num_total_grid_nodes} grid: {self.num_grid_nodes} interior"
+            f"{f' + {self.num_boundary_nodes} boundary' if self.boundary_forced else ''}"
+            f"{f' + {self.num_atmosphere_nodes} atmosphere' if self.atmosphere_forced else ''}, "
+            f"{self.num_mesh_nodes} mesh)"
         )
 
         # grid_dim from data + static
@@ -404,7 +407,21 @@ class BaseGraphModel(ARModel):
             # 2) boundary, 3) atmosphere. This has to be followed also when
             # constructing g2m. Concatenates all existing embeddings.
             grid_emb = torch.cat(grid_emb_list, dim=1)
-            # (B, num_grid_nodes, d_h)
+            # (B, num_total_grid_nodes, d_h)
+
+        # Verify dimension matches expected total grid nodes
+        assert grid_emb.shape[1] == self.num_total_grid_nodes, (
+            f"grid_emb has {grid_emb.shape[1]} nodes but expected "
+            f"{self.num_total_grid_nodes} (interior: {self.num_grid_nodes}, "
+            f"boundary: {getattr(self, 'num_boundary_nodes', 0)}, "
+            f"atmosphere: {getattr(self, 'num_atmosphere_nodes', 0)})"
+        )
+        # Verify g2m edge indices are within bounds
+        max_grid_idx = self.g2m_edge_index[0].max().item()
+        assert max_grid_idx < self.num_total_grid_nodes, (
+            f"g2m_edge_index[0] has max index {max_grid_idx} but grid_emb only has "
+            f"{self.num_total_grid_nodes} nodes"
+        )
 
         # Map from grid to mesh
         mesh_emb_expanded = self.expand_to_batch(

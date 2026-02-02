@@ -65,7 +65,7 @@ def mk_2d_graph(xy, nx, ny, threshold):
 
 def build_regular_mesh_graph(
     xy,
-    mesh_node_distance,
+    grid_to_first_mesh_refinement,
     limit_mesh_levels,
     hierarchical,
     mesh_plot_function,
@@ -83,10 +83,15 @@ def build_regular_mesh_graph(
         f"Got {mesh_refinement_factor} with square root {mrf_1d_float}."
     )
 
-    # Below computation is copied from wmg
-    # Compute the size along x and y direction of area to cover with graph
-    # This is measured in the Cartesian coordnates of xy
+    # Derive mesh spacing so bottom-level mesh node count after filtering
+    # ~ n_grid / grid_to_first_mesh_refinement.
     coord_extent = np.ptp(xy, axis=0)
+    n_grid = xy.shape[0]
+    hull = scipy.spatial.ConvexHull(xy)
+    domain_area = hull.volume
+    mesh_node_distance = np.sqrt(
+        domain_area * grid_to_first_mesh_refinement / n_grid
+    )
     # Number of nodes that would fit on bottom level of hierarchy,
     # in both directions
     max_nodes_bottom = (coord_extent / mesh_node_distance).astype(int)
@@ -99,7 +104,7 @@ def build_regular_mesh_graph(
     )
 
     max_mesh_levels = max_mesh_levels_float.astype(int)  # (2,)
-    nleaf = mesh_refinement_factor_1d**max_mesh_levels
+    nleaf = np.maximum(max_nodes_bottom, 1)
     # leaves at the bottom in each direction, if using max_mesh_levels
 
     # As we can not instantiate different number of mesh levels in each

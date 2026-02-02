@@ -637,3 +637,32 @@ def connect_disconnected_m2g(
         # Update edge features
         add_edge_features_pyg(pyg_m2g)
         print(f"Connected {len(new_edges)} disconnected nodes in m2g")
+
+
+def print_graph_stats(save_graphs, pyg_g2m, pyg_m2g):
+    """Print node and edge counts for all graph components."""
+    print("\n" + "=" * 50)
+    print("Graph statistics")
+    print("=" * 50)
+    m2m_graphs = save_graphs["m2m"]
+    for lev, g in enumerate(m2m_graphs):
+        n_nodes = g.num_nodes
+        n_edges = g.edge_index.shape[1]
+        print(f"  m2m (level {lev}): {n_nodes} nodes, {n_edges} edges")
+    total_mesh_nodes = sum(g.num_nodes for g in m2m_graphs)
+    total_m2m_edges = sum(g.edge_index.shape[1] for g in m2m_graphs)
+    print(f"  m2m (total): {total_mesh_nodes} nodes, {total_m2m_edges} edges")
+    if "mesh_up" in save_graphs:
+        for lev, g in enumerate(save_graphs["mesh_up"]):
+            n_edges = g.edge_index.shape[1]
+            print(f"  mesh_up (level {lev}->{lev+1}): {n_edges} edges")
+        for lev, g in enumerate(save_graphs["mesh_down"]):
+            n_edges = g.edge_index.shape[1]
+            print(f"  mesh_down (level {lev+1}->{lev}): {n_edges} edges")
+    n_g2m_nodes = pyg_g2m.num_nodes
+    n_g2m_edges = pyg_g2m.edge_index.shape[1]
+    print(f"  g2m: {n_g2m_nodes} nodes, {n_g2m_edges} edges")
+    n_m2g_nodes = pyg_m2g.num_nodes
+    n_m2g_edges = pyg_m2g.edge_index.shape[1]
+    print(f"  m2g: {n_m2g_nodes} nodes, {n_m2g_edges} edges")
+    print("=" * 50 + "\n")

@@ -28,7 +28,6 @@ def create_graph(
     g2m_radius: float,
     g2m_radius_boundary: float,
     g2m_radius_atm: float,
-    mesh_node_distance: float,
     mesh_refinement_factor: float,
     grid_to_first_mesh_refinement: float,
     n_max_levels: int | None = None,
@@ -101,17 +100,13 @@ def create_graph(
         Auxiliary grid coordinates, for atmospheric grid nodes to only use
         in encoding (g2m), expected to be of shape (num_atm, 2).
     g2m_radius : float
-        Radius to connect interior and boundary nodes within for g2m
+        Radius to connect interior and boundary nodes within for g2m.
     g2m_radius_atm : float
-        Radius to connect atmospheric nodes within for g2m
-    mesh_node_distance: float,
-        (For hierarchical/multiscale graphs) Distance between mesh nodes,
-        in meters
+        Radius to connect atmospheric nodes within for g2m.
     mesh_refinement_factor: float,
-        Factor between number of mesh nodes at each level in hierarchy
+        Factor between number of mesh nodes at each level in hierarchy.
     grid_to_first_mesh_refinement: float,
-        (For cluster graphs) Factor between number of grid nodes and number of
-        mesh nodes at bottom level.
+        Factor between number of grid nodes and mesh nodes at bottom level.
     n_max_levels : int
         Limit multi-scale mesh to given number of levels, from bottom up
         (default: None (no limit)).
@@ -181,7 +176,7 @@ def create_graph(
         mesh_pos, G_bottom_mesh, save_graphs = (
             regular_mesh.build_regular_mesh_graph(
                 xy_for_mesh,
-                mesh_node_distance=mesh_node_distance,
+                grid_to_first_mesh_refinement=grid_to_first_mesh_refinement,
                 mesh_refinement_factor=mesh_refinement_factor,
                 limit_mesh_levels=n_max_levels,
                 hierarchical=(graph_type == "hierarchical"),
@@ -393,7 +388,13 @@ def create_graph(
             raise ValueError(msg)
 
     if create_plot:
-        vis.plot_graph(pyg_g2m, "Grid-to-mesh", graph_dir_path)
+        vis.plot_graph(
+            pyg_g2m, "Grid-to-mesh", graph_dir_path, order_by_degree=True
+        )
+        plt.show()
+        pyg_g2m_r = pyg_g2m.clone()
+        pyg_g2m_r.edge_index = pyg_g2m.edge_index[[1, 0]]
+        vis.plot_graph(pyg_g2m_r, "Grid-to-mesh-r", graph_dir_path)
         plt.show()
 
     #
@@ -506,12 +507,24 @@ def create_graph(
             pyg_m2g, "Mesh-to-grid", graph_dir_path, reindex_edges=False
         )
         plt.show()
+        pyg_m2g_r = pyg_m2g.clone()
+        pyg_m2g_r.edge_index = pyg_m2g.edge_index[[1, 0]]
+        vis.plot_graph(
+            pyg_m2g_r,
+            "Mesh-to-grid-r",
+            graph_dir_path,
+            reindex_edges=False,
+            order_by_degree=True,
+        )
+        plt.show()
 
     # Save g2m and m2g everything
     # g2m
     saving.save_edges(pyg_g2m, "g2m", graph_dir_path)
     # m2g
     saving.save_edges(pyg_m2g, "m2g", graph_dir_path)
+
+    gutils.print_graph_stats(save_graphs, pyg_g2m, pyg_m2g)
 
 
 def create_graph_from_datastore(
@@ -596,13 +609,6 @@ def cli(input_args=None):
         "to mesh, a multiple of mean edge length in mesh",
     )
     parser.add_argument(
-        "--mesh_node_distance",
-        type=float,
-        default=20000,
-        help="(For hierarchical/multiscale graphs) "
-        "Distance between mesh nodes, in meters",
-    )
-    parser.add_argument(
         "--mesh_refinement_factor",
         type=float,
         default=9,
@@ -611,9 +617,9 @@ def cli(input_args=None):
     parser.add_argument(
         "--grid_to_first_mesh_refinement",
         type=float,
-        default=25,
-        help="(For cluster graphs) Factor between number of grid nodes "
-        "and number of mesh nodes at bottom level.",
+        default=10,
+        help="Factor between number of grid nodes and mesh nodes at bottom "
+        "level.",
     )
     parser.add_argument(
         "--type",
@@ -630,7 +636,7 @@ def cli(input_args=None):
     parser.add_argument(
         "--m2g_k",
         type=int,
-        default=4,
+        default=3,
         help="Number of nearest mesh nodes connected to each grid node in m2g.",
     )
     parser.add_argument(
@@ -676,7 +682,6 @@ def cli(input_args=None):
         g2m_radius=args.g2m_radius,
         g2m_radius_boundary=args.g2m_radius_boundary,
         g2m_radius_atm=args.g2m_radius_atm,
-        mesh_node_distance=args.mesh_node_distance,
         mesh_refinement_factor=args.mesh_refinement_factor,
         grid_to_first_mesh_refinement=args.grid_to_first_mesh_refinement,
         n_max_levels=args.levels,

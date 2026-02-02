@@ -16,7 +16,13 @@ from . import utils as gutils
 NODE_PLOT_LIMIT = 100000  # Limit on number of points to plot before subsampling
 
 
-def plot_graph(graph, title=None, graph_dir_path=None, reindex_edges=True):
+def plot_graph(
+    graph,
+    title=None,
+    graph_dir_path=None,
+    reindex_edges=True,
+    order_by_degree=False,
+):
     fig, axis = plt.subplots(figsize=(8, 8), dpi=200)  # W,H
     edge_index = graph.edge_index
     pos = graph.pos
@@ -48,6 +54,10 @@ def plot_graph(graph, title=None, graph_dir_path=None, reindex_edges=True):
     )
 
     # Plot nodes
+    if order_by_degree:
+        order = np.argsort(degrees)
+        pos = pos[order]
+        degrees = degrees[order]
     node_scatter = axis.scatter(
         pos[:, 0],
         pos[:, 1],

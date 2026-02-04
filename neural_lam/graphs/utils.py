@@ -73,7 +73,7 @@ def filter_edges_land(
     graph: pyg.data.Data,
     sea_xy: np.ndarray,
     land_xy: np.ndarray,
-    max_edge_len: float = 50000,  # in m
+    max_edge_len: float = 20000,  # in m
 ):
     """
     Filter edge set to only keep edges not crossing land.
@@ -190,61 +190,24 @@ def _check_g2m_disconnected(
     return num_disc_grid, num_disc_mesh
 
 
-def _check_m2g_disconnected(
-    xy,
-    vm_xy,
-    kdt_m,
-    m2g_k,
-    xy_land,
-):
+def _g2m_median_out_degree(xy_subset, kdt_m, dm, radius):
     """
-    Check for disconnected nodes in m2g without building full graph.
-    Returns num_disconnected_grid.
+    Median number of mesh nodes within dm*radius of each
+    grid point in xy_subset.
     """
-    num_grid = len(xy)
-    grid_has_incoming = np.zeros(num_grid, dtype=bool)
-
-    # Build KDTree for land/sea check (only build once)
-    all_xy = np.concatenate((xy, xy_land), axis=0)
-    grid_kdt = scipy.spatial.KDTree(all_xy)
-    sea_xy_len = len(xy)
-
-    # Build m2g edges with k-NN
-    for i, grid_pos in enumerate(xy):
-        # Find k nearest mesh nodes
-        k_actual = min(m2g_k, len(vm_xy))
-        if k_actual == 1:
-            dist, mesh_idx = kdt_m.query(grid_pos, k=1)
-            neigh_idxs = (
-                [mesh_idx]
-                if not isinstance(mesh_idx, np.ndarray)
-                else mesh_idx.flatten()
-            )
-        else:
-            _, neigh_idxs = kdt_m.query(grid_pos, k=k_actual)
-            if neigh_idxs.ndim > 1:
-                neigh_idxs = neigh_idxs.flatten()
-
-        # Check if any edge would survive land filtering
-        for mesh_idx in neigh_idxs:
-            mesh_pos = vm_xy[mesh_idx]
-            midpoint = (grid_pos + mesh_pos) / 2
-            edge_len = np.linalg.norm(grid_pos - mesh_pos)
-
-            # Check if edge would be filtered
-            closest_idx = grid_kdt.query(midpoint)[1]
-            is_over_sea = closest_idx < sea_xy_len
-            is_within_max_len = edge_len < 50000  # BASE_MAX_EDGE_LEN
-
-            if is_over_sea and is_within_max_len:
-                grid_has_incoming[i] = True
-                break
-
-    num_disc_grid = np.sum(~grid_has_incoming)
-    return num_disc_grid
+    if len(xy_subset) == 0:
+        return 0.0
+    counts = np.array(
+        [
+            len(kdt_m.query_ball_point(grid_pos, dm * radius))
+            for grid_pos in xy_subset
+        ],
+        dtype=np.float64,
+    )
+    return float(np.median(counts))
 
 
-def _search_single_g2m_radius(
+def _search_single_g2m_radius_by_median_degree(
     radius_idx,
     radius_name,
     xy,
@@ -253,171 +216,98 @@ def _search_single_g2m_radius(
     vm_xy,
     kdt_m,
     dm,
-    precision,
-    fraction,
+    median_degree,
+    precision=0.01,
     base_radii=None,
     low=0.01,
     high=5.0,
 ):
     """
-    Binary search for a single g2m radius.
-
-    Parameters
-    ----------
-    base_radii : list or None
-        Base radii to use for other radius types.
+    Binary search for smallest radius such that median G2M out-degree
+    (for this grid type) >= median_degree.
     """
-    # Determine which grid type we're searching for
-    check_interior = radius_idx == 0
-    check_boundary = radius_idx == 1
-    check_atm = radius_idx == 2
-
-    # Calculate total nodes for this radius type
-    if check_interior:
-        total_nodes = len(xy)
-    elif check_boundary:
-        total_nodes = len(xy_boundary)
-    else:  # check_atm
-        total_nodes = len(xy_atmosphere)
-
-    max_disconnected = int((1 - fraction) * total_nodes)
-
-    best_radius = None
-    if base_radii is None:
-        current_radii = [None, None, None]
+    if radius_idx == 0:
+        xy_subset = xy
+    elif radius_idx == 1:
+        xy_subset = xy_boundary
     else:
-        current_radii = base_radii.copy()
+        xy_subset = xy_atmosphere
 
-    # First, find a high value that works
-    current_radii[radius_idx] = high
-    num_disc_grid, num_disc_mesh = _check_g2m_disconnected(
-        xy,
-        xy_boundary,
-        xy_atmosphere,
-        vm_xy,
-        kdt_m,
-        dm,
-        current_radii[0],
-        current_radii[1],
-        current_radii[2],
-        check_interior=check_interior,
-        check_boundary=check_boundary,
-        check_atm=check_atm,
+    if len(xy_subset) == 0:
+        return low
+
+    current_radii = (
+        [None, None, None] if base_radii is None else base_radii.copy()
     )
-    while num_disc_grid > max_disconnected and high < 20.0:
+    best_radius = None
+
+    # Ensure high gives at least median_degree
+    current_radii[radius_idx] = high
+    med_deg = _g2m_median_out_degree(
+        xy_subset, kdt_m, dm, current_radii[radius_idx]
+    )
+    while med_deg < median_degree and high < 20.0:
         high *= 2
         current_radii[radius_idx] = high
-        num_disc_grid, num_disc_mesh = _check_g2m_disconnected(
-            xy,
-            xy_boundary,
-            xy_atmosphere,
-            vm_xy,
-            kdt_m,
-            dm,
-            current_radii[0],
-            current_radii[1],
-            current_radii[2],
-            check_interior=check_interior,
-            check_boundary=check_boundary,
-            check_atm=check_atm,
+        med_deg = _g2m_median_out_degree(
+            xy_subset, kdt_m, dm, current_radii[radius_idx]
         )
 
-    # Binary search
+    if med_deg < median_degree:
+        return high
+
+    # Binary search for smallest radius with median_degree >= target
     while high - low > precision:
         mid = (low + high) / 2
         current_radii[radius_idx] = mid
-        num_disc_grid, num_disc_mesh = _check_g2m_disconnected(
-            xy,
-            xy_boundary,
-            xy_atmosphere,
-            vm_xy,
-            kdt_m,
-            dm,
-            current_radii[0],
-            current_radii[1],
-            current_radii[2],
-            check_interior=check_interior,
-            check_boundary=check_boundary,
-            check_atm=check_atm,
-        )
-        connected_frac = (
-            1.0 - (num_disc_grid / total_nodes) if total_nodes > 0 else 1.0
-        )
+        med_deg = _g2m_median_out_degree(xy_subset, kdt_m, dm, mid)
         print(
-            f"{radius_name}: {mid:.2f} -> {num_disc_grid} disconnected"
-            f"({connected_frac:.1%} connected)"
+            f"{radius_name}: radius={mid:.2f} -> median outdegree={med_deg:.2f}"
         )
-
-        if num_disc_grid <= max_disconnected:
+        if med_deg >= median_degree:
             best_radius = mid
-            high = mid  # Try smaller
+            high = mid
         else:
-            low = mid  # Need larger
+            low = mid
 
-    # After binary search, find the minimum value with fraction connected
     if best_radius is None:
         best_radius = high
     else:
-        # Test values at 2-decimal precision around best_radius to find minimum
-        # Start from best_radius rounded down, test up to best_radius + 0.02
+        # Refine to 2-decimal precision
         test_start = round(best_radius - 0.01, 2)
         test_end = round(best_radius + 0.02, 2)
-        best_radius_rounded = None
-
         for test_val in np.arange(test_start, test_end + 0.01, 0.01):
             test_val = round(test_val, 2)
-            current_radii[radius_idx] = test_val
-            num_disc_grid, num_disc_mesh = _check_g2m_disconnected(
-                xy,
-                xy_boundary,
-                xy_atmosphere,
-                vm_xy,
-                kdt_m,
-                dm,
-                current_radii[0],
-                current_radii[1],
-                current_radii[2],
-                check_interior=check_interior,
-                check_boundary=check_boundary,
-                check_atm=check_atm,
-            )
-            if num_disc_grid <= max_disconnected:
-                best_radius_rounded = test_val
-                break  # Found minimum value with fraction connected
-
-        if best_radius_rounded is None:
-            # Fallback: use best_radius rounded up
-            best_radius_rounded = round(best_radius + 0.01, 2)
-
-        best_radius = best_radius_rounded
+            med_deg = _g2m_median_out_degree(xy_subset, kdt_m, dm, test_val)
+            if med_deg >= median_degree:
+                best_radius = test_val
+                break
+        else:
+            best_radius = round(best_radius + 0.01, 2)
 
     return best_radius
 
 
-def search_g2m_radii(
+def search_g2m_radii_by_median_degree(
     xy,
     xy_boundary,
     xy_atmosphere,
     vm_xy,
     kdt_m,
     dm,
+    median_degree,
     precision=0.01,
-    fraction=0.95,
 ):
     """
-    Search for g2m radii that result in fraction of nodes connected.
-    Uses binary search for each radius independently.
+    Search for G2M radii (interior, boundary, atmosphere) that achieve
+    the given median out-degree per grid node for each type.
     Returns (g2m_radius, g2m_radius_boundary, g2m_radius_atm).
-
-    Parameters
-    ----------
-    fraction : float
-        Fraction of nodes that must be connected (default: 0.95).
     """
-    print("Searching for optimal g2m radii...")
+    print(
+        f"Searching for G2M radii with median connectivity {median_degree}..."
+    )
 
-    # Search g2m_radius
-    g2m_radius = _search_single_g2m_radius(
+    g2m_radius = _search_single_g2m_radius_by_median_degree(
         0,
         "g2m_radius",
         xy,
@@ -426,13 +316,11 @@ def search_g2m_radii(
         vm_xy,
         kdt_m,
         dm,
+        median_degree,
         precision,
-        fraction,
     )
-
-    # Search g2m_radius_boundary
     base_radii = [g2m_radius, None, None]
-    g2m_radius_boundary = _search_single_g2m_radius(
+    g2m_radius_boundary = _search_single_g2m_radius_by_median_degree(
         1,
         "g2m_radius_boundary",
         xy,
@@ -441,14 +329,12 @@ def search_g2m_radii(
         vm_xy,
         kdt_m,
         dm,
+        median_degree,
         precision,
-        fraction,
         base_radii,
     )
-
-    # g2m_radius_atm
     base_radii = [g2m_radius, g2m_radius_boundary, None]
-    g2m_radius_atm = _search_single_g2m_radius(
+    g2m_radius_atm = _search_single_g2m_radius_by_median_degree(
         2,
         "g2m_radius_atm",
         xy,
@@ -457,60 +343,16 @@ def search_g2m_radii(
         vm_xy,
         kdt_m,
         dm,
+        median_degree,
         precision,
-        fraction,
         base_radii,
     )
 
     print(
-        f"Found optimal radii: interior={g2m_radius:.2f},"
+        f"Found radii: interior={g2m_radius:.2f}, "
         f"boundary={g2m_radius_boundary:.2f}, atmosphere={g2m_radius_atm:.2f}"
     )
     return g2m_radius, g2m_radius_boundary, g2m_radius_atm
-
-
-def search_m2g_k(
-    xy,
-    vm_xy,
-    kdt_m,
-    xy_land,
-    start_k=1,
-    fraction=0.95,
-    limit=10,
-):
-    """
-    Search for smallest integer k that results in
-    a given fraction of nodes connected in m2g.
-    Returns k.
-
-    Parameters
-    ----------
-    fraction : float
-        Fraction of nodes that must be connected (default: 0.95).
-    """
-    print("Searching for optimal m2g k...")
-    total_nodes = len(xy)
-    max_disconnected = int((1 - fraction) * total_nodes)
-    k = start_k
-
-    while True:
-        num_disc = _check_m2g_disconnected(xy, vm_xy, kdt_m, k, xy_land)
-        connected_frac = (
-            1.0 - (num_disc / total_nodes) if total_nodes > 0 else 1.0
-        )
-        print(
-            f"k={k} -> {num_disc} disconnected"
-            f"grid nodes ({connected_frac:.1%} connected)"
-        )
-
-        if num_disc <= max_disconnected:
-            print(f"Found optimal k: {k}")
-            return k
-
-        k += 1
-        if k > limit:
-            print(f"Warning: k exceeded limit {limit}, using k={limit}")
-            return limit
 
 
 def connect_disconnected_g2m(
@@ -552,23 +394,11 @@ def connect_disconnected_g2m(
     # Connect disconnected grid nodes to nearest mesh node
     for grid_idx in disc_grid:
         grid_pos = pos[grid_idx]
-        # Determine which radius to use
-        if is_grid_interior[grid_idx]:
-            radius = g2m_radius
-        elif is_grid_boundary[grid_idx]:
-            radius = g2m_radius_boundary
-        else:  # atmosphere
-            radius = g2m_radius_atm
-
         # Find nearest mesh node (index in vm_xy/vm_list)
         # Mesh nodes come first in graph, so index matches vm_list index
-        dist, mesh_idx_vm = kdt_m.query(grid_pos, k=1)
-        if (
-            dist < dm * radius * 10
-        ):  # Allow up to 10x radius for disconnected nodes
-            # Mesh nodes are at indices 0 to len(vm_list)-1 in the graph
-            mesh_graph_idx = mesh_idx_vm
-            new_edges.append([grid_idx, mesh_graph_idx])
+        _, mesh_idx_vm = kdt_m.query(grid_pos, k=1)
+        mesh_graph_idx = int(np.asarray(mesh_idx_vm).flat[0])
+        new_edges.append([grid_idx, mesh_graph_idx])
 
     # Connect disconnected mesh nodes to nearest grid node
     for mesh_graph_idx in disc_mesh:
@@ -617,7 +447,6 @@ def connect_disconnected_m2g(
     new_edges = []
 
     # Connect disconnected grid nodes to nearest mesh node
-    # Note: We connect regardless of land filtering to ensure connectivity
     for grid_idx in disc_grid:
         grid_pos = pos[grid_idx]
         # Find nearest mesh node (index in vm_xy/vm_list)
@@ -665,4 +494,4 @@ def print_graph_stats(save_graphs, pyg_g2m, pyg_m2g):
     n_m2g_nodes = pyg_m2g.num_nodes
     n_m2g_edges = pyg_m2g.edge_index.shape[1]
     print(f"  m2g: {n_m2g_nodes} nodes, {n_m2g_edges} edges")
-    print("=" * 50 + "\n")
+    print("=" * 50)

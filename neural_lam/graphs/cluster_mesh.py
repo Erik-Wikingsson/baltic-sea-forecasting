@@ -8,7 +8,7 @@ from sklearn.cluster import KMeans
 # Local
 from . import utils as gutils
 
-BASE_MAX_EDGE_LEN = 50000  # m
+BASE_MAX_EDGE_LEN = 20000  # m
 
 
 def build_graph_from_node_pos(node_pos):

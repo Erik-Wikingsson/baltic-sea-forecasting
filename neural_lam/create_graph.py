@@ -35,9 +35,7 @@ def create_graph(
     create_plot: bool = False,
     allow_disconnected: bool = False,
     m2g_k: int = 4,
-    search_g2m_radii: bool = False,
-    search_m2g_k: bool = False,
-    search_fraction: float = 0.95,
+    g2m_median_degree: int = 0,
     connect_disconnected: bool = False,
 ):
     """
@@ -122,14 +120,9 @@ def create_graph(
         Expected to be of shape (num_grid, 2).
     m2g_k : int
         Number of nearest mesh neighbors to connect to each grid node in m2g.
-    search_g2m_radii : bool
-        If True, search for optimal g2m radii that result in fraction of
-        nodes connected.
-    search_m2g_k : bool
-        If True, search for smallest integer k that results in fraction of
-        nodes connected in m2g.
-    search_fraction : float
-        Fraction of nodes that must be connected during search (default: 0.95).
+    g2m_median_degree : int
+        Search for G2M radii (interior, boundary, atmosphere)
+        that achieve median connectivity N per grid node.
     connect_disconnected : bool
         If True, connect remaining disconnected nodes using nearest neighbor.
 
@@ -215,18 +208,18 @@ def create_graph(
     dm = np.mean(edge_lengths)
     print(f"dm = {dm}")
 
-    # Search for optimal parameters if requested
-    if search_g2m_radii:
+    # Search for G2M radii achieving target median connectivity
+    if g2m_median_degree is not None:
         g2m_radius, g2m_radius_boundary, g2m_radius_atm = (
-            gutils.search_g2m_radii(
+            gutils.search_g2m_radii_by_median_degree(
                 xy,
                 xy_boundary,
                 xy_atmosphere,
                 vm_xy,
                 kdt_m,
                 dm,
+                median_degree=g2m_median_degree,
                 precision=0.01,
-                fraction=search_fraction,
             )
         )
 
@@ -400,12 +393,6 @@ def create_graph(
     #
     # Mesh2Grid
     #
-
-    # Search for optimal m2g k if requested
-    if search_m2g_k:
-        m2g_k = gutils.search_m2g_k(
-            xy, vm_xy, kdt_m, xy_land, start_k=1, fraction=search_fraction
-        )
 
     # similar to Grid2Mesh, but only with grid nodes
     G_m2g = networkx.DiGraph()
@@ -611,13 +598,13 @@ def cli(input_args=None):
     parser.add_argument(
         "--mesh_refinement_factor",
         type=float,
-        default=9,
+        default=5,
         help="Factor between number of mesh nodes at each level in hierarchy.",
     )
     parser.add_argument(
         "--grid_to_first_mesh_refinement",
         type=float,
-        default=10,
+        default=5,
         help="Factor between number of grid nodes and mesh nodes at bottom "
         "level.",
     )
@@ -640,23 +627,11 @@ def cli(input_args=None):
         help="Number of nearest mesh nodes connected to each grid node in m2g.",
     )
     parser.add_argument(
-        "--search_g2m_radii",
-        action="store_true",
-        help="Search for optimal g2m radii that result in a given fraction"
-        "of nodes connected.",
-    )
-    parser.add_argument(
-        "--search_m2g_k",
-        action="store_true",
-        help="Search for smallest integer k that results in fraction"
-        "of nodes connected in m2g.",
-    )
-    parser.add_argument(
-        "--search_fraction",
-        type=float,
-        default=0.95,
-        help="Fraction of nodes that must be connected during search"
-        "(default: 0.95).",
+        "--g2m_median_degree",
+        type=int,
+        default=None,
+        help="If N>0, search for G2M radii (interior, boundary, atmosphere) "
+        "that achieve median connectivity N per grid node.",
     )
     parser.add_argument(
         "--connect_disconnected",
@@ -689,9 +664,7 @@ def cli(input_args=None):
         create_plot=args.plot,
         allow_disconnected=args.allow_disconnected,
         m2g_k=args.m2g_k,
-        search_g2m_radii=args.search_g2m_radii,
-        search_m2g_k=args.search_m2g_k,
-        search_fraction=args.search_fraction,
+        g2m_median_degree=args.g2m_median_degree,
         connect_disconnected=args.connect_disconnected,
     )
 

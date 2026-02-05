@@ -190,9 +190,9 @@ def _check_g2m_disconnected(
     return num_disc_grid, num_disc_mesh
 
 
-def _g2m_median_out_degree(xy_subset, kdt_m, dm, radius):
+def _g2m_mean_out_degree(xy_subset, kdt_m, dm, radius):
     """
-    Median number of mesh nodes within dm*radius of each
+    mean number of mesh nodes within dm*radius of each
     grid point in xy_subset.
     """
     if len(xy_subset) == 0:
@@ -204,10 +204,10 @@ def _g2m_median_out_degree(xy_subset, kdt_m, dm, radius):
         ],
         dtype=np.float64,
     )
-    return float(np.median(counts))
+    return float(np.mean(counts))
 
 
-def _search_single_g2m_radius_by_median_degree(
+def _search_single_g2m_radius_by_mean_degree(
     radius_idx,
     radius_name,
     xy,
@@ -216,15 +216,15 @@ def _search_single_g2m_radius_by_median_degree(
     vm_xy,
     kdt_m,
     dm,
-    median_degree,
+    mean_degree,
     precision=0.01,
     base_radii=None,
     low=0.01,
     high=5.0,
 ):
     """
-    Binary search for smallest radius such that median G2M out-degree
-    (for this grid type) >= median_degree.
+    Binary search for smallest radius such that mean G2M out-degree
+    (for this grid type) >= mean_degree.
     """
     if radius_idx == 0:
         xy_subset = xy
@@ -241,30 +241,30 @@ def _search_single_g2m_radius_by_median_degree(
     )
     best_radius = None
 
-    # Ensure high gives at least median_degree
+    # Ensure high gives at least mean_degree
     current_radii[radius_idx] = high
-    med_deg = _g2m_median_out_degree(
+    med_deg = _g2m_mean_out_degree(
         xy_subset, kdt_m, dm, current_radii[radius_idx]
     )
-    while med_deg < median_degree and high < 20.0:
+    while med_deg < mean_degree and high < 20.0:
         high *= 2
         current_radii[radius_idx] = high
-        med_deg = _g2m_median_out_degree(
+        med_deg = _g2m_mean_out_degree(
             xy_subset, kdt_m, dm, current_radii[radius_idx]
         )
 
-    if med_deg < median_degree:
+    if med_deg < mean_degree:
         return high
 
-    # Binary search for smallest radius with median_degree >= target
+    # Binary search for smallest radius with mean_degree >= target
     while high - low > precision:
         mid = (low + high) / 2
         current_radii[radius_idx] = mid
-        med_deg = _g2m_median_out_degree(xy_subset, kdt_m, dm, mid)
+        med_deg = _g2m_mean_out_degree(xy_subset, kdt_m, dm, mid)
         print(
-            f"{radius_name}: radius={mid:.2f} -> median outdegree={med_deg:.2f}"
+            f"{radius_name}: radius={mid:.2f} -> mean outdegree={med_deg:.2f}"
         )
-        if med_deg >= median_degree:
+        if med_deg >= mean_degree:
             best_radius = mid
             high = mid
         else:
@@ -278,8 +278,8 @@ def _search_single_g2m_radius_by_median_degree(
         test_end = round(best_radius + 0.02, 2)
         for test_val in np.arange(test_start, test_end + 0.01, 0.01):
             test_val = round(test_val, 2)
-            med_deg = _g2m_median_out_degree(xy_subset, kdt_m, dm, test_val)
-            if med_deg >= median_degree:
+            med_deg = _g2m_mean_out_degree(xy_subset, kdt_m, dm, test_val)
+            if med_deg >= mean_degree:
                 best_radius = test_val
                 break
         else:
@@ -288,26 +288,24 @@ def _search_single_g2m_radius_by_median_degree(
     return best_radius
 
 
-def search_g2m_radii_by_median_degree(
+def search_g2m_radii_by_mean_degree(
     xy,
     xy_boundary,
     xy_atmosphere,
     vm_xy,
     kdt_m,
     dm,
-    median_degree,
+    mean_degree,
     precision=0.01,
 ):
     """
     Search for G2M radii (interior, boundary, atmosphere) that achieve
-    the given median out-degree per grid node for each type.
+    the given mean out-degree per grid node for each type.
     Returns (g2m_radius, g2m_radius_boundary, g2m_radius_atm).
     """
-    print(
-        f"Searching for G2M radii with median connectivity {median_degree}..."
-    )
+    print(f"Searching for G2M radii with mean connectivity {mean_degree}...")
 
-    g2m_radius = _search_single_g2m_radius_by_median_degree(
+    g2m_radius = _search_single_g2m_radius_by_mean_degree(
         0,
         "g2m_radius",
         xy,
@@ -316,25 +314,13 @@ def search_g2m_radii_by_median_degree(
         vm_xy,
         kdt_m,
         dm,
-        median_degree,
+        mean_degree,
         precision,
     )
-    base_radii = [g2m_radius, None, None]
-    g2m_radius_boundary = _search_single_g2m_radius_by_median_degree(
-        1,
-        "g2m_radius_boundary",
-        xy,
-        xy_boundary,
-        xy_atmosphere,
-        vm_xy,
-        kdt_m,
-        dm,
-        median_degree,
-        precision,
-        base_radii,
-    )
+    g2m_radius_boundary = g2m_radius
+    print(f"g2m_radius_boundary: radius={g2m_radius_boundary:.2f}")
     base_radii = [g2m_radius, g2m_radius_boundary, None]
-    g2m_radius_atm = _search_single_g2m_radius_by_median_degree(
+    g2m_radius_atm = _search_single_g2m_radius_by_mean_degree(
         2,
         "g2m_radius_atm",
         xy,
@@ -343,7 +329,7 @@ def search_g2m_radii_by_median_degree(
         vm_xy,
         kdt_m,
         dm,
-        median_degree,
+        mean_degree,
         precision,
         base_radii,
     )

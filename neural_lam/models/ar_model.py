@@ -622,6 +622,25 @@ class ARModel(pl.LightningModule):
                 category="state",
             ).unstack("grid_index")
 
+            # Save as Zarr
+            example_save_dir = (
+                self.args.example_save_dir
+                if self.args.example_save_dir is not None
+                else self.logger.save_dir
+            )
+            os.makedirs(example_save_dir, exist_ok=True)
+            example_name = f"example_{self.plotted_examples}.zarr"
+
+            ds_examples = xr.Dataset(
+                {
+                    "target": da_target,
+                    "prediction": da_prediction,
+                }
+            )
+
+            save_path = os.path.join(example_save_dir, example_name)
+            ds_examples.to_zarr(save_path, mode="w")
+
             var_vmin = (
                 torch.minimum(
                     pred_slice.flatten(0, 1).min(dim=0)[0],
@@ -690,22 +709,6 @@ class ARModel(pl.LightningModule):
                 plt.close(
                     "all"
                 )  # Close all figs for this time step, saves memory
-
-            # Save pred and target as .pt files
-            torch.save(
-                pred_slice.cpu(),
-                os.path.join(
-                    self.logger.save_dir,
-                    f"example_pred_{self.plotted_examples}.pt",
-                ),
-            )
-            torch.save(
-                target_slice.cpu(),
-                os.path.join(
-                    self.logger.save_dir,
-                    f"example_target_{self.plotted_examples}.pt",
-                ),
-            )
 
     def create_metric_log_dict(self, metric_tensor, prefix, metric_name):
         """

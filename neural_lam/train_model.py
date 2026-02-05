@@ -334,6 +334,13 @@ def main(input_args=None):
         "(default: 1)",
     )
     parser.add_argument(
+        "--example_save_dir",
+        type=str,
+        default=None,
+        help="Directory to save example prediction zarr (and .pt) files. "
+        "If None, uses the logger save dir (default: None)",
+    )
+    parser.add_argument(
         "--num_latents_plot",
         type=int,
         default=4,

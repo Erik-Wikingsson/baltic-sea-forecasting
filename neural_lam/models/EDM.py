@@ -1,5 +1,4 @@
 # Standard library
-import math
 from typing import Union
 
 # Third-party
@@ -7,10 +6,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import wandb
-import xarray as xr
 
 # First-party
-from neural_lam import metrics, vis
+from neural_lam import metrics
 from neural_lam.models.ar_prob_model import ARProbModel
 from neural_lam.models.graph_diff import GraphDiff
 
@@ -210,7 +208,8 @@ class EDM(ARProbModel):
         Compute test metrics and make plots at the end of test epoch.
         Will gather stored tensors and perform plotting and logging on rank 0.
         """
-        # super().on_test_epoch_end() # TODO: It would be nice if we can run this as well
+        # super().on_test_epoch_end()
+        # TODO: It would be nice if we can run this as well
         self.aggregate_and_plot_metrics(self.test_metrics, prefix="test")
         self.log_spsk_ratio(self.test_metrics, "test")
 
@@ -228,7 +227,8 @@ class EDM(ARProbModel):
         # TODO: Calculate the validation loss
         batch_idx = args[0]
         if batch_idx == 0:
-            # We only run the full validation for one batch since sampling is expensive
+            # We only run the full validation for one batch
+            # since sampling is expensive
             super().validation_step(batch, batch_idx)
             (
                 trajectories,
@@ -300,7 +300,7 @@ class EDM(ARProbModel):
         forcing: (B, N_grid, forcing_dim), dynamic forcing
         boundary_forcing: (B, num_boundary_nodes, boundary_forcing_dim)
         atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
-        target_state: (B, N_grid, d_state), true weather state X_{t+1} at time t+1
+        target_state: (B, N_grid, d_state), true state X_{t+1} at time t+1
 
         Returns:
         next_state: (B, N_grid, d_state), predicted weather state X_{t+1} at t+1

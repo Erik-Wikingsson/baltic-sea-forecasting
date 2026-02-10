@@ -1,17 +1,11 @@
 # Standard library
-import math
 from typing import Union
 
 # Third-party
-import matplotlib.pyplot as plt
-import numpy as np
 import torch
 import torch.nn.functional as F
-import wandb
-import xarray as xr
 
 # First-party
-from neural_lam import metrics, vis
 from neural_lam.models.EDM import EDM
 
 # Local
@@ -42,7 +36,7 @@ class SI(EDM):
         self.GT = None
         self.sampler = "euler"  # TODO: Only euler for now
         # TODO: Should be able to change sigma_coef
-        self.I = Interpolant(sigma_coef=1, beta_fn="t^2")
+        self.interpolant = Interpolant(sigma_coef=1, beta_fn="t^2")
         self.t_min_sampling = 0.0  # no min time needed
         self.t_max_sampling = 0.999
 
@@ -64,16 +58,18 @@ class SI(EDM):
         # initial condition
         xt = base
 
-        # diffusion_fn = None means use the diffusion function that you trained with
-        # otherwise, for a desired diffusion coefficient, do the model surgery to define
-        # the correct drift coefficient
+        # diffusion_fn = None means use the diffusion function that you
+        # trained with. Otherwise, for a desired diffusion coefficient,
+        # do the model surgery to define the correct drift coefficient
 
         def step_fn(xt, t):
-            D = self.I.interpolant_coefs({"t": t, "zt": xt, "z0": base})
+            D = self.interpolant.interpolant_coefs(
+                {"t": t, "zt": xt, "z0": base}
+            )
 
             bF = self.model(xt, t, cond, boundary_forcing, atmosphere_forcing)
             D["bF"] = bF
-            sigma = self.I.sigma(t)
+            sigma = self.interpolant.sigma(t)
 
             # specified diffusion func
             if diffusion_fn is not None:
@@ -103,7 +99,7 @@ class SI(EDM):
             f = 0.5 * (bF + bF2)
 
             # Final step
-            sigma = self.I.sigma(t)
+            sigma = self.interpolant.sigma(t)
             g = sigma
             mu = xt + f * dt
             xt = mu + g * torch.randn_like(mu) * dt.sqrt()
@@ -112,10 +108,11 @@ class SI(EDM):
         for i, tscalar in enumerate(ts):
 
             if i == 0 and (diffusion_fn is not None):
-                # only need to do this when using other diffusion coefficients that you didn't train with
-                # because the drift-to-score conversion has a denominator that features 0 at time 0
-                # if just sampling with "sigma" (the diffusion coefficient you trained with) you
-                # can skip this
+                # only need to do this when using other diffusion coefficients
+                # that you didn't train with because the drift-to-score
+                # conversion has a denominator that features 0 at time 0
+                # if just sampling with "sigma" (the diffusion coefficient
+                # you trained with) you can skip this
                 tscalar = ts[1]  # 0 + (1/500)
 
             if self.sampler == "euler_2" and i < len(ts) - 1:
@@ -126,7 +123,8 @@ class SI(EDM):
         assert not bad(mu)
         return mu
 
-    # TODO: Should support going from pure noise to the reference distribution to compare with diffusion.
+    # TODO: Should support going from pure noise to the reference
+    # distribution to compare with diffusion.
     def predict_step(
         self,
         prev_state,
@@ -162,18 +160,20 @@ class SI(EDM):
 
         # list diffusion funcs
         # None means use the one you trained with
-        diffusion_fns = {
-            "g_sigma": None,
-            "g_sigma_01": lambda t: self.sigma_coef * self.wide(1 - t) * 0.1,
-            "g_other": lambda t: self.sigma_coef * self.wide(1 - t).pow(4),
-        }
+        # diffusion_fns = {
+        #     "g_sigma": None,
+        #     "g_sigma_01": lambda t: self.sigma_coef * self.wide(1 - t) * 0.1,
+        #     "g_other": lambda t: self.sigma_coef * self.wide(1 - t).pow(4),
+        # }
 
-        # None because we want to use the diffusion function we trained with, TODO: Experiment with this later
+        # None because we want to use the diffusion function we trained with,
+        # TODO: Experiment with this later
         next_state = self.EM(diffusion_fn=None, **EM_args)
 
         return next_state
 
-    # TODO: Should support going from pure noise to the reference distribution to compare with diffusion.
+    # TODO: Should support going from pure noise to the reference
+    # distribution to compare with diffusion.
     def predict_step_train(
         self,
         prev_state,
@@ -193,7 +193,7 @@ class SI(EDM):
         forcing: (B, N_grid, forcing_dim), dynamic forcing
         boundary_forcing: (B, num_boundary_nodes, boundary_forcing_dim)
         atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
-        target_state: (B, N_grid, d_state), true weather state X_{t+1} at time t+1
+        target_state: (B, N_grid, d_state), true state X_{t+1} at time t+1
 
         Returns:
         next_state: (B, N_grid, d_state), predicted weather state X_{t+1} at t+1
@@ -217,13 +217,13 @@ class SI(EDM):
         D["noise"] = torch.randn_like(prev_state, device=prev_state.device)
 
         # Get alpha, beta, etc
-        D = self.I.interpolant_coefs(D)
+        D = self.interpolant.interpolant_coefs(D)
 
         # zt
-        D["zt"] = self.I.compute_zt(D)
+        D["zt"] = self.interpolant.compute_zt(D)
 
         # Target
-        D["drift_target"] = self.I.compute_target(D)
+        D["drift_target"] = self.interpolant.compute_target(D)
 
         output = self.model(
             D["zt"],

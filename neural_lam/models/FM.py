@@ -1,16 +1,10 @@
 # Standard library
-import math
 from typing import Union
 
 # Third-party
-import matplotlib.pyplot as plt
-import numpy as np
 import torch
-import wandb
-import xarray as xr
 
 # First-party
-from neural_lam import metrics, vis
 from neural_lam.models.EDM import EDM
 
 # Local
@@ -107,7 +101,7 @@ class FM(EDM):
         forcing: (B, N_grid, forcing_dim), dynamic forcing
         boundary_forcing: (B, num_boundary_nodes, boundary_forcing_dim)
         atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
-        target_state: (B, N_grid, d_state), true weather state X_{t+1} at time t+1
+        target_state: (B, N_grid, d_state), true state X_{t+1} at time t+1
 
         Returns:
         next_state: (B, N_grid, d_state), predicted weather state X_{t+1} at t+1
@@ -237,7 +231,7 @@ class FM(EDM):
             beta_t = 1 - t
             gamma_t = 1
             alpha_dot_t = 1
-            beta_dot_t = -1
+            # beta_dot_t = -1
             eps_t = eps * beta_t
 
             b = self.model(

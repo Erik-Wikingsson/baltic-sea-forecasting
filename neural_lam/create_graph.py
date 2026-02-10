@@ -133,7 +133,7 @@ def create_graph(
     use_atmosphere_g2m : bool
         If True, add atmospheric grid nodes and their g2m edges. If False,
         atmosphere is omitted from the g2m graph (e.g. when using atmosphere
-        concat to interior instead). Default True.
+        concat to interior instead).
 
     Returns
     -------

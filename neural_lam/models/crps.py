@@ -1,18 +1,14 @@
 # Standard library
-import math
 from typing import Union
 
 # Third-party
 import matplotlib.pyplot as plt
-import numpy as np
 import torch
 import wandb
-import xarray as xr
 
 # First-party
-from neural_lam import metrics, vis
+from neural_lam import metrics
 from neural_lam.models.ar_prob_model import ARProbModel
-from neural_lam.models.EDM import EDM
 from neural_lam.models.graph_diff import GraphDiff
 
 # Local

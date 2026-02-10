@@ -49,16 +49,6 @@ class BaseGraphModel(ARModel):
             else:
                 setattr(self, name, attr_value)
 
-        # Specify dimensions of data
-        self.num_mesh_nodes, _ = self.get_num_mesh()
-        utils.rank_zero_print(
-            f"Loaded graph with {self.num_total_grid_nodes + self.num_mesh_nodes} "
-            f"nodes ({self.num_total_grid_nodes} grid: {self.num_grid_nodes} interior"
-            f"{f' + {self.num_boundary_nodes} boundary' if self.boundary_forced else ''}"
-            f"{f' + {self.num_atmosphere_nodes} atmosphere' if self.use_atmosphere_g2m else ''}"
-            f"{self.num_mesh_nodes} mesh)"
-        )
-
         # grid_dim from data + static
         self.g2m_edges, g2m_dim = self.g2m_features.shape
         self.m2g_edges, m2g_dim = self.m2g_features.shape
@@ -421,8 +411,8 @@ class BaseGraphModel(ARModel):
         # Verify g2m edge indices are within bounds
         max_grid_idx = self.g2m_edge_index[0].max().item()
         assert max_grid_idx < self.num_total_grid_nodes, (
-            f"g2m_edge_index[0] has max index {max_grid_idx} but grid_emb only has "
-            f"{self.num_total_grid_nodes} nodes"
+            f"g2m_edge_index[0] has max index {max_grid_idx} "
+            f"but grid_emb only has {self.num_total_grid_nodes} nodes"
         )
 
         # Map from grid to mesh

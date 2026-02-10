@@ -44,9 +44,6 @@ class GraphDiff(ARModel):
         self.remove_cond = True if args.model == "SI" else False
 
         num_state_vars = datastore.get_num_data_vars(category="state")
-        num_forcing_vars = datastore.get_num_data_vars(category="forcing")
-        num_past_forcing_steps = args.num_past_forcing_steps
-        num_future_forcing_steps = args.num_future_forcing_steps
 
         # grid_dim from data + static
         (
@@ -878,7 +875,8 @@ class MLP(nn.Module):
         return x
 
 
-# TODO: If we accept noise_level_dim and emb for other models as an optional argument we don't need to have this here
+# TODO: If we accept noise_level_dim and emb for other models as an
+# optional argument we don't need to have this here
 
 
 def make_mlp(blueprint, layer_norm=True, noise_level_dim=16):

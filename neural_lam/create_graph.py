@@ -38,6 +38,7 @@ def create_graph(
     m2g_k: int = 4,
     g2m_mean_degree: int = 0,
     connect_disconnected: bool = False,
+    use_atmosphere_g2m: bool = True,
 ):
     """
     Create graph components from `xy` grid coordinates and store in
@@ -129,6 +130,10 @@ def create_graph(
         that achieve mean connectivity N per grid node.
     connect_disconnected : bool
         If True, connect remaining disconnected nodes using nearest neighbor.
+    use_atmosphere_g2m : bool
+        If True, add atmospheric grid nodes and their g2m edges. If False,
+        atmosphere is omitted from the g2m graph (e.g. when using atmosphere
+        concat to interior instead). Default True.
 
     Returns
     -------
@@ -218,12 +223,13 @@ def create_graph(
             gutils.search_g2m_radii_by_mean_degree(
                 xy,
                 xy_boundary,
-                xy_atmosphere,
+                xy_atmosphere if use_atmosphere_g2m else np.empty((0, 2)),
                 vm_xy,
                 kdt_m,
                 dm,
                 mean_degree=g2m_mean_degree,
                 precision=0.01,
+                check_atm=use_atmosphere_g2m,
             )
         )
 
@@ -250,22 +256,29 @@ def create_graph(
         ((2, aux_node_i), {"pos": pos})
         for aux_node_i, pos in enumerate(xy_boundary)
     ]
-    atmospheric_nodes = [
-        ((3, aux_node_i), {"pos": pos})
-        for aux_node_i, pos in enumerate(xy_atmosphere)
-    ]
+    atmospheric_nodes = (
+        [
+            ((3, aux_node_i), {"pos": pos})
+            for aux_node_i, pos in enumerate(xy_atmosphere)
+        ]
+        if use_atmosphere_g2m and xy_atmosphere.size > 0
+        else []
+    )
     G_g2m.add_nodes_from(boundary_nodes)
-    G_g2m.add_nodes_from(atmospheric_nodes)
+    if atmospheric_nodes:
+        G_g2m.add_nodes_from(atmospheric_nodes)
 
     # turn into directed graph
     G_g2m = networkx.DiGraph(G_g2m)
 
     # add edges from each grid node set to mesh
-    for node_list, connect_radius in (
+    edge_sources = [
         (G_interior.nodes(data=True), g2m_radius),
         (boundary_nodes, g2m_radius_boundary),
-        (atmospheric_nodes, g2m_radius_atm),
-    ):
+    ]
+    if atmospheric_nodes:
+        edge_sources.append((atmospheric_nodes, g2m_radius_atm))
+    for node_list, connect_radius in edge_sources:
         # Note: Below could likely be vectorized, if networkx can play along
         for grid_node, node_attrs in node_list:
             # find neighbours (index in mesh graph)
@@ -522,6 +535,7 @@ def create_graph_from_datastore(
     datastore: BaseRegularGridDatastore,
     datastore_boundary: BaseRegularGridDatastore,
     datastore_atmosphere: BaseRegularGridDatastore,
+    use_atmosphere_g2m: bool,
     **kwargs,
 ):
     interior_mask = datastore.get_mask(surface=True, stacked=True, invert=False)
@@ -532,21 +546,25 @@ def create_graph_from_datastore(
     )
     xy_boundary = datastore_boundary.get_projected_xy("forcing", stacked=True)
 
-    atmosphere_mask = datastore_atmosphere.get_atmosphere_mask(
-        stacked=True, invert=False
-    )
-    xy_atmosphere = datastore_atmosphere.get_projected_xy(
-        "forcing", stacked=True
-    )
+    if use_atmosphere_g2m:
+        atmosphere_mask = datastore_atmosphere.get_atmosphere_mask(
+            stacked=True, invert=False
+        )
+        xy_atmosphere = datastore_atmosphere.get_projected_xy(
+            "forcing", stacked=True
+        )[atmosphere_mask]
+    else:
+        xy_atmosphere = np.empty((0, 2), dtype=xy_interior.dtype)
 
-    # Node ordering is: 1) interior, 2) boundary, 3) atmosphere
+    # Node ordering is: 1) interior, 2) boundary, 3) atmosphere (if specified)
     create_graph(
         xy=xy_interior[interior_mask],
         xy_land=xy_interior[~interior_mask],  # Coordinates of land points
         xy_boundary=xy_boundary[
             boundary_mask
         ],  # Only encode from these additional grid nodes
-        xy_atmosphere=xy_atmosphere[atmosphere_mask],
+        xy_atmosphere=xy_atmosphere,
+        use_atmosphere_g2m=use_atmosphere_g2m,
         **kwargs,
     )
 
@@ -649,6 +667,11 @@ def cli(input_args=None):
         action="store_true",
         help="Connect remaining disconnected nodes using nearest neighbor.",
     )
+    parser.add_argument(
+        "--use_atmosphere_g2m",
+        action="store_true",
+        help="Atmosphere as separate grid nodes in g2m encoding (experimental)",
+    )
     args = parser.parse_args(input_args)
 
     assert (
@@ -678,6 +701,7 @@ def cli(input_args=None):
         m2g_k=args.m2g_k,
         g2m_mean_degree=args.g2m_mean_degree,
         connect_disconnected=args.connect_disconnected,
+        use_atmosphere_g2m=args.use_atmosphere_g2m,
     )
 
 

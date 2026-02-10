@@ -55,7 +55,7 @@ class BaseGraphModel(ARModel):
             f"Loaded graph with {self.num_total_grid_nodes + self.num_mesh_nodes} "
             f"nodes ({self.num_total_grid_nodes} grid: {self.num_grid_nodes} interior"
             f"{f' + {self.num_boundary_nodes} boundary' if self.boundary_forced else ''}"
-            f"{f' + {self.num_atmosphere_nodes} atmosphere' if self.atmosphere_forced else ''}, "
+            f"{f' + {self.num_atmosphere_nodes} atmosphere' if self.use_atmosphere_g2m else ''}"
             f"{self.num_mesh_nodes} mesh)"
         )
 
@@ -73,7 +73,7 @@ class BaseGraphModel(ARModel):
             self.boundary_embedder = utils.make_mlp(
                 [self.boundary_dim] + self.mlp_blueprint_end
             )
-        if self.atmosphere_forced:
+        if self.atmosphere_forced and self.use_atmosphere_g2m:
             self.atmosphere_embedder = utils.make_mlp(
                 [self.atmosphere_dim] + self.mlp_blueprint_end
             )
@@ -349,15 +349,17 @@ class BaseGraphModel(ARModel):
         batch_size = prev_state.shape[0]
 
         # Create full interior grid input features
-        interior_features = torch.cat(
-            (
-                prev_state,
-                prev_prev_state,
-                forcing,
-                self.expand_to_batch(self.grid_static_features, batch_size),
-            ),
-            dim=-1,
-        )  # (B, num_interior_nodes, interior_input_dim)
+        interior_input_list = [
+            prev_state,
+            prev_prev_state,
+            forcing,
+            self.expand_to_batch(self.grid_static_features, batch_size),
+        ]
+        if self.concat_atmosphere:
+            # Atmosphere forcing on same grid as interior (past/future steps)
+            interior_input_list.append(atmosphere_forcing)
+        interior_features = torch.cat(interior_input_list, dim=-1)
+        # (B, num_interior_nodes, interior_input_dim)
 
         # Embed all features
         interior_emb = self.interior_embedder(
@@ -383,7 +385,7 @@ class BaseGraphModel(ARModel):
             )  # (B, num_boundary_nodes, d_h)
             grid_emb_list.append(boundary_emb)
 
-        if self.atmosphere_forced:
+        if self.atmosphere_forced and self.use_atmosphere_g2m:
             atmosphere_features = torch.cat(
                 (
                     atmosphere_forcing,

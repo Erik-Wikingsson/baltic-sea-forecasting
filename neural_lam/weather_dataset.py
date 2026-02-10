@@ -68,6 +68,7 @@ class WeatherDataset(torch.utils.data.Dataset):
         num_past_atmosphere_steps=1,
         num_future_atmosphere_steps=1,
         standardize=True,
+        use_atmosphere_g2m=False,
     ):
         super().__init__()
 
@@ -82,6 +83,7 @@ class WeatherDataset(torch.utils.data.Dataset):
         self.num_future_boundary_steps = num_future_boundary_steps
         self.num_past_atmosphere_steps = num_past_atmosphere_steps
         self.num_future_atmosphere_steps = num_future_atmosphere_steps
+        self.use_atmosphere_g2m = use_atmosphere_g2m
 
         self.da_state = self.datastore.get_dataarray(
             category="state", split=self.split
@@ -131,7 +133,7 @@ class WeatherDataset(torch.utils.data.Dataset):
         else:
             self.surface_mask_boundary = None
             self.land_mask_bool_boundary = None
-        if self.datastore_atmosphere is not None:
+        if self.use_atmosphere_g2m:
             self.mask_atmosphere = (
                 self.datastore_atmosphere.get_atmosphere_mask(
                     stacked=True, invert=False
@@ -706,8 +708,11 @@ class WeatherDataset(torch.utils.data.Dataset):
         forcing = forcing[:, self.surface_mask, :]
         if self.surface_mask_boundary is not None:
             boundary = boundary[:, self.surface_mask_boundary, :]
-        if self.mask_atmosphere is not None:
+        if self.use_atmosphere_g2m:
             atmosphere = atmosphere[:, self.mask_atmosphere, :]
+        else:
+            # Same grid as interior (exact same grid size)
+            atmosphere = atmosphere[:, self.surface_mask, :]
 
         # convert land from nan to zero
         init_states = torch.where(
@@ -902,11 +907,13 @@ class WeatherDataModule(pl.LightningDataModule):
         num_future_atmosphere_steps=1,
         batch_size=4,
         num_workers=16,
+        use_atmosphere_g2m=False,
     ):
         super().__init__()
         self._datastore = datastore
         self._datastore_boundary = datastore_boundary
         self._datastore_atmosphere = datastore_atmosphere
+        self.use_atmosphere_g2m = use_atmosphere_g2m
         self.num_past_forcing_steps = num_past_forcing_steps
         self.num_future_forcing_steps = num_future_forcing_steps
         self.num_past_boundary_steps = num_past_boundary_steps
@@ -943,6 +950,7 @@ class WeatherDataModule(pl.LightningDataModule):
                 num_future_boundary_steps=self.num_future_boundary_steps,
                 num_past_atmosphere_steps=self.num_past_atmosphere_steps,
                 num_future_atmosphere_steps=self.num_future_atmosphere_steps,
+                use_atmosphere_g2m=self.use_atmosphere_g2m,
             )
             self.val_dataset = WeatherDataset(
                 datastore=self._datastore,
@@ -957,6 +965,7 @@ class WeatherDataModule(pl.LightningDataModule):
                 num_future_boundary_steps=self.num_future_boundary_steps,
                 num_past_atmosphere_steps=self.num_past_atmosphere_steps,
                 num_future_atmosphere_steps=self.num_future_atmosphere_steps,
+                use_atmosphere_g2m=self.use_atmosphere_g2m,
             )
 
         if stage == "test" or stage is None:
@@ -973,6 +982,7 @@ class WeatherDataModule(pl.LightningDataModule):
                 num_future_boundary_steps=self.num_future_boundary_steps,
                 num_past_atmosphere_steps=self.num_past_atmosphere_steps,
                 num_future_atmosphere_steps=self.num_future_atmosphere_steps,
+                use_atmosphere_g2m=self.use_atmosphere_g2m,
             )
 
     def train_dataloader(self):

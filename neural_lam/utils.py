@@ -5,7 +5,6 @@ import warnings
 
 # Third-party
 import cartopy.crs as ccrs
-import pytorch_lightning as pl
 import torch
 import torch_geometric as pyg
 from pytorch_lightning.loggers import MLFlowLogger, WandbLogger
@@ -15,7 +14,7 @@ from tueplots import bundles, figsizes
 
 # Local
 from . import interaction_net
-from .custom_loggers import CustomMLFlowLogger
+from .custom_loggers import CustomMLFlowLogger, CustomWandbLogger
 
 
 class BufferList(nn.Module):
@@ -381,7 +380,7 @@ def setup_training_logger(datastore, args, run_name):
     """
 
     if args.logger == "wandb":
-        logger = pl.loggers.WandbLogger(
+        logger = CustomWandbLogger(
             project=args.logger_project,
             name=run_name,
             config=dict(training=vars(args), datastore=datastore._config),

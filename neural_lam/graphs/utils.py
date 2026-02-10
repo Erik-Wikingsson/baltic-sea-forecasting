@@ -297,11 +297,13 @@ def search_g2m_radii_by_mean_degree(
     dm,
     mean_degree,
     precision=0.01,
+    check_atm=True,
 ):
     """
     Search for G2M radii (interior, boundary, atmosphere) that achieve
     the given mean out-degree per grid node for each type.
     Returns (g2m_radius, g2m_radius_boundary, g2m_radius_atm).
+    When check_atm is False, g2m_radius_atm is returned as g2m_radius_boundary.
     """
     print(f"Searching for G2M radii with mean connectivity {mean_degree}...")
 
@@ -317,12 +319,11 @@ def search_g2m_radii_by_mean_degree(
         mean_degree,
         precision,
     )
-    g2m_radius_boundary = g2m_radius
-    print(f"g2m_radius_boundary: radius={g2m_radius_boundary:.2f}")
-    base_radii = [g2m_radius, g2m_radius_boundary, None]
-    g2m_radius_atm = _search_single_g2m_radius_by_mean_degree(
-        2,
-        "g2m_radius_atm",
+
+    base_radii = [g2m_radius, None, None]
+    g2m_radius_boundary = _search_single_g2m_radius_by_mean_degree(
+        1,
+        "g2m_radius_boundary",
         xy,
         xy_boundary,
         xy_atmosphere,
@@ -334,10 +335,33 @@ def search_g2m_radii_by_mean_degree(
         base_radii,
     )
 
-    print(
-        f"Found radii: interior={g2m_radius:.2f}, "
-        f"boundary={g2m_radius_boundary:.2f}, atmosphere={g2m_radius_atm:.2f}"
-    )
+    if check_atm and len(xy_atmosphere) > 0:
+        base_radii = [g2m_radius, g2m_radius_boundary, None]
+        g2m_radius_atm = _search_single_g2m_radius_by_mean_degree(
+            2,
+            "g2m_radius_atm",
+            xy,
+            xy_boundary,
+            xy_atmosphere,
+            vm_xy,
+            kdt_m,
+            dm,
+            mean_degree,
+            precision,
+            base_radii,
+        )
+        print(
+            f"Found radii: interior={g2m_radius:.2f}, "
+            f"boundary={g2m_radius_boundary:.2f}, "
+            f"atmosphere={g2m_radius_atm:.2f}"
+        )
+    else:
+        g2m_radius_atm = g2m_radius_boundary
+        print(
+            f"Found radii: interior={g2m_radius:.2f}, "
+            f"boundary={g2m_radius_boundary:.2f}"
+        )
+
     return g2m_radius, g2m_radius_boundary, g2m_radius_atm
 
 

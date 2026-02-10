@@ -334,13 +334,6 @@ def main(input_args=None):
         "(default: 1)",
     )
     parser.add_argument(
-        "--example_save_dir",
-        type=str,
-        default=None,
-        help="Directory to save example prediction zarr (and .pt) files. "
-        "If None, uses the logger save dir (default: None)",
-    )
-    parser.add_argument(
         "--num_latents_plot",
         type=int,
         default=4,
@@ -429,6 +422,12 @@ def main(input_args=None):
         "(default: 1)",
     )
     parser.add_argument(
+        "--use_atmosphere_g2m",
+        action="store_true",
+        help="Use atmosphere as separate grid nodes in g2m encoding "
+        "(experimental, default: False).",
+    )
+    parser.add_argument(
         "--ensemble_size",
         type=int,
         default=5,
@@ -481,6 +480,7 @@ def main(input_args=None):
         num_future_atmosphere_steps=args.num_future_atmosphere_steps,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        use_atmosphere_g2m=args.use_atmosphere_g2m,
     )
 
     # Instantiate model + trainer

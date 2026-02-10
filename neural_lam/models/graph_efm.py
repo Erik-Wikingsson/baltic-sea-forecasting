@@ -118,7 +118,7 @@ class GraphEFM(ARProbModel):
             self.boundary_embedder = utils.make_mlp(
                 [self.boundary_dim] + self.grid_mlp_blueprint_end,
             )
-        if self.atmosphere_forced:
+        if self.atmosphere_forced and self.use_atmosphere_g2m:
             self.atmosphere_embedder = utils.make_mlp(
                 [self.atmosphere_dim] + self.grid_mlp_blueprint_end,
             )
@@ -361,7 +361,7 @@ class GraphEFM(ARProbModel):
             )  # (B, num_boundary_nodes, d_h)
             grid_emb_list.append(boundary_emb)
 
-        if self.atmosphere_forced:
+        if self.atmosphere_forced and self.use_atmosphere_g2m:
             atmosphere_features = torch.cat(
                 (
                     atmosphere_forcing,
@@ -416,16 +416,16 @@ class GraphEFM(ARProbModel):
 
         # Create full interior node features of shape
         # (B, num_interior_nodes, interior_dim)
-        interior_features = torch.cat(
-            (
-                prev_state,
-                prev_prev_state,
-                forcing,
-                self.expand_to_batch(self.grid_static_features, batch_size),
-                current_state,
-            ),
-            dim=-1,
-        )
+        interior_input_list = [
+            prev_state,
+            prev_prev_state,
+            forcing,
+            self.expand_to_batch(self.grid_static_features, batch_size),
+            current_state,
+        ]
+        if self.concat_atmosphere:
+            interior_input_list.append(atmosphere_forcing)
+        interior_features = torch.cat(interior_input_list, dim=-1)
 
         # Embed all features
         interior_emb = self.interior_current_embedder(
@@ -462,15 +462,15 @@ class GraphEFM(ARProbModel):
 
         # Create full interior node features of shape
         # (B, num_interior_nodes, interior_dim)
-        interior_features = torch.cat(
-            (
-                prev_state,
-                prev_prev_state,
-                forcing,
-                self.expand_to_batch(self.grid_static_features, batch_size),
-            ),
-            dim=-1,
-        )
+        interior_input_list = [
+            prev_state,
+            prev_prev_state,
+            forcing,
+            self.expand_to_batch(self.grid_static_features, batch_size),
+        ]
+        if self.concat_atmosphere:
+            interior_input_list.append(atmosphere_forcing)
+        interior_features = torch.cat(interior_input_list, dim=-1)
 
         # Embed all features
         interior_emb = self.interior_embedder(

@@ -172,44 +172,54 @@ class ARModel(pl.LightningModule):
 
         # If datastore_atmosphere is given, the model is forced from atmosphere
         self.atmosphere_forced = datastore_atmosphere is not None
+        self.use_atmosphere_g2m = getattr(args, "use_atmosphere_g2m", False)
+        # When atmosphere is given but not used in g2m: concat atmosphere
+        # forcing (past/future timesteps) to interior state (same grid size).
+        self.concat_atmosphere = (
+            self.atmosphere_forced and not self.use_atmosphere_g2m
+        )
 
         if self.atmosphere_forced:
-            # Load static features for atmosphere
-            atmosphere_mask = datastore_atmosphere.get_atmosphere_mask(
-                stacked=True, invert=False
-            )
-            da_atmosphere_static_features = datastore_atmosphere.get_dataarray(
-                category="static", split=None, standardize=True
-            )[
-                atmosphere_mask
-            ]  # mask static features
-            self.register_buffer(
-                "atmosphere_static_features",
-                torch.tensor(
-                    da_atmosphere_static_features.values, dtype=torch.float32
-                ),
-                persistent=False,
-            )
-
-            # Compute dimensionalities (e.g. to instantiate MLPs)
-            (
-                self.num_atmosphere_nodes,
-                atmosphere_static_dim,
-            ) = self.atmosphere_static_features.shape
-
-            # Compute atmosphere input dim separately
             num_atmosphere_forcing_vars = (
                 datastore_atmosphere.get_num_data_vars(category="forcing")
             )
-
             num_past_atmosphere_steps = args.num_past_atmosphere_steps
             num_future_atmosphere_steps = args.num_future_atmosphere_steps
-            self.atmosphere_dim = (
-                atmosphere_static_dim
-                + num_atmosphere_forcing_vars
-                * (num_past_atmosphere_steps + num_future_atmosphere_steps + 1)
+            atmosphere_windowed_dim = num_atmosphere_forcing_vars * (
+                num_past_atmosphere_steps + num_future_atmosphere_steps + 1
             )
-            self.num_total_grid_nodes += self.num_atmosphere_nodes
+
+            if self.use_atmosphere_g2m:
+                # Atmosphere as separate grid nodes in g2m
+                atmosphere_mask = datastore_atmosphere.get_atmosphere_mask(
+                    stacked=True, invert=False
+                )
+                da_atmosphere_static_features = (
+                    datastore_atmosphere.get_dataarray(
+                        category="static", split=None, standardize=True
+                    )[atmosphere_mask]
+                )
+                self.register_buffer(
+                    "atmosphere_static_features",
+                    torch.tensor(
+                        da_atmosphere_static_features.values,
+                        dtype=torch.float32,
+                    ),
+                    persistent=False,
+                )
+                (
+                    self.num_atmosphere_nodes,
+                    atmosphere_static_dim,
+                ) = self.atmosphere_static_features.shape
+                self.atmosphere_dim = (
+                    atmosphere_static_dim + atmosphere_windowed_dim
+                )
+                self.num_total_grid_nodes += self.num_atmosphere_nodes
+            else:
+                # Atmosphere concat to interior (same grid size)
+                self.num_atmosphere_nodes = 0
+                self.atmosphere_dim = atmosphere_windowed_dim
+                self.interior_input_dim += atmosphere_windowed_dim
 
         # Instantiate loss function
         self.loss = metrics.get_metric(args.loss)
@@ -276,6 +286,7 @@ class ARModel(pl.LightningModule):
             datastore_boundary=self._datastore_boundary,
             datastore_atmosphere=self._datastore_atmosphere,
             split=split,
+            use_atmosphere_g2m=getattr(self, "use_atmosphere_g2m", False),
         )
         time = time.detach().cpu()
         time = np.array(time, dtype="datetime64[ns]")
@@ -623,12 +634,8 @@ class ARModel(pl.LightningModule):
             ).unstack("grid_index")
 
             # Save as Zarr
-            example_save_dir = (
-                self.args.example_save_dir
-                if self.args.example_save_dir is not None
-                else self.logger.save_dir
-            )
-            os.makedirs(example_save_dir, exist_ok=True)
+            save_dir = os.path.join(self.logger.save_dir, "example_forecasts")
+            os.makedirs(save_dir, exist_ok=True)
             example_name = f"example_{self.plotted_examples}.zarr"
 
             ds_examples = xr.Dataset(
@@ -638,7 +645,7 @@ class ARModel(pl.LightningModule):
                 }
             )
 
-            save_path = os.path.join(example_save_dir, example_name)
+            save_path = os.path.join(save_dir, example_name)
             ds_examples.to_zarr(save_path, mode="w")
 
             var_vmin = (

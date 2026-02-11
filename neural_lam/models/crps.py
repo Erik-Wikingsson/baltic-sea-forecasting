@@ -163,6 +163,7 @@ class CRPS(ARProbModel):
         Run validation on single batch
         """
         super().validation_step(batch, *args)
+        batch_idx = args[0]
         (
             trajectories,
             target_states,
@@ -181,7 +182,11 @@ class CRPS(ARProbModel):
         )
         self.val_metrics["ens_crps"].append(crps_batch)
 
-        if self.trainer.is_global_zero and self.n_example_pred > 0:
+        if (
+            self.trainer.is_global_zero
+            and batch_idx == 0
+            and self.n_example_pred > 0
+        ):
             # For now use val_steps_to_log to determine which steps
             # to make these plots for
             plot_log_steps = list(

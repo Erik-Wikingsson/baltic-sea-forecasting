@@ -89,7 +89,7 @@ class ARProbModel(ARModel):
                 boundary_forcing,
                 atmosphere_forcing,
             )
-            for _ in range(self.ensemble_size)
+            for _ in range(ensemble_size)
         ]
 
         traj_tensor = torch.stack(

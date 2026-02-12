@@ -976,6 +976,55 @@ class GraphEFM(ARProbModel):
 
         return prediction, pred_std
 
+    def ensemble_step(self, batch):
+        """
+        Perform ensemble forecast and compute basic metrics.
+        Override base to pass true_states and num_traj to
+        GraphEFM.sample_trajectories.
+        """
+        (
+            init_states,
+            target_states,
+            forcing_features,
+            boundary_forcing,
+            atmosphere_forcing,
+            _,
+        ) = batch
+
+        traj_means, _ = self.sample_trajectories(
+            init_states,
+            forcing_features,
+            boundary_forcing,
+            atmosphere_forcing,
+            target_states,
+            self.ensemble_size,
+            use_encoder=False,
+        )
+        trajectories = traj_means  # (B, S, pred_steps, num_grid_nodes, d_f)
+
+        spread_squared_batch = metrics.spread_squared(
+            trajectories,
+            target_states,
+            None,
+            mask=self.interior_mask_bool,
+            sum_vars=False,
+        )
+        ens_mean = torch.mean(trajectories, dim=1)
+        ens_mse_batch = metrics.mse(
+            ens_mean,
+            target_states,
+            None,
+            mask=self.interior_mask_bool,
+            sum_vars=False,
+        )
+
+        return (
+            trajectories,
+            target_states,
+            spread_squared_batch,
+            ens_mse_batch,
+        )
+
     def validation_step(self, batch, *args):
         """
         Run validation on single batch

@@ -91,13 +91,6 @@ def plot_prediction(
 
     extent = datastore.get_xy_extent("state")
 
-    # Set up masking of border region
-    da_mask = datastore.unstack_grid_coords(datastore.boundary_mask).isel(
-        mask_feature=0
-    )
-    mask_values = np.invert(da_mask.values.astype(bool)).astype(float)
-    pixel_alpha = mask_values.clip(0.7, 1)  # Faded border region
-
     fig, axes = plt.subplots(
         1,
         2,
@@ -114,7 +107,6 @@ def plot_prediction(
             x="longitude",
             y="latitude",
             extent=extent,
-            alpha=pixel_alpha,
             vmin=vmin,
             vmax=vmax,
             cmap="plasma",
@@ -165,14 +157,6 @@ def plot_ensemble_prediction(
     else:
         vmin, vmax = vrange
 
-    # Set up masking of border region
-    # da_mask = datastore.unstack_grid_coords(datastore.boundary_mask).T
-    da_mask = datastore.unstack_grid_coords(datastore.boundary_mask).isel(
-        mask_feature=0
-    )
-    mask_values = np.invert(da_mask.values.astype(bool)).astype(float)
-    pixel_alpha = mask_values.clip(0.7, 1)  # Faded border region
-
     fig, axes = plt.subplots(
         3,
         3,
@@ -186,7 +170,6 @@ def plot_ensemble_prediction(
         axes[0],
         target,
         datastore,
-        alpha=pixel_alpha,
         vmin=vmin,
         vmax=vmax,
         ax_title="Ground Truth",
@@ -195,13 +178,12 @@ def plot_ensemble_prediction(
         axes[1],
         ens_mean,
         datastore,
-        alpha=pixel_alpha,
         vmin=vmin,
         vmax=vmax,
         ax_title="Ens. Mean",
     )
     std_im = plot_on_axis(
-        axes[2], ens_std, datastore, alpha=pixel_alpha, ax_title="Ens. Std."
+        axes[2], ens_std, datastore, ax_title="Ens. Std."
     )  # Own vrange
 
     # Plot samples
@@ -212,7 +194,6 @@ def plot_ensemble_prediction(
             ax,
             member,
             datastore,
-            alpha=pixel_alpha,
             vmin=vmin,
             vmax=vmax,
             ax_title=f"Member {member_i}",
@@ -240,7 +221,6 @@ def plot_on_axis(
     ax,
     data: xr.DataArray,
     datastore: BaseRegularGridDatastore,
-    alpha=None,
     vmin=None,
     vmax=None,
     ax_title=None,
@@ -257,7 +237,6 @@ def plot_on_axis(
         x="longitude",
         y="latitude",
         extent=extent,
-        alpha=alpha,
         vmin=vmin,
         vmax=vmax,
         cmap="plasma",
@@ -285,13 +264,6 @@ def plot_spatial_error(
 
     extent = datastore.get_xy_extent("state")
 
-    # Set up masking of border region
-    da_mask = datastore.unstack_grid_coords(datastore.boundary_mask).isel(
-        mask_feature=0
-    )
-    mask_reshaped = da_mask.values
-    pixel_alpha = mask_reshaped.clip(0.7, 1)  # Faded border region
-
     surface_mask = datastore.get_mask(surface=True, stacked=True, invert=False)
     full_error = np.full_like(surface_mask, np.nan)
     full_error[surface_mask] = error.cpu().numpy()
@@ -310,7 +282,6 @@ def plot_spatial_error(
         error_grid,
         origin="lower",
         extent=extent,
-        alpha=pixel_alpha,
         vmin=vmin,
         vmax=vmax,
         cmap="OrRd",

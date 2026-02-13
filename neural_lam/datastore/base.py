@@ -221,11 +221,9 @@ class BaseDatastore(abc.ABC):
         """
         Return the processed data (as a single `xr.DataArray`) for the given
         category of data and test/train/val-split that covers all the data (in
-        space and time) of a given category (state/forcing/static). A
-        datastore must be able to return for the "state" category, but
-        "forcing" and "static" are optional (in which case the method should
-        return `None`). For the "static" category the `split` is allowed to be
-        `None` because the static data is the same for all splits.
+        space and time) of a given category (state/forcing/static). For the
+        "static" category the `split` is allowed to be `None` because the static
+        data is the same for all splits.
 
         The returned dataarray is expected to at minimum have dimensions of
         `(grid_index, {category}_feature)` so that any spatial dimensions have
@@ -258,23 +256,6 @@ class BaseDatastore(abc.ABC):
         """
         pass
 
-    @cached_property
-    @abc.abstractmethod
-    def boundary_mask(self) -> xr.DataArray:
-        """
-        Return the boundary mask for the dataset, with spatial dimensions
-        stacked. Where the value is 1, the grid point is a boundary point, and
-        where the value is 0, the grid point is not a boundary point.
-
-        Returns
-        -------
-        xr.DataArray
-            The boundary mask for the dataset, with dimensions
-            `('grid_index',)`.
-
-        """
-        pass
-
     @abc.abstractmethod
     def get_xy(self, category: str) -> np.ndarray:
         """
@@ -291,6 +272,7 @@ class BaseDatastore(abc.ABC):
         np.ndarray
             The x, y coordinates of the dataset with shape `[n_grid_points, 2]`.
         """
+        pass
 
     @property
     @abc.abstractmethod

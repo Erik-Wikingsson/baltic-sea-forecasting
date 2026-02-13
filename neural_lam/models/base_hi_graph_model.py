@@ -1,3 +1,6 @@
+# Standard library
+from typing import Union
+
 # Third-party
 from torch import nn
 
@@ -14,8 +17,21 @@ class BaseHiGraphModel(BaseGraphModel):
     Base class for hierarchical graph models.
     """
 
-    def __init__(self, args, config: NeuralLAMConfig, datastore: BaseDatastore):
-        super().__init__(args, config=config, datastore=datastore)
+    def __init__(
+        self,
+        args,
+        config: NeuralLAMConfig,
+        datastore: BaseDatastore,
+        datastore_boundary: Union[BaseDatastore, None],
+        datastore_atmosphere: Union[BaseDatastore, None],
+    ):
+        super().__init__(
+            args,
+            config=config,
+            datastore=datastore,
+            datastore_boundary=datastore_boundary,
+            datastore_atmosphere=datastore_atmosphere,
+        )
 
         # Track number of nodes, edges on each level
         # Flatten lists for efficient embedding
@@ -100,6 +116,14 @@ class BaseHiGraphModel(BaseGraphModel):
                 for edge_index in self.mesh_down_edge_index
             ]
         )
+
+    @property
+    def num_grid_connected_mesh_nodes(self):
+        """
+        Get the total number of mesh nodes that have a connection to
+        the grid (e.g. bottom level in a hierarchy)
+        """
+        return self.mesh_static_features[0].shape[0]  # Bottom level
 
     def get_num_mesh(self):
         """

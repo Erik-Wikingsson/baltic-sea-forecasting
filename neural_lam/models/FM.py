@@ -1,15 +1,10 @@
 # Standard library
-import math
+from typing import Union
 
 # Third-party
-import matplotlib.pyplot as plt
-import numpy as np
 import torch
-import wandb
-import xarray as xr
 
 # First-party
-from neural_lam import metrics, vis
 from neural_lam.models.EDM import EDM
 
 # Local
@@ -27,16 +22,30 @@ class FM(EDM):
         args,
         config: NeuralLAMConfig,
         datastore: BaseDatastore,
+        datastore_boundary: Union[BaseDatastore, None],
+        datastore_atmosphere: Union[BaseDatastore, None],
     ):
-        super().__init__(args, config, datastore)
+        super().__init__(
+            args, config, datastore, datastore_boundary, datastore_atmosphere
+        )
 
     # Evaluation
-    def predict_step(self, prev_state, prev_prev_state, forcing):
+    def predict_step(
+        self,
+        prev_state,
+        prev_prev_state,
+        forcing,
+        boundary_forcing,
+        atmosphere_forcing,
+    ):
         """
         Step state one step ahead using prediction model, X_{t-1}, X_t -> X_t+1
         prev_state: (B, num_grid_nodes, feature_dim), X_t
         prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1}
         forcing: (B, num_grid_nodes, forcing_dim)
+        boundary_forcing: (B, num_boundary_nodes, boundary_forcing_dim)
+        atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
+
 
         Returns:
         next_state: (B, N_grid, d_state),
@@ -53,11 +62,15 @@ class FM(EDM):
             next_state = self.heun_sampler(
                 latents=latents,
                 class_labels=input_grid,
+                boundary_forcing=boundary_forcing,
+                atmosphere_forcing=atmosphere_forcing,
             )
         elif self.sampler == "stochastic":
             next_state = self.stochastic_sampler(
                 latents=latents,
                 class_labels=input_grid,
+                boundary_forcing=boundary_forcing,
+                atmosphere_forcing=atmosphere_forcing,
             )
 
         # Add residual if needed
@@ -70,7 +83,13 @@ class FM(EDM):
         return next_state
 
     def predict_step_train(
-        self, prev_state, prev_prev_state, forcing, target_state
+        self,
+        prev_state,
+        prev_prev_state,
+        forcing,
+        boundary_forcing,
+        atmosphere_forcing,
+        target_state,
     ):
         """
         Predict weather state one time step ahead
@@ -80,6 +99,9 @@ class FM(EDM):
         prev_prev_state: (B, N_grid, d_state), weather state X_{t-1} at time t-1
         batch_static_features: (B, N_grid, batch_static_feature_dim), static
         forcing: (B, N_grid, forcing_dim), dynamic forcing
+        boundary_forcing: (B, num_boundary_nodes, boundary_forcing_dim)
+        atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
+        target_state: (B, N_grid, d_state), true state X_{t+1} at time t+1
 
         Returns:
         next_state: (B, N_grid, d_state), predicted weather state X_{t+1} at t+1
@@ -101,7 +123,9 @@ class FM(EDM):
         zt = (1 - t) * z0 + t * z1
 
         # Shape (B, d_state, N_x, N_y)
-        pred_drift = self.model(zt, t.flatten(), input_grid)
+        pred_drift = self.model(
+            zt, t, input_grid, boundary_forcing, atmosphere_forcing
+        )
 
         # This predicts the drift b
         drift = z1 - z0
@@ -146,7 +170,7 @@ class FM(EDM):
         latents,
         class_labels=None,
         boundary_forcing=None,
-        randn_like=torch.randn_like,
+        atmosphere_forcing=None,
         num_steps=20,
     ):
         tmin = 0.0
@@ -164,12 +188,20 @@ class FM(EDM):
 
             # Euler step.
             x_cur = x_next
-            d_cur = self.model(x_cur, t_cur, class_labels)
+            d_cur = self.model(
+                x_cur, t_cur, class_labels, boundary_forcing, atmosphere_forcing
+            )
             x_next = x_cur + (t_next - t_cur) * d_cur
 
             # Apply 2nd order correction.
             if i < num_steps - 1:
-                d_prime = self.model(x_next, t_next, class_labels)
+                d_prime = self.model(
+                    x_next,
+                    t_next,
+                    class_labels,
+                    boundary_forcing,
+                    atmosphere_forcing,
+                )
                 x_next = x_cur + (t_next - t_cur) * (
                     0.5 * d_cur + 0.5 * d_prime
                 )
@@ -181,7 +213,7 @@ class FM(EDM):
         latents,
         class_labels=None,
         boundary_forcing=None,
-        randn_like=torch.randn_like,
+        atmosphere_forcing=None,
         num_steps=20,
     ):
         tmin = 0.0
@@ -189,20 +221,22 @@ class FM(EDM):
         eps = 1.0
 
         # Time step discretization.
-        ts = torch.linspace(tmin, tmax, num_steps+1, device=self.device)[:-1]
+        ts = torch.linspace(tmin, tmax, num_steps, device=self.device)
         dt = (tmax - tmin) / num_steps
 
         # Main sampling loop.
         zt = latents  # Initialize with noise
-        for t in ts:
+        for t in ts[:-1]:
             alpha_t = t
             beta_t = 1 - t
             gamma_t = 1
             alpha_dot_t = 1
-            beta_dot_t = -1
+            # beta_dot_t = -1
             eps_t = eps * beta_t
 
-            b = self.model(zt, t, class_labels)
+            b = self.model(
+                zt, t, class_labels, boundary_forcing, atmosphere_forcing
+            )
             s = (alpha_t * b - alpha_dot_t * zt) / (
                 beta_t * gamma_t
             )  # s = (t * b - zt) / (1 - t)

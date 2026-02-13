@@ -13,9 +13,8 @@ from loguru import logger
 
 # Local
 from . import utils
-from .config import load_config_and_datastore
-from .models import EDM, GraphCast, GraphEFM, GraphFM, FM, CRPS, SI
-from .models import EDM, FM, GraphCast, GraphEFM, GraphFM
+from .config import load_config_and_datastores
+from .models import CRPS, EDM, FM, SI, GraphCast, GraphEFM, GraphFM
 from .weather_dataset import WeatherDataModule
 
 MODELS = {
@@ -111,6 +110,14 @@ def main(input_args=None):
         type=int,
         default=64,
         help="Dimensionality of all hidden representations (default: 64)",
+    )
+    parser.add_argument(
+        "--hidden_dim_grid",
+        type=int,
+        help=(
+            "(For Graph-EFM) Dimensionality of hidden representations related "
+            "to grid nodes (default: None, use same as hidden_dim)."
+        ),
     )
     parser.add_argument(
         "--latent_dim",
@@ -245,6 +252,12 @@ def main(input_args=None):
         default=32,
         help="Dimension of the noise vector z, 32 in FGN (default: 32)",
     )
+    parser.add_argument(
+        "--crps_alpha",
+        type=float,
+        default=0.95,
+        help="Alpha parameter for the Almost Fair CRPS (default: 0.95)",
+    )
 
     # Training options
     parser.add_argument(
@@ -297,6 +310,12 @@ def main(input_args=None):
         type=int,
         default=4,
         help="Number of sanity check steps to run before training (default: 4)",
+    )
+    parser.add_argument(
+        "--grad_checkpointing",
+        action="store_true",
+        help="Whether to perform gradient checkpointing at each unroll step "
+        "(default: False)",
     )
 
     # Evaluation options
@@ -382,6 +401,39 @@ def main(input_args=None):
         help="Number of future time steps to use as input for forcing data",
     )
     parser.add_argument(
+        "--num_past_boundary_steps",
+        type=int,
+        default=1,
+        help="Number of past time steps to use as boundary input (default: 1)",
+    )
+    parser.add_argument(
+        "--num_future_boundary_steps",
+        type=int,
+        default=1,
+        help="Number of future time steps to use as atmosphere input "
+        "(default: 1)",
+    )
+    parser.add_argument(
+        "--num_past_atmosphere_steps",
+        type=int,
+        default=1,
+        help="Number of past time steps to use as atmosphere input "
+        "(default: 1)",
+    )
+    parser.add_argument(
+        "--num_future_atmosphere_steps",
+        type=int,
+        default=1,
+        help="Number of future time steps to use as boundary input "
+        "(default: 1)",
+    )
+    parser.add_argument(
+        "--use_atmosphere_g2m",
+        action="store_true",
+        help="Use atmosphere as separate grid nodes in g2m encoding "
+        "(experimental, default: False).",
+    )
+    parser.add_argument(
         "--ensemble_size",
         type=int,
         default=5,
@@ -414,18 +466,27 @@ def main(input_args=None):
     seed.seed_everything(args.seed)
 
     # Load neural-lam configuration and datastore to use
-    config, datastore = load_config_and_datastore(config_path=args.config_path)
+    config, datastore, datastore_boundary, datastore_atmosphere = (
+        load_config_and_datastores(config_path=args.config_path)
+    )
 
     # Create datamodule
     data_module = WeatherDataModule(
         datastore=datastore,
+        datastore_boundary=datastore_boundary,
+        datastore_atmosphere=datastore_atmosphere,
         ar_steps_train=args.ar_steps_train,
         ar_steps_eval=args.ar_steps_eval,
         standardize=True,
         num_past_forcing_steps=args.num_past_forcing_steps,
         num_future_forcing_steps=args.num_future_forcing_steps,
+        num_past_boundary_steps=args.num_past_boundary_steps,
+        num_future_boundary_steps=args.num_future_boundary_steps,
+        num_past_atmosphere_steps=args.num_past_atmosphere_steps,
+        num_future_atmosphere_steps=args.num_future_atmosphere_steps,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        use_atmosphere_g2m=args.use_atmosphere_g2m,
     )
 
     # Instantiate model + trainer
@@ -448,7 +509,13 @@ def main(input_args=None):
 
     # Load model parameters Use new args for model
     ModelClass = MODELS[args.model]
-    model = ModelClass(args, config=config, datastore=datastore)
+    model = ModelClass(
+        args,
+        config=config,
+        datastore=datastore,
+        datastore_boundary=datastore_boundary,
+        datastore_atmosphere=datastore_atmosphere,
+    )
 
     if args.eval:
         prefix = f"eval-{args.eval}-"

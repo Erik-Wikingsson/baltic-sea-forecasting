@@ -4,7 +4,7 @@ import shutil
 import warnings
 
 # Third-party
-import pytorch_lightning as pl
+import cartopy.crs as ccrs
 import torch
 import torch_geometric as pyg
 from pytorch_lightning.loggers import MLFlowLogger, WandbLogger
@@ -14,7 +14,7 @@ from tueplots import bundles, figsizes
 
 # Local
 from . import interaction_net
-from .custom_loggers import CustomMLFlowLogger
+from .custom_loggers import CustomMLFlowLogger, CustomWandbLogger
 
 
 class BufferList(nn.Module):
@@ -41,8 +41,19 @@ class BufferList(nn.Module):
     def __iter__(self):
         return (self[i] for i in range(len(self)))
 
+    def __itruediv__(self, other):
+        """Divide each element in list with other"""
+        return self.__imul__(1.0 / other)
 
-def load_graph(graph_dir_path, device="cpu"):
+    def __imul__(self, other):
+        """Multiply each element in list with other"""
+        for buffer_tensor in self:
+            buffer_tensor *= other
+
+        return self
+
+
+def load_graph(graph_dir_path, datastore, device="cpu"):
     """Load all tensors representing the graph from `graph_dir_path`.
 
     Needs the following files for all graphs:
@@ -80,11 +91,12 @@ def load_graph(graph_dir_path, device="cpu"):
         - mesh_down_edge_index
         - g2m_features
         - m2g_features
-        - m2m_features
+        - m2m_node_features
         - mesh_up_features
         - mesh_down_features
         - mesh_static_features
 
+    Load all tensors representing the graph
     """
 
     def loads_file(fn):
@@ -94,12 +106,91 @@ def load_graph(graph_dir_path, device="cpu"):
             weights_only=True,
         )
 
+    # Need to reindex some edge index to start from 0
+    def reindex_func(edge_index):
+        """
+        Make both sender and receiver indices of edge_index start at 0
+        """
+        return edge_index - edge_index.min(dim=1, keepdim=True)[0]
+
+    # Load static node features
+    mesh_pos = loads_file(
+        "mesh_features.pt"
+    )  # List of (N_mesh[l], d_mesh_static)
+    # Static mesh features are normalized mesh node positions
+    mesh_pos_min = (
+        torch.stack(
+            [level_pos.min(dim=0).values for level_pos in mesh_pos], dim=0
+        )
+        .min(dim=0)
+        .values
+    )
+    mesh_pos_max = (
+        torch.stack(
+            [level_pos.max(dim=0).values for level_pos in mesh_pos], dim=0
+        )
+        .max(dim=0)
+        .values
+    )
+    mesh_static_features = [
+        (level_pos - mesh_pos_min) / (mesh_pos_max - mesh_pos_min)
+        for level_pos in mesh_pos
+    ]
+
     # Load edges (edge_index)
     m2m_edge_index = BufferList(
-        loads_file("m2m_edge_index.pt"), persistent=False
+        [reindex_func(ei) for ei in loads_file("m2m_edge_index.pt")],
+        persistent=False,
     )  # List of (2, M_m2m[l])
     g2m_edge_index = loads_file("g2m_edge_index.pt")  # (2, M_g2m)
     m2g_edge_index = loads_file("m2g_edge_index.pt")  # (2, M_m2g)
+
+    # Change first indices to 0
+    # m2g and g2m has to be handled specially as not all mesh nodes
+    # might be indexed
+    m2g_min_indices = m2g_edge_index.min(dim=1, keepdim=True)[0]
+
+    # Zero-index g2m and m2g edge_index
+    if m2g_min_indices[0] < m2g_min_indices[1]:
+        # mesh has the first indices
+        num_mesh_nodes = mesh_static_features[0].shape[0]
+
+        m2g_edge_index = torch.stack(
+            (
+                m2g_edge_index[0],
+                m2g_edge_index[1] - num_mesh_nodes,
+            ),
+            dim=0,
+        )
+        g2m_edge_index = torch.stack(
+            (
+                g2m_edge_index[0] - num_mesh_nodes,
+                g2m_edge_index[1],
+            ),
+            dim=0,
+        )
+    else:
+        # grid (interior) has the first indices
+        # NOTE: Below works, but would be good with a better way to get this
+        num_interior_nodes = m2g_edge_index[1].max() + 1
+        num_grid_nodes = g2m_edge_index[0].max() + 1
+
+        m2g_edge_index = torch.stack(
+            (
+                m2g_edge_index[0] - num_interior_nodes,
+                m2g_edge_index[1],
+            ),
+            dim=0,
+        )
+        g2m_edge_index = torch.stack(
+            (
+                g2m_edge_index[0],
+                g2m_edge_index[1] - num_grid_nodes,
+            ),
+            dim=0,
+        )
+    assert m2g_edge_index.min() >= 0, "Negative node index in m2g"
+    assert g2m_edge_index.min() >= 0, "Negative node index in g2m"
 
     n_levels = len(m2m_edge_index)
     hierarchical = n_levels > 1  # Nor just single level mesh graph
@@ -114,17 +205,11 @@ def load_graph(graph_dir_path, device="cpu"):
     longest_edge = max(
         torch.max(level_features[:, 0]) for level_features in m2m_features
     )  # Col. 0 is length
-    m2m_features = BufferList(
-        [level_features / longest_edge for level_features in m2m_features],
-        persistent=False,
-    )
+
+    m2m_features = BufferList(m2m_features, persistent=False)
+    m2m_features /= longest_edge
     g2m_features = g2m_features / longest_edge
     m2g_features = m2g_features / longest_edge
-
-    # Load static node features
-    mesh_static_features = loads_file(
-        "mesh_features.pt"
-    )  # List of (N_mesh[l], d_mesh_static)
 
     # Some checks for consistency
     assert (
@@ -134,13 +219,29 @@ def load_graph(graph_dir_path, device="cpu"):
         len(mesh_static_features) == n_levels
     ), "Inconsistent number of levels in mesh"
 
+    mesh_lat_lon = [
+        torch.tensor(
+            ccrs.PlateCarree().transform_points(
+                datastore.coords_projection,
+                mesh_coords[:, 0].numpy(),
+                mesh_coords[:, 1].numpy(),
+            )[
+                :, :2
+            ],  # Keep only 2d
+            dtype=torch.float32,
+        )
+        for mesh_coords in mesh_pos
+    ]
+
     if hierarchical:
         # Load up and down edges and features
         mesh_up_edge_index = BufferList(
-            loads_file("mesh_up_edge_index.pt"), persistent=False
+            [reindex_func(ei) for ei in loads_file("mesh_up_edge_index.pt")],
+            persistent=False,
         )  # List of (2, M_up[l])
         mesh_down_edge_index = BufferList(
-            loads_file("mesh_down_edge_index.pt"), persistent=False
+            [reindex_func(ei) for ei in loads_file("mesh_down_edge_index.pt")],
+            persistent=False,
         )  # List of (2, M_down[l])
 
         mesh_up_features = loads_file(
@@ -151,20 +252,10 @@ def load_graph(graph_dir_path, device="cpu"):
         )  # List of (M_down[l], d_edge_f)
 
         # Rescale
-        mesh_up_features = BufferList(
-            [
-                edge_features / longest_edge
-                for edge_features in mesh_up_features
-            ],
-            persistent=False,
-        )
-        mesh_down_features = BufferList(
-            [
-                edge_features / longest_edge
-                for edge_features in mesh_down_features
-            ],
-            persistent=False,
-        )
+        mesh_up_features = BufferList(mesh_up_features, persistent=False)
+        mesh_up_features /= longest_edge
+        mesh_down_features = BufferList(mesh_down_features, persistent=False)
+        mesh_down_features /= longest_edge
 
         mesh_static_features = BufferList(
             mesh_static_features, persistent=False
@@ -194,6 +285,7 @@ def load_graph(graph_dir_path, device="cpu"):
         "mesh_up_features": mesh_up_features,
         "mesh_down_features": mesh_down_features,
         "mesh_static_features": mesh_static_features,
+        "mesh_lat_lon": mesh_lat_lon,
     }
 
 
@@ -288,7 +380,7 @@ def setup_training_logger(datastore, args, run_name):
     """
 
     if args.logger == "wandb":
-        logger = pl.loggers.WandbLogger(
+        logger = CustomWandbLogger(
             project=args.logger_project,
             name=run_name,
             config=dict(training=vars(args), datastore=datastore._config),

@@ -3,14 +3,14 @@ import copy
 import warnings
 from functools import cached_property
 from pathlib import Path
-from typing import List
+from typing import List, Union
 
 # Third-party
 import cartopy.crs as ccrs
 import mllam_data_prep as mdp
+import numpy as np
 import xarray as xr
 from loguru import logger
-from numpy import ndarray
 
 # Local
 from ..utils import rank_zero_print
@@ -28,11 +28,10 @@ class MDPDatastore(BaseRegularGridDatastore):
 
     SHORT_NAME = "mdp"
 
-    def __init__(self, config_path, n_boundary_points=30, reuse_existing=True):
+    def __init__(self, config_path, reuse_existing=True):
         """
         Construct a new MDPDatastore from the configuration file at
-        `config_path`. A boundary mask is created with `n_boundary_points`
-        boundary points. If `reuse_existing` is True, the dataset is loaded
+        `config_path`. If `reuse_existing` is True, the dataset is loaded
         from a zarr file if it exists (unless the config has been modified
         since the zarr was created), otherwise it is created from the
         configuration file.
@@ -43,8 +42,6 @@ class MDPDatastore(BaseRegularGridDatastore):
             The path to the configuration file, this will be fed to the
             `mllam_data_prep.Config.from_yaml_file` method to then call
             `mllam_data_prep.create_dataset` to create the dataset.
-        n_boundary_points : int
-            The number of boundary points to use in the boundary mask.
         reuse_existing : bool
             Whether to reuse an existing dataset zarr file if it exists and its
             creation date is newer than the configuration file.
@@ -71,7 +68,6 @@ class MDPDatastore(BaseRegularGridDatastore):
         if self._ds is None:
             self._ds = mdp.create_dataset(config=self._config)
             self._ds.to_zarr(fp_ds)
-        self._n_boundary_points = n_boundary_points
 
         rank_zero_print("The loaded datastore contains the following features:")
         for category in ["state", "forcing", "static", "mask"]:
@@ -160,8 +156,8 @@ class MDPDatastore(BaseRegularGridDatastore):
             The units of the variables in the given category.
 
         """
-        if category not in self._ds and category == "forcing":
-            warnings.warn("no forcing data found in datastore")
+        if category not in self._ds:
+            warnings.warn(f"no {category} data found in datastore")
             return []
         return self._ds[f"{category}_feature_units"].values.tolist()
 
@@ -179,8 +175,8 @@ class MDPDatastore(BaseRegularGridDatastore):
             The names of the variables in the given category.
 
         """
-        if category not in self._ds and category == "forcing":
-            warnings.warn("no forcing data found in datastore")
+        if category not in self._ds:
+            warnings.warn(f"no {category} data found in datastore")
             return []
         return self._ds[f"{category}_feature"].values.tolist()
 
@@ -199,8 +195,8 @@ class MDPDatastore(BaseRegularGridDatastore):
             The long names of the variables in the given category.
 
         """
-        if category not in self._ds and category == "forcing":
-            warnings.warn("no forcing data found in datastore")
+        if category not in self._ds:
+            warnings.warn(f"no {category} data found in datastore")
             return []
         return self._ds[f"{category}_feature_long_name"].values.tolist()
 
@@ -222,13 +218,12 @@ class MDPDatastore(BaseRegularGridDatastore):
 
     def get_dataarray(
         self, category: str, split: str, standardize: bool = False
-    ) -> xr.DataArray:
+    ) -> Union[xr.DataArray, None]:
         """
         Return the processed data (as a single `xr.DataArray`) for the given
         category of data and test/train/val-split that covers all the data (in
-        space and time) of a given category (state/forcing/static). "state" is
-        the only required category, for other categories, the method will
-        return `None` if the category is not found in the datastore.
+        space and time) of a given category (state/forcing/static). The method
+        will return `None` if the category is not found in the datastore.
 
         The returned dataarray will at minimum have dimensions of `(grid_index,
         {category}_feature)` so that any spatial dimensions have been stacked
@@ -259,16 +254,10 @@ class MDPDatastore(BaseRegularGridDatastore):
             The xarray DataArray object with processed dataset.
 
         """
-        if category not in self._ds and category == "forcing":
-            warnings.warn("no forcing data found in datastore")
-            return None
+        if category not in self._ds:
+            warnings.warn(f"no {category} data found in datastore")
 
         da_category = self._ds[category]
-
-        # set units on x y coordinates if missing
-        # for coord in ["x", "y"]:
-        #     if "units" not in da_category[coord].attrs:
-        #         da_category[coord].attrs["units"] = "m"
 
         # set multi-index for grid-index
         da_category = da_category.set_index(grid_index=self.CARTESIAN_COORDS)
@@ -340,51 +329,6 @@ class MDPDatastore(BaseRegularGridDatastore):
 
         return ds_stats
 
-    @cached_property
-    def boundary_mask(self) -> xr.DataArray:
-        """
-        Produce a 0/1 mask for the boundary points of the dataset, these will
-        sit at the edges of the domain (in x/y extent) and will be used to mask
-        out the boundary points from the loss function and to overwrite the
-        boundary points from the prediction. For now this is created when the
-        mask is requested, but in the future this could be saved to the zarr
-        file.
-
-        Returns
-        -------
-        xr.DataArray
-            A 0/1 mask for the boundary points of the dataset, where 1 is a
-            boundary point and 0 is not.
-
-        """
-        da_mask = self.unstack_grid_coords(self._ds["mask"])
-        land_mask = da_mask == 0  # (N_lat, N_lon, d_features)
-
-        lat = land_mask["latitude"]
-        lon = land_mask["longitude"]
-        d_features = land_mask["mask_feature"]
-
-        # Broadcast lon to match all features
-        lat2d, lon2d = xr.broadcast(lat, lon)
-        lat3d = lat2d.expand_dims(mask_feature=d_features)
-        lon3d = lon2d.expand_dims(mask_feature=d_features)
-
-        # Only set to 1 where original mask is 1 and lon < 10
-        boundary_mask = xr.where((lon3d < 10.0) & (lat3d > 57.1), 1, land_mask)
-
-        # Make sure mask variable order matches that of state
-        boundary_mask = boundary_mask.sel(
-            mask_feature=self.get_vars_names("state")
-        )
-
-        # Ensure type and dims
-        boundary_mask = boundary_mask.astype(int)
-        boundary_mask = boundary_mask.transpose(
-            "latitude", "longitude", "mask_feature"
-        )
-
-        return self.stack_grid_coords(boundary_mask)
-
     @property
     def coords_projection(self) -> ccrs.Projection:
         """
@@ -455,8 +399,9 @@ class MDPDatastore(BaseRegularGridDatastore):
         assert da_x.ndim == da_y.ndim == 1
         return CartesianGridShape(x=da_x.size, y=da_y.size)
 
-    def get_xy(self, category: str, stacked: bool) -> ndarray:
+    def get_xy(self, category: str, stacked: bool) -> np.ndarray:
         """Return the x, y coordinates of the dataset.
+        Here x and y are given in longitude and latitude.
 
         Parameters
         ----------
@@ -501,7 +446,53 @@ class MDPDatastore(BaseRegularGridDatastore):
 
         return da_xy.values
 
-    def get_mask(self, surface: bool, stacked: bool, invert: bool) -> ndarray:
+    def get_projected_xy(self, category: str, stacked: bool) -> np.ndarray:
+        """
+        Return the projected x, y coordinates of the dataset as numpy
+        array for a given category of data.
+
+        Parameters
+        ----------
+        category : str
+            The category of the dataset (state/forcing/static).
+        stacked : bool
+            Whether to stack the x, y coordinates.
+
+        Returns
+        -------
+        np.ndarray
+            The projected x, y coordinates of the dataset, returned
+            differently based on the value of `stacked`:
+            - `stacked==True`: shape `(n_grid_points, 2)` where
+                               n_grid_points=N_x*N_y.
+            - `stacked==False`: shape `(N_x, N_y, 2)`
+        """
+        xy = self.get_xy(category=category, stacked=False)  # (N_x, N_y, 2)
+        lon = xy[:, :, 0]
+        lat = xy[:, :, 1]
+
+        # Transform lon/lat using given projection
+        point_grid = self.coords_projection.transform_points(
+            ccrs.PlateCarree(),
+            lon,
+            lat,
+        )
+        x_proj = point_grid[:, :, 0]
+        y_proj = point_grid[:, :, 1]
+
+        projected_xy = np.stack([x_proj, y_proj], axis=2)  # (N_x, N_y, 2)
+
+        if stacked:
+            n_x, n_y, n_coords = projected_xy.shape
+            projected_xy = projected_xy.reshape(
+                n_x * n_y, n_coords
+            )  # (N_x*N_y, 2)
+
+        return projected_xy
+
+    def get_mask(
+        self, surface: bool, stacked: bool, invert: bool
+    ) -> np.ndarray:
         """
         Return the mask of the dataset.
 
@@ -519,15 +510,25 @@ class MDPDatastore(BaseRegularGridDatastore):
         np.ndarray
             The dataset mask, returned differently based on
             the values of `surface` and `stacked`:
-            - `surface=True`, `stacked=True`: (N_lat*N_lon,)
-            - `surface=True`, `stacked=False`: (N_lat, N_lon)
-            - `surface=False`, `stacked=True`: (N_lat*N_lon, d_features)
-            - `surface=False`, `stacked=False`: (N_lat, N_lon, d_features)
+            - `surface=True`, `stacked=True`: (N_lon*N_lon,)
+            - `surface=True`, `stacked=False`: (N_lon, N_lat)
+            - `surface=False`, `stacked=True`: (N_lon*N_lat, d_features)
+            - `surface=False`, `stacked=False`: (N_lon, N_lat, d_features)
         """
         da_mask = self._ds["mask"]
 
         # make sure mask_feature order matches
-        da_mask = da_mask.sel(mask_feature=self.get_vars_names("state"))
+        if "state" in self._ds:
+            ref_category = "state"
+        elif "forcing" in self._ds:
+            ref_category = "forcing"
+        else:
+            raise ValueError("Neither state nor forcing found in dataset")
+
+        ref_features = self.get_vars_names(ref_category)
+        mask_features = self.get_vars_names("mask")
+        assert set(ref_features) == set(mask_features), "features must match"
+        da_mask = da_mask.sel(mask_feature=ref_features)
 
         if stacked:
             if surface:
@@ -541,14 +542,51 @@ class MDPDatastore(BaseRegularGridDatastore):
             # select surface
             if surface:
                 da_mask = da_mask.isel(mask_feature=0).transpose(
-                    "latitude", "longitude"
+                    "longitude", "latitude"
                 )
             else:
                 da_mask = da_mask.transpose(
-                    "latitude", "longitude", "mask_feature"
+                    "longitude", "latitude", "mask_feature"
                 )
 
         if invert:
             da_mask = da_mask == 0
 
         return da_mask.values.astype(bool)
+
+    def get_atmosphere_mask(
+        self, stacked: bool = True, invert: bool = False
+    ) -> np.ndarray:
+        """
+        Return the atmosphere mask.
+
+        Parameters
+        ----------
+        stacked : bool
+            Whether to stack the lat, lon coordinates.
+        invert : bool
+            Whether to invert the mask.
+
+        Returns
+        -------
+        np.ndarray
+            The dataset mask, returned differently based on
+            the value of `stacked`:
+            - `stacked=True`: (N_lon*N_lat,)
+            - `stacked=False`: (N_lon, N_lat)
+        """
+        da_mask = self._ds["mask"]
+        da_mask = da_mask.sel(mask_feature="mask")
+
+        if stacked:
+            # already has grid_index dimension, return (N_grid,)
+            mask_arr = da_mask
+        else:
+            # unstack to (lat, lon)
+            mask_arr = self.unstack_grid_coords(da_mask)
+            mask_arr = mask_arr.transpose("longitude", "latitude")
+
+        if invert:
+            mask_arr = mask_arr == 0
+
+        return mask_arr.values.astype(bool)

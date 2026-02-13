@@ -1,3 +1,6 @@
+# Standard library
+from typing import Union
+
 # Third-party
 from torch import nn
 
@@ -15,8 +18,21 @@ class GraphFM(BaseHiGraphModel):
     and up the hierarchy during processing.
     """
 
-    def __init__(self, args, config: NeuralLAMConfig, datastore: BaseDatastore):
-        super().__init__(args, config=config, datastore=datastore)
+    def __init__(
+        self,
+        args,
+        config: NeuralLAMConfig,
+        datastore: BaseDatastore,
+        datastore_boundary: Union[BaseDatastore, None],
+        datastore_atmosphere: Union[BaseDatastore, None],
+    ):
+        super().__init__(
+            args,
+            config=config,
+            datastore=datastore,
+            datastore_boundary=datastore_boundary,
+            datastore_atmosphere=datastore_atmosphere,
+        )
 
         # Make down GNNs, both for down edges and same level
         self.mesh_down_gnns = nn.ModuleList(

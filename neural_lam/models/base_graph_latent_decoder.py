@@ -13,8 +13,9 @@ class BaseGraphLatentDecoder(nn.Module):
     def __init__(
         self,
         hidden_dim,
+        hidden_dim_grid,
         latent_dim,
-        grid_output_dim,
+        output_dim,
         hidden_layers=1,
         output_std=True,
     ):
@@ -22,7 +23,7 @@ class BaseGraphLatentDecoder(nn.Module):
 
         # MLP for residual mapping of grid rep.
         self.grid_update_mlp = utils.make_mlp(
-            [hidden_dim] * (hidden_layers + 2)
+            [hidden_dim_grid] * (hidden_layers + 2)
         )
 
         # Embedder for latent variable
@@ -34,13 +35,12 @@ class BaseGraphLatentDecoder(nn.Module):
         # use common per-variable std
         self.output_std = output_std
         if self.output_std:
-            output_dim = 2 * grid_output_dim
-        else:
-            output_dim = grid_output_dim
+            output_dim = 2 * output_dim
 
         # Mapping to parameters of state distribution
         self.param_map = utils.make_mlp(
-            [hidden_dim] * (hidden_layers + 1) + [output_dim], layer_norm=False
+            [hidden_dim_grid] * (hidden_layers + 1) + [output_dim],
+            layer_norm=False,
         )
 
     def combine_with_latent(
@@ -59,7 +59,9 @@ class BaseGraphLatentDecoder(nn.Module):
         """
         raise NotImplementedError("combine_with_latent not implemented")
 
-    def forward(self, grid_rep, latent_samples, last_state, graph_emb):
+    def forward(
+        self, grid_rep, grid_rep_interior, latent_samples, last_state, graph_emb
+    ):
         """
         Compute prediction (mean and std.-dev.) of next weather state
 
@@ -75,12 +77,13 @@ class BaseGraphLatentDecoder(nn.Module):
         mean: (B, N_mesh, d_latent), predicted mean
         std: (B, N_mesh, d_latent), predicted std.-dev.
         """
+
         # To mesh
         latent_emb = self.latent_embedder(latent_samples)  # (B, N_mesh, d_h)
 
         # Resiudal MLP for grid representation
-        residual_grid_rep = grid_rep + self.grid_update_mlp(
-            grid_rep
+        residual_grid_rep = grid_rep_interior + self.grid_update_mlp(
+            grid_rep_interior
         )  # (B, num_grid_nodes, d_h)
 
         combined_grid_rep = self.combine_with_latent(
@@ -101,6 +104,7 @@ class BaseGraphLatentDecoder(nn.Module):
             mean_delta = state_params  # (B, num_grid_nodes, d_state)
             pred_std = None
 
+        # TODO: This should be wrapped in --pred_residual
         pred_mean = last_state + mean_delta
 
         return pred_mean, pred_std

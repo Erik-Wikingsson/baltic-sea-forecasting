@@ -21,7 +21,11 @@ class WeatherDataset(torch.utils.data.Dataset):
     Parameters
     ----------
     datastore : BaseDatastore
-        The datastore to load the data from (e.g. mdp).
+        The datastore to load the data from.
+    datastore_boundary : BaseDatastore
+        The boundary datastore to load the data from.
+    datastore_atmosphere : BaseDatastore
+        The atmosphere datastore to load the data from.
     split : str, optional
         The data split to use ("train", "val" or "test"). Default is "train".
     ar_steps : int, optional
@@ -36,6 +40,16 @@ class WeatherDataset(torch.utils.data.Dataset):
         forcing from times t, t+1, ..., t+j-1, t+j (and potentially times before
         t, given num_past_forcing_steps) are included as forcing inputs at time
         t. Default is 1.
+    num_past_boundary_steps: int, optional
+        Number of past time steps to include in boundary input. If set to i,
+        boundary from times t-i, t-i+1, ..., t-1, t (and potentially beyond,
+        given num_future_boundary_steps) are included as boundary inputs at time
+        t Default is 1.
+    num_future_boundary_steps: int, optional
+        Number of future time steps to include in boundary input. If set to j,
+        boundary from times t, t+1, ..., t+j-1, t+j (and potentially times
+        before t, given num_past_boundary_steps) are included as boundary inputs
+        at time t. Default is 1.
     standardize : bool, optional
         Whether to standardize the data. Default is True.
     """
@@ -43,37 +57,90 @@ class WeatherDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         datastore: BaseDatastore,
+        datastore_boundary: BaseDatastore,
+        datastore_atmosphere: BaseDatastore,
         split="train",
         ar_steps=1,
         num_past_forcing_steps=1,
         num_future_forcing_steps=1,
+        num_past_boundary_steps=1,
+        num_future_boundary_steps=1,
+        num_past_atmosphere_steps=1,
+        num_future_atmosphere_steps=1,
         standardize=True,
+        use_atmosphere_g2m=False,
     ):
         super().__init__()
 
         self.split = split
         self.ar_steps = ar_steps
         self.datastore = datastore
+        self.datastore_boundary = datastore_boundary
+        self.datastore_atmosphere = datastore_atmosphere
         self.num_past_forcing_steps = num_past_forcing_steps
         self.num_future_forcing_steps = num_future_forcing_steps
+        self.num_past_boundary_steps = num_past_boundary_steps
+        self.num_future_boundary_steps = num_future_boundary_steps
+        self.num_past_atmosphere_steps = num_past_atmosphere_steps
+        self.num_future_atmosphere_steps = num_future_atmosphere_steps
+        self.use_atmosphere_g2m = use_atmosphere_g2m
 
         self.da_state = self.datastore.get_dataarray(
             category="state", split=self.split
         )
+        if self.da_state is None:
+            raise ValueError("A non-empty state dataarray must be provided.")
         self.da_forcing = self.datastore.get_dataarray(
             category="forcing", split=self.split
         )
+        if self.datastore_boundary is not None:
+            self.da_boundary_forcing = self.datastore_boundary.get_dataarray(
+                category="forcing", split=self.split
+            )
+        else:
+            self.da_boundary_forcing = None
+        if self.datastore_atmosphere is not None:
+            self.da_atmosphere_forcing = (
+                self.datastore_atmosphere.get_dataarray(
+                    category="forcing", split=self.split
+                )
+            )
+        else:
+            self.da_atmosphere_forcing = None
         self.surface_mask = self.datastore.get_mask(
             surface=True, stacked=True, invert=False
-        )  # (N_lat*N_lon)
+        )  # (N_lon*N_lat)
         self.land_mask = self.datastore.get_mask(
             surface=False, stacked=True, invert=True
-        )  # (N_lat*N_lon, d_features)
+        )  # (N_lon*N_lat, d_features)
         self.land_mask_bool = self.datastore.get_mask(
             surface=False, stacked=True, invert=True
         )[self.surface_mask][np.newaxis, ...].astype(
             bool
         )  # (1, N_grid, d_features)
+        if self.datastore_boundary is not None:
+            self.surface_mask_boundary = self.datastore_boundary.get_mask(
+                surface=True, stacked=True, invert=False
+            )  # (N_lon_boundary*N_lat_boundary)
+            land_mask_boundary = self.datastore_boundary.get_mask(
+                surface=False, stacked=True, invert=True
+            )  # (N_lon_boundary*N_lat_boundary, d_features)
+            self.land_mask_bool_boundary = land_mask_boundary[
+                self.surface_mask_boundary
+            ][np.newaxis, ...].astype(
+                bool
+            )  # (1, N_boundary_grid, d_features)
+        else:
+            self.surface_mask_boundary = None
+            self.land_mask_bool_boundary = None
+        if self.use_atmosphere_g2m:
+            self.mask_atmosphere = (
+                self.datastore_atmosphere.get_atmosphere_mask(
+                    stacked=True, invert=False
+                )
+            )  # (N_lon_atmosphere*N_lat_atmosphere)
+        else:
+            self.mask_atmosphere = None
 
         # check that with the provided data-arrays and ar_steps that we have a
         # non-zero amount of samples
@@ -124,6 +191,24 @@ class WeatherDataset(torch.utils.data.Dataset):
                 )
                 self.da_forcing_mean = self.ds_forcing_stats.forcing_mean
                 self.da_forcing_std = self.ds_forcing_stats.forcing_std
+
+            if self.da_boundary_forcing is not None:
+                self.ds_boundary_stats = (
+                    self.datastore_boundary.get_standardization_dataarray(
+                        category="forcing"
+                    )
+                )
+                self.da_boundary_mean = self.ds_boundary_stats.forcing_mean
+                self.da_boundary_std = self.ds_boundary_stats.forcing_std
+
+            if self.da_atmosphere_forcing is not None:
+                self.ds_atmosphere_stats = (
+                    self.datastore_atmosphere.get_standardization_dataarray(
+                        category="forcing"
+                    )
+                )
+                self.da_atmosphere_mean = self.ds_atmosphere_stats.forcing_mean
+                self.da_atmosphere_std = self.ds_atmosphere_stats.forcing_std
 
     def __len__(self):
         if self.datastore.is_forecast:
@@ -233,13 +318,20 @@ class WeatherDataset(torch.utils.data.Dataset):
             da_sliced = da_state.isel(time=slice(start_idx, end_idx))
         return da_sliced
 
-    def _slice_forcing_time(self, da_forcing, idx, n_steps: int):
+    def _slice_forcing_time(
+        self,
+        da_forcing,
+        idx,
+        n_steps: int,
+        num_past_steps=None,
+        num_future_steps=None,
+    ):
         """
         Produce a time slice of the given dataarray `da_forcing` (forcing)
         starting at `idx` and with `n_steps` steps. An `offset` is calculated
-        based on the `num_past_forcing_steps` class attribute. It is used to
-        offset the start of the sample, to ensure that enough previous time
-        steps are available for the forcing data. The forcing data is windowed
+        based on the `num_past_steps` parameter. It is used to offset the
+        start of the sample, to ensure that enough previous time steps
+        are available for the forcing data. The forcing data is windowed
         around the current autoregressive time step to include the past and
         future forcings.
 
@@ -254,6 +346,12 @@ class WeatherDataset(torch.utils.data.Dataset):
             The index of the time step to start the sample from.
         n_steps : int
             The number of time steps to include in the sample.
+        num_past_steps : int, optional
+            Number of past time steps to include in the window. If None, uses
+            `self.num_past_forcing_steps`.
+        num_future_steps : int, optional
+            Number of future time steps to include in the window. If None, uses
+            `self.num_future_forcing_steps`.
 
         Returns
         -------
@@ -261,6 +359,12 @@ class WeatherDataset(torch.utils.data.Dataset):
             The sliced dataarray with dims ('time', 'grid_index',
             'window', 'forcing_feature').
         """
+        # Use default forcing steps if not provided
+        if num_past_steps is None:
+            num_past_steps = self.num_past_forcing_steps
+        if num_future_steps is None:
+            num_future_steps = self.num_future_forcing_steps
+
         # The current implementation requires at least 2 time steps for the
         # initial state (see GraphCast). The forcing data is windowed around the
         # current autregressive time step. The two `init_steps` can also be used
@@ -275,10 +379,10 @@ class WeatherDataset(torch.utils.data.Dataset):
             # times (given no offset). Note that this means that we get one
             # sample per forecast.
             # Add a 'time' dimension using the actual forecast times
-            offset = max(init_steps, self.num_past_forcing_steps)
+            offset = max(init_steps, num_past_steps)
             for step in range(n_steps):
-                start_idx = offset + step - self.num_past_forcing_steps
-                end_idx = offset + step + self.num_future_forcing_steps
+                start_idx = offset + step - num_past_steps
+                end_idx = offset + step + num_future_steps
 
                 current_time = (
                     da_forcing.analysis_time[idx]
@@ -312,10 +416,10 @@ class WeatherDataset(torch.utils.data.Dataset):
             # For analysis data, we slice the time dimension directly. The
             # offset is only relevant for the very first (and last) samples in
             # the dataset.
-            offset = idx + max(init_steps, self.num_past_forcing_steps)
+            offset = idx + max(init_steps, num_past_steps)
             for step in range(n_steps):
-                start_idx = offset + step - self.num_past_forcing_steps
-                end_idx = offset + step + self.num_future_forcing_steps
+                start_idx = offset + step - num_past_steps
+                end_idx = offset + step + num_future_steps
 
                 # Slice the data over the desired time window
                 da_sliced = da_forcing.isel(time=slice(start_idx, end_idx + 1))
@@ -341,10 +445,54 @@ class WeatherDataset(torch.utils.data.Dataset):
 
         return da_concat
 
+    def _process_windowed_data(
+        self,
+        da_windowed,
+        da_state,
+        da_target_times,
+    ):
+        """Helper function to process windowed data. This function stacks the
+        'forcing_feature' and 'window' dimensions.
+
+        Parameters
+        ----------
+        da_windowed : xr.DataArray
+            The windowed data to process. Can be `None` if no data is provided.
+        da_state : xr.DataArray
+            The state dataarray.
+        da_target_times : xr.DataArray
+            The target times.
+
+        Returns
+        -------
+        da_windowed : xr.DataArray
+            The processed windowed data. If `da_windowed` is `None`, an empty
+            DataArray with the correct dimensions and coordinates is returned.
+
+        """
+        stacked_dim = "forcing_feature_windowed"
+        if da_windowed is not None:
+            # Stack the 'feature' and 'window' dimensions
+            da_windowed = da_windowed.stack(
+                {stacked_dim: ("forcing_feature", "window")}
+            )
+        else:
+            # Create empty DataArray with the correct dimensions and coordinates
+            da_windowed = xr.DataArray(
+                data=np.empty((self.ar_steps, da_state.grid_index.size, 0)),
+                dims=("time", "grid_index", f"{stacked_dim}"),
+                coords={
+                    "time": da_target_times,
+                    "grid_index": da_state.grid_index,
+                    f"{stacked_dim}": [],
+                },
+            )
+        return da_windowed
+
     def _build_item_dataarrays(self, idx):
         """
-        Create the dataarrays for the initial states, target states and forcing
-        data for the sample at index `idx`.
+        Create the dataarrays for the initial states, target states, forcing,
+        boundary and atmosphere data for the sample at index `idx`.
 
         Parameters
         ----------
@@ -359,6 +507,10 @@ class WeatherDataset(torch.utils.data.Dataset):
             The dataarray for the target states.
         da_forcing_windowed : xr.DataArray
             The dataarray for the forcing data, windowed for the sample.
+        da_boundary_windowed : xr.DataArray
+            The dataarray for the boundary data, windowed for the sample.
+        da_atmosphere_windowed : xr.DataArray
+            The dataarray for the atmosphere data, windowed for the sample.
         da_target_times : xr.DataArray
             The dataarray for the target times.
         """
@@ -388,6 +540,16 @@ class WeatherDataset(torch.utils.data.Dataset):
         else:
             da_forcing = None
 
+        if self.da_boundary_forcing is not None:
+            da_boundary = self.da_boundary_forcing
+        else:
+            da_boundary = None
+
+        if self.da_atmosphere_forcing is not None:
+            da_atmosphere = self.da_atmosphere_forcing
+        else:
+            da_atmosphere = None
+
         # handle time sampling in a way that is compatible with both analysis
         # and forecast data
         da_state = self._slice_state_time(
@@ -397,11 +559,37 @@ class WeatherDataset(torch.utils.data.Dataset):
             da_forcing_windowed = self._slice_forcing_time(
                 da_forcing=da_forcing, idx=idx, n_steps=self.ar_steps
             )
+        else:
+            da_forcing_windowed = None
+        if da_boundary is not None:
+            da_boundary_windowed = self._slice_forcing_time(
+                da_forcing=da_boundary,
+                idx=idx,
+                n_steps=self.ar_steps,
+                num_past_steps=self.num_past_boundary_steps,
+                num_future_steps=self.num_future_boundary_steps,
+            )
+        else:
+            da_boundary_windowed = None
+        if da_atmosphere is not None:
+            da_atmosphere_windowed = self._slice_forcing_time(
+                da_forcing=da_atmosphere,
+                idx=idx,
+                n_steps=self.ar_steps,
+                num_past_steps=self.num_past_atmosphere_steps,
+                num_future_steps=self.num_future_atmosphere_steps,
+            )
+        else:
+            da_atmosphere_windowed = None
 
         # load the data into memory
         da_state.load()
         if da_forcing is not None:
             da_forcing_windowed.load()
+        if da_boundary is not None:
+            da_boundary_windowed.load()
+        if da_atmosphere is not None:
+            da_atmosphere_windowed.load()
 
         da_init_states = da_state.isel(time=slice(0, 2))
         da_target_states = da_state.isel(time=slice(2, None))
@@ -424,30 +612,39 @@ class WeatherDataset(torch.utils.data.Dataset):
                     da_forcing_windowed - self.da_forcing_mean
                 ) / self.da_forcing_std
 
-        if da_forcing is not None:
-            # stack the `forcing_feature` and `window_sample` dimensions into a
-            # single `forcing_feature` dimension
-            da_forcing_windowed = da_forcing_windowed.stack(
-                forcing_feature_windowed=("forcing_feature", "window")
-            )
-        else:
-            # create an empty forcing tensor with the right shape
-            da_forcing_windowed = xr.DataArray(
-                data=np.empty(
-                    (self.ar_steps, da_state.grid_index.size, 0),
-                ),
-                dims=("time", "grid_index", "forcing_feature"),
-                coords={
-                    "time": da_target_times,
-                    "grid_index": da_state.grid_index,
-                    "forcing_feature": [],
-                },
-            )
+            if da_boundary is not None:
+                da_boundary_windowed = (
+                    da_boundary_windowed - self.da_boundary_mean
+                ) / self.da_boundary_std
+
+            if da_atmosphere is not None:
+                da_atmosphere_windowed = (
+                    da_atmosphere_windowed - self.da_atmosphere_mean
+                ) / self.da_atmosphere_std
+
+        # stack the `forcing_feature` and `window` dimensions
+        da_forcing_windowed = self._process_windowed_data(
+            da_forcing_windowed,
+            da_state,
+            da_target_times,
+        )
+        da_boundary_windowed = self._process_windowed_data(
+            da_boundary_windowed,
+            da_state,
+            da_target_times,
+        )
+        da_atmosphere_windowed = self._process_windowed_data(
+            da_atmosphere_windowed,
+            da_state,
+            da_target_times,
+        )
 
         return (
             da_init_states,
             da_target_states,
             da_forcing_windowed,
+            da_boundary_windowed,
+            da_atmosphere_windowed,
             da_target_times,
         )
 
@@ -482,6 +679,8 @@ class WeatherDataset(torch.utils.data.Dataset):
             da_init_states,
             da_target_states,
             da_forcing_windowed,
+            da_boundary_windowed,
+            da_atmosphere_windowed,
             da_target_times,
         ) = self._build_item_dataarrays(idx=idx)
 
@@ -498,11 +697,22 @@ class WeatherDataset(torch.utils.data.Dataset):
         )
 
         forcing = torch.tensor(da_forcing_windowed.values, dtype=tensor_dtype)
+        boundary = torch.tensor(da_boundary_windowed.values, dtype=tensor_dtype)
+        atmosphere = torch.tensor(
+            da_atmosphere_windowed.values, dtype=tensor_dtype
+        )
 
-        # mask to surface grid (N_lat*N_lon -> N_grid)
+        # mask to surface grid (N_lon*N_lat -> N_grid)
         init_states = init_states[:, self.surface_mask, :]
         target_states = target_states[:, self.surface_mask, :]
         forcing = forcing[:, self.surface_mask, :]
+        if self.surface_mask_boundary is not None:
+            boundary = boundary[:, self.surface_mask_boundary, :]
+        if self.use_atmosphere_g2m:
+            atmosphere = atmosphere[:, self.mask_atmosphere, :]
+        else:
+            # Same grid as interior (exact same grid size)
+            atmosphere = atmosphere[:, self.surface_mask, :]
 
         # convert land from nan to zero
         init_states = torch.where(
@@ -516,12 +726,47 @@ class WeatherDataset(torch.utils.data.Dataset):
             target_states,
         )
 
+        # convert boundary land regions to zero
+        if self.datastore_boundary is not None:
+            land_mask_bool_boundary_tensor = torch.tensor(
+                self.land_mask_bool_boundary, dtype=torch.bool
+            )  # (1, N_boundary_grid, d_features)
+            # repeat mask num_windows (num_past + num_future + 1) times
+            # -> (1, N_boundary_grid, d_features * num_windows)
+            num_windows = (
+                self.num_past_boundary_steps
+                + self.num_future_boundary_steps
+                + 1
+            )
+            # intereleaved repeat along feature dimension to match windowing
+            # stacked as: (feature_0, window_0), (feature_0, window_1), ...,
+            # (feature_1, window_0), (feature_1, window_1), ...
+            land_mask_bool_boundary_tensor = (
+                land_mask_bool_boundary_tensor.repeat_interleave(
+                    num_windows, dim=2
+                )
+            )
+            boundary = torch.where(
+                land_mask_bool_boundary_tensor,
+                torch.tensor(0.0, dtype=tensor_dtype),
+                boundary,
+            )
+
         # init_states: (2, N_grid, d_features)
         # target_states: (ar_steps, N_grid, d_features)
         # forcing: (ar_steps, N_grid, d_windowed_forcing)
+        # boundary: (ar_steps, N_boundary_grid, d_windowed_boundary)
+        # atmosphere: (ar_steps, N_atmosphere_grid, d_windowed_atmosphere)
         # target_times: (ar_steps,)
 
-        return init_states, target_states, forcing, target_times
+        return (
+            init_states,
+            target_states,
+            forcing,
+            boundary,
+            atmosphere,
+            target_times,
+        )
 
     def __iter__(self):
         """
@@ -546,7 +791,7 @@ class WeatherDataset(torch.utils.data.Dataset):
         and number of times provided and add the x/y coordinates from the
         datastore.
 
-        The number if times provided is expected to match the shape of the
+        The number of times provided is expected to match the shape of the
         tensor. For a 2D tensor, the dimensions are assumed to be (grid_index,
         {category}_feature) and only a single time should be provided. For a 3D
         tensor, the dimensions are assumed to be (time, grid_index,
@@ -620,7 +865,7 @@ class WeatherDataset(torch.utils.data.Dataset):
                 self.land_mask[np.newaxis, ...], np.nan, full_array
             )
         else:
-            full_array = np.zeros(self.full_mask.shape)
+            full_array = np.zeros((d_full_grid, d_features))
             full_array[self.surface_mask, :] = array
             full_array = np.where(self.land_mask, np.nan, full_array)
 
@@ -649,18 +894,32 @@ class WeatherDataModule(pl.LightningDataModule):
     def __init__(
         self,
         datastore: BaseDatastore,
+        datastore_boundary: BaseDatastore,
+        datastore_atmosphere: BaseDatastore,
         ar_steps_train=3,
         ar_steps_eval=25,
         standardize=True,
         num_past_forcing_steps=1,
         num_future_forcing_steps=1,
+        num_past_boundary_steps=1,
+        num_future_boundary_steps=1,
+        num_past_atmosphere_steps=1,
+        num_future_atmosphere_steps=1,
         batch_size=4,
         num_workers=16,
+        use_atmosphere_g2m=False,
     ):
         super().__init__()
         self._datastore = datastore
+        self._datastore_boundary = datastore_boundary
+        self._datastore_atmosphere = datastore_atmosphere
+        self.use_atmosphere_g2m = use_atmosphere_g2m
         self.num_past_forcing_steps = num_past_forcing_steps
         self.num_future_forcing_steps = num_future_forcing_steps
+        self.num_past_boundary_steps = num_past_boundary_steps
+        self.num_future_boundary_steps = num_future_boundary_steps
+        self.num_past_atmosphere_steps = num_past_atmosphere_steps
+        self.num_future_atmosphere_steps = num_future_atmosphere_steps
         self.ar_steps_train = ar_steps_train
         self.ar_steps_eval = ar_steps_eval
         self.standardize = standardize
@@ -671,7 +930,7 @@ class WeatherDataModule(pl.LightningDataModule):
         self.test_dataset = None
         if num_workers > 0:
             # default to spawn for now, as the default on linux "fork" hangs
-            # when using dask (which the npyfilesmeps datastore uses)
+            # when using dask
             self.multiprocessing_context = "spawn"
         else:
             self.multiprocessing_context = None
@@ -680,29 +939,50 @@ class WeatherDataModule(pl.LightningDataModule):
         if stage == "fit" or stage is None:
             self.train_dataset = WeatherDataset(
                 datastore=self._datastore,
+                datastore_boundary=self._datastore_boundary,
+                datastore_atmosphere=self._datastore_atmosphere,
                 split="train",
                 ar_steps=self.ar_steps_train,
                 standardize=self.standardize,
                 num_past_forcing_steps=self.num_past_forcing_steps,
                 num_future_forcing_steps=self.num_future_forcing_steps,
+                num_past_boundary_steps=self.num_past_boundary_steps,
+                num_future_boundary_steps=self.num_future_boundary_steps,
+                num_past_atmosphere_steps=self.num_past_atmosphere_steps,
+                num_future_atmosphere_steps=self.num_future_atmosphere_steps,
+                use_atmosphere_g2m=self.use_atmosphere_g2m,
             )
             self.val_dataset = WeatherDataset(
                 datastore=self._datastore,
+                datastore_boundary=self._datastore_boundary,
+                datastore_atmosphere=self._datastore_atmosphere,
                 split="val",
                 ar_steps=self.ar_steps_eval,
                 standardize=self.standardize,
                 num_past_forcing_steps=self.num_past_forcing_steps,
                 num_future_forcing_steps=self.num_future_forcing_steps,
+                num_past_boundary_steps=self.num_past_boundary_steps,
+                num_future_boundary_steps=self.num_future_boundary_steps,
+                num_past_atmosphere_steps=self.num_past_atmosphere_steps,
+                num_future_atmosphere_steps=self.num_future_atmosphere_steps,
+                use_atmosphere_g2m=self.use_atmosphere_g2m,
             )
 
         if stage == "test" or stage is None:
             self.test_dataset = WeatherDataset(
                 datastore=self._datastore,
+                datastore_boundary=self._datastore_boundary,
+                datastore_atmosphere=self._datastore_atmosphere,
                 split="test",
                 ar_steps=self.ar_steps_eval,
                 standardize=self.standardize,
                 num_past_forcing_steps=self.num_past_forcing_steps,
                 num_future_forcing_steps=self.num_future_forcing_steps,
+                num_past_boundary_steps=self.num_past_boundary_steps,
+                num_future_boundary_steps=self.num_future_boundary_steps,
+                num_past_atmosphere_steps=self.num_past_atmosphere_steps,
+                num_future_atmosphere_steps=self.num_future_atmosphere_steps,
+                use_atmosphere_g2m=self.use_atmosphere_g2m,
             )
 
     def train_dataloader(self):

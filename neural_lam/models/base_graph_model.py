@@ -1,3 +1,6 @@
+# Standard library
+from typing import Union
+
 # Third-party
 import torch
 
@@ -15,15 +18,29 @@ class BaseGraphModel(ARModel):
     the encode-process-decode idea.
     """
 
-    def __init__(self, args, config: NeuralLAMConfig, datastore: BaseDatastore):
-        super().__init__(args, config=config, datastore=datastore)
+    def __init__(
+        self,
+        args,
+        config: NeuralLAMConfig,
+        datastore: BaseDatastore,
+        datastore_boundary: Union[BaseDatastore, None],
+        datastore_atmosphere: Union[BaseDatastore, None],
+    ):
+        super().__init__(
+            args,
+            config=config,
+            datastore=datastore,
+            datastore_boundary=datastore_boundary,
+            datastore_atmosphere=datastore_atmosphere,
+        )
 
         # Load graph with static features
         # NOTE: (IMPORTANT!) mesh nodes MUST have the first
         # num_mesh_nodes indices,
-        graph_dir_path = datastore.root_path / "graph" / args.graph
+        graph_dir_path = datastore.root_path / "graphs" / args.graph
         self.hierarchical, graph_ldict = utils.load_graph(
-            graph_dir_path=graph_dir_path
+            graph_dir_path=graph_dir_path,
+            datastore=datastore,
         )
         for name, attr_value in graph_ldict.items():
             # Make BufferLists module members and register tensors as buffers
@@ -32,13 +49,6 @@ class BaseGraphModel(ARModel):
             else:
                 setattr(self, name, attr_value)
 
-        # Specify dimensions of data
-        self.num_mesh_nodes, _ = self.get_num_mesh()
-        utils.rank_zero_print(
-            f"Loaded graph with {self.num_grid_nodes + self.num_mesh_nodes} "
-            f"nodes ({self.num_grid_nodes} grid, {self.num_mesh_nodes} mesh)"
-        )
-
         # grid_dim from data + static
         self.g2m_edges, g2m_dim = self.g2m_features.shape
         self.m2g_edges, m2g_dim = self.m2g_features.shape
@@ -46,9 +56,17 @@ class BaseGraphModel(ARModel):
         # Define sub-models
         # Feature embedders for grid
         self.mlp_blueprint_end = [args.hidden_dim] * (args.hidden_layers + 1)
-        self.grid_embedder = utils.make_mlp(
-            [self.grid_input_dim] + self.mlp_blueprint_end
+        self.interior_embedder = utils.make_mlp(
+            [self.interior_input_dim] + self.mlp_blueprint_end
         )
+        if self.boundary_forced:
+            self.boundary_embedder = utils.make_mlp(
+                [self.boundary_dim] + self.mlp_blueprint_end
+            )
+        if self.atmosphere_forced and self.use_atmosphere_g2m:
+            self.atmosphere_embedder = utils.make_mlp(
+                [self.atmosphere_dim] + self.mlp_blueprint_end
+            )
         self.g2m_embedder = utils.make_mlp([g2m_dim] + self.mlp_blueprint_end)
         self.m2g_embedder = utils.make_mlp([m2g_dim] + self.mlp_blueprint_end)
 
@@ -60,6 +78,7 @@ class BaseGraphModel(ARModel):
             args.hidden_dim,
             hidden_layers=args.hidden_layers,
             update_edges=False,
+            num_rec=self.num_grid_connected_mesh_nodes,
         )
         self.encoding_grid_mlp = utils.make_mlp(
             [args.hidden_dim] + self.mlp_blueprint_end
@@ -71,6 +90,7 @@ class BaseGraphModel(ARModel):
             args.hidden_dim,
             hidden_layers=args.hidden_layers,
             update_edges=False,
+            num_rec=self.num_grid_nodes,
         )
 
         # Output mapping (hidden_dim -> output_dim)
@@ -82,6 +102,16 @@ class BaseGraphModel(ARModel):
 
         # Compute indices and define clamping functions
         self.prepare_clamping_params(config, datastore)
+
+    @property
+    def num_grid_connected_mesh_nodes(self):
+        """
+        Get the total number of mesh nodes that have a connection to
+        the grid (e.g. bottom level in a hierarchy)
+        """
+        raise NotImplementedError(
+            "num_grid_connected_mesh_nodes not implemented"
+        )
 
     def prepare_clamping_params(
         self, config: NeuralLAMConfig, datastore: BaseDatastore
@@ -290,31 +320,100 @@ class BaseGraphModel(ARModel):
         """
         raise NotImplementedError("process_step not implemented")
 
-    def predict_step(self, prev_state, prev_prev_state, forcing):
+    def predict_step(
+        self,
+        prev_state,
+        prev_prev_state,
+        forcing,
+        boundary_forcing,
+        atmosphere_forcing,
+    ):
         """
         Step state one step ahead using prediction model, X_{t-1}, X_t -> X_t+1
         prev_state: (B, num_grid_nodes, feature_dim), X_t
         prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1}
         forcing: (B, num_grid_nodes, forcing_dim)
+        boundary_forcing: (B, num_boundary_nodes, boundary_forcing_dim)
+        atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
         """
         batch_size = prev_state.shape[0]
 
-        # Create full grid node features of shape (B, num_grid_nodes, grid_dim)
-        grid_features = torch.cat(
-            (
-                prev_state,
-                prev_prev_state,
-                forcing,
-                self.expand_to_batch(self.grid_static_features, batch_size),
-            ),
-            dim=-1,
-        )
+        # Create full interior grid input features
+        interior_input_list = [
+            prev_state,
+            prev_prev_state,
+            forcing,
+            self.expand_to_batch(self.grid_static_features, batch_size),
+        ]
+        if self.concat_atmosphere:
+            # Atmosphere forcing on same grid as interior (past/future steps)
+            interior_input_list.append(atmosphere_forcing)
+        interior_features = torch.cat(interior_input_list, dim=-1)
+        # (B, num_interior_nodes, interior_input_dim)
 
         # Embed all features
-        grid_emb = self.grid_embedder(grid_features)  # (B, num_grid_nodes, d_h)
+        interior_emb = self.interior_embedder(
+            interior_features
+        )  # (B, num_interior_nodes, d_h)
         g2m_emb = self.g2m_embedder(self.g2m_features)  # (M_g2m, d_h)
         m2g_emb = self.m2g_embedder(self.m2g_features)  # (M_m2g, d_h)
         mesh_emb = self.embedd_mesh_nodes()
+        grid_emb_list = [interior_emb]
+
+        if self.boundary_forced:
+            boundary_features = torch.cat(
+                (
+                    boundary_forcing,
+                    self.expand_to_batch(
+                        self.boundary_static_features, batch_size
+                    ),
+                ),
+                dim=-1,
+            )  # (B, num_boundary_nodes, interior_input_dim)
+            boundary_emb = self.boundary_embedder(
+                boundary_features
+            )  # (B, num_boundary_nodes, d_h)
+            grid_emb_list.append(boundary_emb)
+
+        if self.atmosphere_forced and self.use_atmosphere_g2m:
+            atmosphere_features = torch.cat(
+                (
+                    atmosphere_forcing,
+                    self.expand_to_batch(
+                        self.atmosphere_static_features, batch_size
+                    ),
+                ),
+                dim=-1,
+            )  # (B, num_atmosphere_nodes, interior_input_dim)
+
+            atmosphere_emb = self.atmosphere_embedder(
+                atmosphere_features
+            )  # (B, num_atmosphere_nodes, d_h)
+            grid_emb_list.append(atmosphere_emb)
+
+        if len(grid_emb_list) == 1:
+            # Only interior
+            grid_emb = grid_emb_list[0]
+        else:
+            # NOTE: We here assume the order of grid node index is 1) interior,
+            # 2) boundary, 3) atmosphere. This has to be followed also when
+            # constructing g2m. Concatenates all existing embeddings.
+            grid_emb = torch.cat(grid_emb_list, dim=1)
+            # (B, num_total_grid_nodes, d_h)
+
+        # Verify dimension matches expected total grid nodes
+        assert grid_emb.shape[1] == self.num_total_grid_nodes, (
+            f"grid_emb has {grid_emb.shape[1]} nodes but expected "
+            f"{self.num_total_grid_nodes} (interior: {self.num_grid_nodes}, "
+            f"boundary: {getattr(self, 'num_boundary_nodes', 0)}, "
+            f"atmosphere: {getattr(self, 'num_atmosphere_nodes', 0)})"
+        )
+        # Verify g2m edge indices are within bounds
+        max_grid_idx = self.g2m_edge_index[0].max().item()
+        assert max_grid_idx < self.num_total_grid_nodes, (
+            f"g2m_edge_index[0] has max index {max_grid_idx} "
+            f"but grid_emb only has {self.num_total_grid_nodes} nodes"
+        )
 
         # Map from grid to mesh
         mesh_emb_expanded = self.expand_to_batch(
@@ -327,9 +426,9 @@ class BaseGraphModel(ARModel):
             grid_emb, mesh_emb_expanded, g2m_emb_expanded
         )  # (B, num_mesh_nodes, d_h)
         # Also MLP with residual for grid representation
-        grid_rep = grid_emb + self.encoding_grid_mlp(
-            grid_emb
-        )  # (B, num_grid_nodes, d_h)
+        grid_rep = interior_emb + self.encoding_grid_mlp(
+            interior_emb
+        )  # (B, num_interior_nodes, d_h)
 
         # Run processor step
         mesh_rep = self.process_step(mesh_rep)
@@ -338,12 +437,12 @@ class BaseGraphModel(ARModel):
         m2g_emb_expanded = self.expand_to_batch(m2g_emb, batch_size)
         grid_rep = self.m2g_gnn(
             mesh_rep, grid_rep, m2g_emb_expanded
-        )  # (B, num_grid_nodes, d_h)
+        )  # (B, num_interior_nodes, d_h)
 
         # Map to output dimension, only for grid
         net_output = self.output_map(
             grid_rep
-        )  # (B, num_grid_nodes, d_grid_out)
+        )  # (B, num_interior_nodes, d_grid_out)
 
         if self.output_std:
             pred_delta_mean, pred_std_raw = net_output.chunk(

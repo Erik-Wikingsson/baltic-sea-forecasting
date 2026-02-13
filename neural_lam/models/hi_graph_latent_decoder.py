@@ -3,7 +3,10 @@ from torch import nn
 
 # First-party
 from neural_lam import utils
-from neural_lam.interaction_net import InteractionNet, PropagationNet
+from neural_lam.interaction_net import (
+    InteractionNet,
+    PropagationNet,
+)
 from neural_lam.models.base_graph_latent_decoder import BaseGraphLatentDecoder
 
 
@@ -21,29 +24,39 @@ class HiGraphLatentDecoder(BaseGraphLatentDecoder):
         mesh_up_edge_index,
         mesh_down_edge_index,
         hidden_dim,
+        hidden_dim_grid,
         latent_dim,
-        grid_output_dim,
+        output_dim,
         intra_level_layers,
         hidden_layers=1,
         output_std=True,
+        num_grid_con_mesh_nodes=None,
+        num_interior_nodes=None,
     ):
         super().__init__(
-            hidden_dim, latent_dim, grid_output_dim, hidden_layers, output_std
+            hidden_dim,
+            hidden_dim_grid,
+            latent_dim,
+            output_dim,
+            hidden_layers,
+            output_std,
         )
 
         # GNN from grid to mesh
         self.g2m_gnn = InteractionNet(
             g2m_edge_index,
-            hidden_dim,
+            hidden_dim_grid,
             hidden_layers=hidden_layers,
             update_edges=False,
+            num_rec=num_grid_con_mesh_nodes,
         )
         # GNN from mesh to grid
         self.m2g_gnn = PropagationNet(
             m2g_edge_index,
-            hidden_dim,
+            hidden_dim_grid,
             hidden_layers=hidden_layers,
             update_edges=False,
+            num_rec=num_interior_nodes,
         )
 
         # GNNs going up through mesh levels
@@ -91,6 +104,15 @@ class HiGraphLatentDecoder(BaseGraphLatentDecoder):
             ]
         )
 
+        # Projections between grid and mesh hidden dims
+        self.pre_mesh_proj = nn.Sequential(
+            nn.SiLU(), nn.Linear(hidden_dim_grid, hidden_dim)
+        )
+
+        self.post_mesh_proj = nn.Sequential(
+            nn.SiLU(), nn.Linear(hidden_dim, hidden_dim_grid)
+        )
+
     def combine_with_latent(
         self, original_grid_rep, latent_rep, residual_grid_rep, graph_emb
     ):
@@ -110,6 +132,7 @@ class HiGraphLatentDecoder(BaseGraphLatentDecoder):
             original_grid_rep, graph_emb["mesh"][0], graph_emb["g2m"]
         )  # (B, num_mesh_nodes[0], d_h)
 
+        current_mesh_rep = self.pre_mesh_proj(current_mesh_rep)
         # Up hierarchy
         # Run intra-level processing before propagating up
         mesh_level_reps = []
@@ -171,6 +194,8 @@ class HiGraphLatentDecoder(BaseGraphLatentDecoder):
             current_mesh_rep, _ = intra_gnn_seq(
                 new_mesh_rep, m2m_level_rep
             )  # (B, num_mesh_nodes[l], d_h)
+
+        current_mesh_rep = self.post_mesh_proj(current_mesh_rep)
 
         # Map back to grid
         grid_rep = self.m2g_gnn(

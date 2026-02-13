@@ -3,7 +3,8 @@ wandb
 saved_models
 lightning_logs
 data
-graphs
+configs
+./graphs
 *.sif
 sweeps
 .vscode
@@ -11,6 +12,7 @@ sweeps
 *.zarr
 *slurm*
 output
+configs
 
 ### Python ###
 # Byte-compiled / optimized / DLL files

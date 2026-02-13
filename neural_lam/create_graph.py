@@ -1,182 +1,44 @@
 # Standard library
 import os
-from argparse import ArgumentParser
+from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 
 # Third-party
-import matplotlib
 import matplotlib.pyplot as plt
 import networkx
 import numpy as np
 import scipy.spatial
 import torch
-import torch_geometric as pyg
+from torch_geometric.utils import degree
 from torch_geometric.utils.convert import from_networkx
 
 # Local
-from .config import load_config_and_datastore
+from .config import load_config_and_datastores
 from .datastore.base import BaseRegularGridDatastore
-
-
-def plot_graph(graph, title=None, graph_dir_path=None):
-    fig, axis = plt.subplots(figsize=(8, 8), dpi=200)  # W,H
-    edge_index = graph.edge_index
-    pos = graph.pos
-
-    # Fix for re-indexed edge indices only containing mesh nodes at
-    # higher levels in hierarchy
-    edge_index = edge_index - edge_index.min()
-
-    if pyg.utils.is_undirected(edge_index):
-        # Keep only 1 direction of edge_index
-        edge_index = edge_index[:, edge_index[0] < edge_index[1]]  # (2, M/2)
-    # TODO: indicate direction of directed edges
-
-    # Move all to cpu and numpy, compute (in)-degrees
-    degrees = (
-        pyg.utils.degree(edge_index[1], num_nodes=pos.shape[0]).cpu().numpy()
-    )
-    edge_index = edge_index.cpu().numpy()
-    pos = pos.cpu().numpy()
-
-    # Plot edges
-    from_pos = pos[edge_index[0]]  # (M/2, 2)
-    to_pos = pos[edge_index[1]]  # (M/2, 2)
-    edge_lines = np.stack((from_pos, to_pos), axis=1)
-    axis.add_collection(
-        matplotlib.collections.LineCollection(
-            edge_lines, lw=0.4, colors="black", zorder=1
-        )
-    )
-
-    # Plot nodes
-    node_scatter = axis.scatter(
-        pos[:, 0],
-        pos[:, 1],
-        c=degrees,
-        s=3,
-        marker="o",
-        zorder=2,
-        cmap="viridis",
-        clim=None,
-    )
-
-    plt.colorbar(node_scatter, aspect=50)
-
-    if title is not None:
-        axis.set_title(title)
-
-    if graph_dir_path is not None:
-        plt.savefig(os.path.join(graph_dir_path, f"{title}.png"))
-
-
-def sort_nodes_internally(nx_graph):
-    # For some reason the networkx .nodes() return list can not be sorted,
-    # but this is the ordering used by pyg when converting.
-    # This function fixes this.
-    H = networkx.DiGraph()
-    H.add_nodes_from(sorted(nx_graph.nodes(data=True)))
-    H.add_edges_from(nx_graph.edges(data=True))
-    return H
-
-
-def save_edges(graph, name, base_path):
-    torch.save(
-        graph.edge_index, os.path.join(base_path, f"{name}_edge_index.pt")
-    )
-    edge_features = torch.cat((graph.len.unsqueeze(1), graph.vdiff), dim=1).to(
-        torch.float32
-    )  # Save as float32
-    torch.save(edge_features, os.path.join(base_path, f"{name}_features.pt"))
-
-
-def save_edges_list(graphs, name, base_path):
-    torch.save(
-        [graph.edge_index for graph in graphs],
-        os.path.join(base_path, f"{name}_edge_index.pt"),
-    )
-    edge_features = [
-        torch.cat((graph.len.unsqueeze(1), graph.vdiff), dim=1).to(
-            torch.float32
-        )
-        for graph in graphs
-    ]  # Save as float32
-    torch.save(edge_features, os.path.join(base_path, f"{name}_features.pt"))
-
-
-def from_networkx_with_start_index(nx_graph, start_index):
-    pyg_graph = from_networkx(nx_graph)
-    pyg_graph.edge_index += start_index
-    return pyg_graph
-
-
-def mk_2d_graph(xy, nx, ny, land_mask):
-    xm, xM = np.amin(xy[0][0, :]), np.amax(xy[0][0, :])
-    ym, yM = np.amin(xy[1][:, 0]), np.amax(xy[1][:, 0])
-
-    # avoid nodes on border
-    dx = (xM - xm) / nx
-    dy = (yM - ym) / ny
-    lx = np.linspace(xm + dx / 2, xM - dx / 2, nx, dtype=np.float32)
-    ly = np.linspace(ym + dy / 2, yM - dy / 2, ny, dtype=np.float32)
-
-    mg = np.meshgrid(lx, ly)
-    g = networkx.grid_2d_graph(len(ly), len(lx))
-
-    # kdtree for nearest neighbor search of land nodes
-    land_points = np.argwhere(land_mask.T).astype(np.float32)
-    land_kdtree = scipy.spatial.KDTree(land_points)
-
-    # add nodes excluding land
-    for node in list(g.nodes):
-        node_pos = np.array([mg[0][node], mg[1][node]], dtype=np.float32)
-        dist, _ = land_kdtree.query(node_pos, k=1)
-        if dist < np.sqrt(0.5):
-            g.remove_node(node)
-        else:
-            g.nodes[node]["pos"] = node_pos
-
-    # add diagonal edges if both nodes exist
-    for x in range(nx - 1):
-        for y in range(ny - 1):
-            if g.has_node((x, y)) and g.has_node((x + 1, y + 1)):
-                g.add_edge((x, y), (x + 1, y + 1))
-            if g.has_node((x + 1, y)) and g.has_node((x, y + 1)):
-                g.add_edge((x + 1, y), (x, y + 1))
-
-    # turn into directed graph
-    dg = networkx.DiGraph(g)
-
-    # add node data
-    for u, v in g.edges():
-        d = np.sqrt(np.sum((g.nodes[u]["pos"] - g.nodes[v]["pos"]) ** 2))
-        dg.edges[u, v]["len"] = d
-        dg.edges[u, v]["vdiff"] = g.nodes[u]["pos"] - g.nodes[v]["pos"]
-        dg.add_edge(v, u)
-        dg.edges[v, u]["len"] = d
-        dg.edges[v, u]["vdiff"] = g.nodes[v]["pos"] - g.nodes[u]["pos"]
-
-    # add self edge if needed
-    for v, degree in list(dg.degree()):
-        if degree <= 1:
-            dg.add_edge(v, v, len=0, vdiff=np.array([0, 0]))
-
-    return dg
-
-
-def prepend_node_index(graph, new_index):
-    # Relabel node indices in graph, insert (graph_level, i, j)
-    ijk = [tuple((new_index,) + x) for x in graph.nodes]
-    to_mapping = dict(zip(graph.nodes, ijk))
-    return networkx.relabel_nodes(graph, to_mapping, copy=True)
+from .graphs import cluster_mesh, regular_mesh, saving
+from .graphs import utils as gutils
+from .graphs import vis
 
 
 def create_graph(
     graph_dir_path: str,
     xy: np.ndarray,
-    land_mask: np.ndarray,
-    n_max_levels: int,
-    hierarchical: bool,
-    create_plot: bool,
+    xy_boundary: np.ndarray,
+    xy_atmosphere: np.ndarray,
+    xy_land: np.ndarray,
+    g2m_radius: float,
+    g2m_radius_boundary: float,
+    g2m_radius_atm: float,
+    mesh_node_distance: float,
+    mesh_refinement_factor: float,
+    grid_to_first_mesh_refinement: float,
+    n_max_levels: int | None = None,
+    graph_type: str = "hierarchical",
+    create_plot: bool = False,
+    allow_disconnected: bool = False,
+    m2g_k: int = 4,
+    g2m_mean_degree: int = 0,
+    connect_disconnected: bool = False,
+    use_atmosphere_g2m: bool = True,
 ):
     """
     Create graph components from `xy` grid coordinates and store in
@@ -230,14 +92,48 @@ def create_graph(
     graph_dir_path : str
         Path to store the graph components.
     xy : np.ndarray
-        Grid coordinates, expected to be of shape (Nx, Ny, 2).
+        Grid (interior) coordinates, expected to be of shape (num_grid, 2).
+    xy_boundary : np.ndarray
+        Auxiliary grid coordinates, for boundary grid nodes to only use
+        in encoding (g2m), expected to be of shape (num_boundary, 2).
+    xy_atmosphere : np.ndarray
+        Auxiliary grid coordinates, for atmospheric grid nodes to only use
+        in encoding (g2m), expected to be of shape (num_atm, 2).
+    g2m_radius : float
+        Radius to connect interior and boundary nodes within for g2m.
+    g2m_radius_atm : float
+        Radius to connect atmospheric nodes within for g2m.
+    mesh_node_distance: float,
+        (For hierarchical/multiscale graphs) Distance between mesh nodes,
+        in meters.
+    mesh_refinement_factor: float,
+        Factor between number of mesh nodes at each level in cluster graphs.
+    grid_to_first_mesh_refinement: float,
+        Factor between number of grid nodes and mesh nodes at bottom level.
     n_max_levels : int
         Limit multi-scale mesh to given number of levels, from bottom up
         (default: None (no limit)).
-    hierarchical : bool
-        Generate hierarchical mesh graph (default: False).
+    graph_type : str
+        What type of graph to generate multiscale/hierarchical/cluster
     create_plot : bool
         If graphs should be plotted during generation (default: False).
+    allow_disconnected : bool
+        Allow disconnected nodes in g2m. If False, will exit when disconnected
+        grid or mesh nodes are found in g2m.
+    xy_land: np.ndarray
+        Grid coordinates of land points, for edge filtering for cluster graph.
+        Expected to be of shape (num_grid, 2).
+    m2g_k : int
+        Number of nearest mesh neighbors to connect to each grid node in m2g.
+    g2m_mean_degree : int
+        Search for G2M radii (interior, boundary, atmosphere)
+        that achieve mean connectivity N per grid node.
+    connect_disconnected : bool
+        If True, connect remaining disconnected nodes using nearest neighbor.
+    use_atmosphere_g2m : bool
+        If True, add atmospheric grid nodes and their g2m edges. If False,
+        atmosphere is omitted from the g2m graph (e.g. when using atmosphere
+        concat to interior instead).
 
     Returns
     -------
@@ -248,190 +144,51 @@ def create_graph(
 
     print(f"Writing graph components to {graph_dir_path}")
 
-    grid_xy = torch.tensor(xy)
-    pos_max = torch.max(torch.abs(grid_xy))
-
     #
     # Mesh
     #
+    if create_plot:
 
-    # graph geometry
-    nx = 3  # number of children = nx**2
-    nlev = int(np.log(max(xy.shape)) / np.log(nx))
-    nleaf = nx**nlev  # leaves at the bottom = nleaf**2
-
-    mesh_levels = nlev - 1
-    if n_max_levels:
-        # Limit the levels in mesh graph
-        mesh_levels = min(mesh_levels, n_max_levels)
-
-    print(f"nlev: {nlev}, nleaf: {nleaf}, mesh_levels: {mesh_levels}")
-
-    # multi resolution tree levels
-    G = []
-    for lev in range(1, mesh_levels + 1):
-        n = int(nleaf / (nx**lev))
-        g = mk_2d_graph(xy, n, n, land_mask)
-        if create_plot:
-            plot_graph(
-                from_networkx(g), f"Mesh graph, level {lev}", graph_dir_path
+        def mesh_plot_func(graph, title):
+            vis.plot_graph(
+                graph,
+                title,
+                graph_dir_path,
             )
             plt.show()
-
-        G.append(g)
-
-    if hierarchical:
-        # Relabel nodes of each level with level index first
-        G = [
-            prepend_node_index(graph, level_i)
-            for level_i, graph in enumerate(G)
-        ]
-
-        num_nodes_level = np.array([len(g_level.nodes) for g_level in G])
-        # First node index in each level in the hierarchical graph
-        first_index_level = np.concatenate(
-            (np.zeros(1, dtype=int), np.cumsum(num_nodes_level[:-1]))
-        )
-
-        # Create inter-level mesh edges
-        up_graphs = []
-        down_graphs = []
-        for from_level, to_level, G_from, G_to, start_index in zip(
-            range(1, mesh_levels),
-            range(0, mesh_levels - 1),
-            G[1:],
-            G[:-1],
-            first_index_level[: mesh_levels - 1],
-        ):
-            # start out from graph at from level
-            G_down = G_from.copy()
-            G_down.clear_edges()
-            G_down = networkx.DiGraph(G_down)
-
-            # Add nodes of to level
-            G_down.add_nodes_from(G_to.nodes(data=True))
-
-            # build kd tree for mesh point pos
-            # order in vm should be same as in vm_xy
-            v_to_list = list(G_to.nodes)
-            v_from_list = list(G_from.nodes)
-            v_from_xy = np.array([xy for _, xy in G_from.nodes.data("pos")])
-            kdt_m = scipy.spatial.KDTree(v_from_xy)
-
-            # add edges from mesh to grid
-            for v in v_to_list:
-                # find 1(?) nearest neighbours (index to vm_xy)
-                neigh_idx = kdt_m.query(G_down.nodes[v]["pos"], 1)[1]
-                u = v_from_list[neigh_idx]
-
-                # add edge from mesh to grid
-                G_down.add_edge(u, v)
-                d = np.sqrt(
-                    np.sum(
-                        (G_down.nodes[u]["pos"] - G_down.nodes[v]["pos"]) ** 2
-                    )
-                )
-                G_down.edges[u, v]["len"] = d
-                G_down.edges[u, v]["vdiff"] = (
-                    G_down.nodes[u]["pos"] - G_down.nodes[v]["pos"]
-                )
-
-            # relabel nodes to integers (sorted)
-            G_down_int = networkx.convert_node_labels_to_integers(
-                G_down, first_label=start_index, ordering="sorted"
-            )  # Issue with sorting here
-            G_down_int = sort_nodes_internally(G_down_int)
-            pyg_down = from_networkx_with_start_index(G_down_int, start_index)
-
-            # Create up graph, invert downwards edges
-            up_edges = torch.stack(
-                (pyg_down.edge_index[1], pyg_down.edge_index[0]), dim=0
-            )
-            pyg_up = pyg_down.clone()
-            pyg_up.edge_index = up_edges
-
-            up_graphs.append(pyg_up)
-            down_graphs.append(pyg_down)
-
-            if create_plot:
-                plot_graph(
-                    pyg_down,
-                    f"Down graph, {from_level} -> {to_level}",
-                    graph_dir_path,
-                )
-                plt.show()
-
-                plot_graph(
-                    pyg_down,
-                    f"Up graph, {to_level} -> {from_level}",
-                    graph_dir_path,
-                )
-                plt.show()
-
-        # Save up and down edges
-        save_edges_list(up_graphs, "mesh_up", graph_dir_path)
-        save_edges_list(down_graphs, "mesh_down", graph_dir_path)
-
-        # Extract intra-level edges for m2m
-        m2m_graphs = [
-            from_networkx_with_start_index(
-                networkx.convert_node_labels_to_integers(
-                    level_graph, first_label=start_index, ordering="sorted"
-                ),
-                start_index,
-            )
-            for level_graph, start_index in zip(G, first_index_level)
-        ]
-
-        mesh_pos = [graph.pos.to(torch.float32) for graph in m2m_graphs]
-
-        # For use in g2m and m2g
-        G_bottom_mesh = G[0]
-
-        joint_mesh_graph = networkx.union_all([graph for graph in G])
-        all_mesh_nodes = joint_mesh_graph.nodes(data=True)
 
     else:
-        # combine all levels to one graph
-        G_tot = G[0]
-        for lev in range(1, len(G)):
-            nodes = list(G[lev - 1].nodes)
-            n = int(np.sqrt(len(nodes)))
-            ij = (
-                np.array(nodes)
-                .reshape((n, n, 2))[1::nx, 1::nx, :]
-                .reshape(int(n / nx) ** 2, 2)
+        mesh_plot_func = None
+
+    # Build mesh graph over both interior and boundary nodes
+    xy_for_mesh = np.concatenate((xy, xy_boundary), axis=0)
+
+    if graph_type == "cluster":
+        mesh_pos, G_bottom_mesh, save_graphs = (
+            cluster_mesh.build_cluster_mesh_graph(
+                xy_for_mesh,
+                xy_land=xy_land,
+                limit_mesh_levels=n_max_levels,
+                grid_to_first_mesh_refinement=grid_to_first_mesh_refinement,
+                mesh_refinement_factor=mesh_refinement_factor,
+                mesh_plot_function=mesh_plot_func,
             )
-            ij = [tuple(x) for x in ij]
-            G[lev] = networkx.relabel_nodes(G[lev], dict(zip(G[lev].nodes, ij)))
-            G_tot = networkx.compose(G_tot, G[lev])
-
-        # Relabel mesh nodes to start with 0
-        G_tot = prepend_node_index(G_tot, 0)
-
-        # relabel nodes to integers (sorted)
-        G_int = networkx.convert_node_labels_to_integers(
-            G_tot, first_label=0, ordering="sorted"
+        )
+    else:
+        mesh_pos, G_bottom_mesh, save_graphs = (
+            regular_mesh.build_regular_mesh_graph(
+                xy_for_mesh,
+                mesh_node_distance=mesh_node_distance,
+                mesh_refinement_factor=mesh_refinement_factor,
+                limit_mesh_levels=n_max_levels,
+                hierarchical=(graph_type == "hierarchical"),
+                mesh_plot_function=mesh_plot_func,
+            )
         )
 
-        # Graph to use in g2m and m2g
-        G_bottom_mesh = G_tot
-        all_mesh_nodes = G_tot.nodes(data=True)
-
-        # export the nx graph to PyTorch geometric
-        pyg_m2m = from_networkx(G_int)
-        m2m_graphs = [pyg_m2m]
-        mesh_pos = [pyg_m2m.pos.to(torch.float32)]
-
-        if create_plot:
-            plot_graph(pyg_m2m, "Mesh-to-mesh", graph_dir_path)
-            plt.show()
-
-    # Save m2m edges
-    save_edges_list(m2m_graphs, "m2m", graph_dir_path)
-
-    # Divide mesh node pos by max coordinate of grid cell
-    mesh_pos = [pos / pos_max for pos in mesh_pos]
+    # Save all graphs
+    for graph_name, graph in save_graphs.items():
+        saving.save_edges_list(graph, graph_name, graph_dir_path)
 
     # Save mesh positions
     torch.save(
@@ -442,166 +199,381 @@ def create_graph(
     # Grid2Mesh
     #
 
-    # radius within which grid nodes are associated with a mesh node
-    # (in terms of mesh distance)
-    DM_SCALE = 0.67
-
     # mesh nodes on lowest level
     vm = G_bottom_mesh.nodes
-    vm_xy = np.array([xy for _, xy in vm.data("pos")])
+    vm_list = list(vm)
+    vm_xy = np.stack([xy for _, xy in vm.data("pos")], axis=0)
 
-    # find consecutive nodes on the same row
-    vm_pos = {key: pos for key, pos in vm.data("pos")}
-    sorted_keys = sorted(vm_pos.keys(), key=lambda k: (k[0], k[1], k[2]))
-    key1, key2 = None, None
-    for i in range(len(sorted_keys) - 1):
-        k1, k2 = sorted_keys[i], sorted_keys[i + 1]
-        if k1[0] == k2[0] and k1[1] == k2[1] and k1[2] + 1 == k2[2]:
-            if np.array_equal(vm_pos[k1][1], vm_pos[k2][1]):
-                key1, key2 = k1, k2
-                break
+    # build kd tree for mesh point pos
+    kdt_m = scipy.spatial.KDTree(vm_xy)
 
-    # distance between mesh nodes
-    dm = np.sqrt(np.sum((vm.data("pos")[key1] - vm.data("pos")[key2]) ** 2))
+    # compute dm as mean edge length of bottom mesh graph
+    edge_lengths = [
+        np.linalg.norm(
+            G_bottom_mesh.nodes[u]["pos"] - G_bottom_mesh.nodes[v]["pos"]
+        )
+        for u, v in G_bottom_mesh.edges
+    ]
+    dm = np.mean(edge_lengths)
+    print(f"dm = {dm}")
+
+    # Search for G2M radii achieving target mean connectivity
+    if g2m_mean_degree is not None:
+        g2m_radius, g2m_radius_boundary, g2m_radius_atm = (
+            gutils.search_g2m_radii_by_mean_degree(
+                xy,
+                xy_boundary,
+                xy_atmosphere if use_atmosphere_g2m else np.empty((0, 2)),
+                vm_xy,
+                kdt_m,
+                dm,
+                mean_degree=g2m_mean_degree,
+                precision=0.01,
+                check_atm=use_atmosphere_g2m,
+            )
+        )
 
     # grid nodes
-    Ny, Nx = xy.shape[1:]
-
-    G_grid = networkx.grid_2d_graph(Ny, Nx)
-    G_grid.clear_edges()
-
-    # vg features (only pos introduced here)
-    nodes_to_remove = []
-    for node in G_grid.nodes:
-        # Remove the node from the graph if it is a land node
-        if land_mask[node[0], node[1]]:
-            nodes_to_remove.append(node)
-        else:
-            # pos is in feature but here explicit for convenience
-            G_grid.nodes[node]["pos"] = np.array([xy[0][node], xy[1][node]])
-
-    for node in nodes_to_remove:
-        G_grid.remove_node(node)
-
-    # add 1000 to node key to separate grid nodes (1000,i,j) from mesh nodes
-    # (i,j) and impose sorting order such that vm are the first nodes
-    G_grid = prepend_node_index(G_grid, 1000)
+    interior_nodes = [
+        ((1, node_i), {"pos": pos}) for node_i, pos in enumerate(xy)
+    ]
+    G_interior = networkx.Graph()
+    G_interior.add_nodes_from(interior_nodes)
 
     # build kd tree for grid point pos
-    # order in vg_list should be same as in vg_xy
-    vg_list = list(G_grid.nodes)
-    vg_xy = np.array([[xy[0][node[1:]], xy[1][node[1:]]] for node in vg_list])
-    kdt_g = scipy.spatial.KDTree(vg_xy)
+    vg_list = list(G_interior.nodes)
 
-    # now add (all) mesh nodes, include features (pos)
-    G_grid.add_nodes_from(all_mesh_nodes)
+    # now add (all bottom) mesh nodes, include features (pos)
+    G_g2m = networkx.Graph()
+    G_g2m.add_nodes_from(G_bottom_mesh.nodes(data=True))
 
     # Re-create graph with sorted node indices
     # Need to do sorting of nodes this way for indices to map correctly to pyg
-    G_g2m = networkx.Graph()
-    G_g2m.add_nodes_from(sorted(G_grid.nodes(data=True)))
+    G_g2m.add_nodes_from(sorted(G_interior.nodes(data=True)))
+
+    # Add auxiliary encoding nodes
+    boundary_nodes = [
+        ((2, aux_node_i), {"pos": pos})
+        for aux_node_i, pos in enumerate(xy_boundary)
+    ]
+    atmospheric_nodes = (
+        [
+            ((3, aux_node_i), {"pos": pos})
+            for aux_node_i, pos in enumerate(xy_atmosphere)
+        ]
+        if use_atmosphere_g2m and xy_atmosphere.size > 0
+        else []
+    )
+    G_g2m.add_nodes_from(boundary_nodes)
+    if atmospheric_nodes:
+        G_g2m.add_nodes_from(atmospheric_nodes)
 
     # turn into directed graph
     G_g2m = networkx.DiGraph(G_g2m)
 
-    # add edges
-    for v in vm:
-        # find neighbours (index to vg_xy)
-        neigh_idxs = kdt_g.query_ball_point(vm[v]["pos"], dm * DM_SCALE)
-        for i in neigh_idxs:
-            u = vg_list[i]
-            # add edge from grid to mesh
-            G_g2m.add_edge(u, v)
-            d = np.sqrt(
-                np.sum((G_g2m.nodes[u]["pos"] - G_g2m.nodes[v]["pos"]) ** 2)
+    # add edges from each grid node set to mesh
+    edge_sources = [
+        (G_interior.nodes(data=True), g2m_radius),
+        (boundary_nodes, g2m_radius_boundary),
+    ]
+    if atmospheric_nodes:
+        edge_sources.append((atmospheric_nodes, g2m_radius_atm))
+    for node_list, connect_radius in edge_sources:
+        # Note: Below could likely be vectorized, if networkx can play along
+        for grid_node, node_attrs in node_list:
+            # find neighbours (index in mesh graph)
+            grid_node_pos = node_attrs["pos"]
+            neigh_idxs = kdt_m.query_ball_point(
+                grid_node_pos, dm * connect_radius
             )
-            G_g2m.edges[u, v]["len"] = d
-            G_g2m.edges[u, v]["vdiff"] = (
-                G_g2m.nodes[u]["pos"] - G_g2m.nodes[v]["pos"]
-            )
+
+            # Add edges for each mesh node within radius
+            for mesh_node_i in neigh_idxs:
+                mesh_node = vm_list[mesh_node_i]
+                mesh_node_pos = vm_xy[mesh_node_i]
+                # add edge from grid to mesh
+                G_g2m.add_edge(grid_node, mesh_node)
+                vdiff = mesh_node_pos - grid_node_pos
+                d = np.linalg.norm(vdiff)
+                G_g2m.edges[grid_node, mesh_node]["len"] = d
+                G_g2m.edges[grid_node, mesh_node]["vdiff"] = vdiff
+
+    node_list = list(G_g2m.nodes)
+
+    # Build boolean masks per node category
+    is_mesh = np.array(
+        [not isinstance(n, tuple) for n in node_list]
+    )  # mesh nodes are not tuples
+    is_grid_interior = np.array(
+        [isinstance(n, tuple) and n[0] == 1 for n in node_list]
+    )
+    is_grid_boundary = np.array(
+        [isinstance(n, tuple) and n[0] == 2 for n in node_list]
+    )
+    is_grid_atm = np.array(
+        [isinstance(n, tuple) and n[0] == 3 for n in node_list]
+    )
+    is_any_grid = is_grid_interior | is_grid_boundary | is_grid_atm
 
     pyg_g2m = from_networkx(G_g2m)
 
+    # Check for disconnected nodes in g2m
+    src = pyg_g2m.edge_index[0]
+    dst = pyg_g2m.edge_index[1]
+    num_nodes = pyg_g2m.num_nodes
+
+    outdeg = degree(src, num_nodes=num_nodes)
+    indeg = degree(dst, num_nodes=num_nodes)
+
+    # Convert masks to torch
+    grid_mask_t = torch.as_tensor(is_any_grid, device=outdeg.device)
+    mesh_mask_t = torch.as_tensor(is_mesh, device=outdeg.device)
+
+    # Find grid nodes with no outgoing edges and mesh nodes
+    # with no incoming edges
+    disc_grid = torch.where((outdeg == 0) & grid_mask_t)[0]
+    disc_mesh = torch.where((indeg == 0) & mesh_mask_t)[0]
+
+    if len(disc_grid) > 0 or len(disc_mesh) > 0:
+        msg = "Disconnected nodes found in G2M\n"
+        msg += f"{len(disc_grid)} disconnected grid nodes (outdeg==0)\n"
+        msg += f"{len(disc_mesh)} disconnected mesh nodes (indeg==0)"
+        print("Warning:", msg)
+
+    pos = pyg_g2m.pos.cpu().numpy()
+    disc_grid_np = disc_grid.cpu().numpy()
+    disc_mesh_np = disc_mesh.cpu().numpy()
+
+    # Print counts by subset among disconnected grid nodes
+    if len(disc_grid_np) > 0:
+        print("Disconnected interior:", np.sum(is_grid_interior[disc_grid_np]))
+        print("Disconnected boundary:", np.sum(is_grid_boundary[disc_grid_np]))
+        print("Disconnected atmosphere:", np.sum(is_grid_atm[disc_grid_np]))
+
+    # Connect disconnected nodes if requested
+    if connect_disconnected and (len(disc_grid) > 0 or len(disc_mesh) > 0):
+        gutils.connect_disconnected_g2m(
+            pyg_g2m,
+            is_mesh,
+            is_grid_interior,
+            is_grid_boundary,
+            is_grid_atm,
+            vm_list,
+            vm_xy,
+            kdt_m,
+            dm,
+            g2m_radius,
+            g2m_radius_boundary,
+            g2m_radius_atm,
+        )
+        # Re-check disconnected nodes after connecting
+        src = pyg_g2m.edge_index[0]
+        dst = pyg_g2m.edge_index[1]
+        outdeg = degree(src, num_nodes=pyg_g2m.num_nodes)
+        indeg = degree(dst, num_nodes=pyg_g2m.num_nodes)
+        disc_grid = torch.where((outdeg == 0) & grid_mask_t)[0]
+        disc_mesh = torch.where((indeg == 0) & mesh_mask_t)[0]
+        disc_grid_np = disc_grid.cpu().numpy()
+        disc_mesh_np = disc_mesh.cpu().numpy()
+
+    # Plot disconnected nodes
     if create_plot:
-        pyg_g2m_reversed = pyg_g2m.clone()
-        pyg_g2m_reversed.edge_index = pyg_g2m.edge_index[[1, 0]]
-        plot_graph(pyg_g2m_reversed, "Grid-to-mesh", graph_dir_path)
+        vis.plot_disconnected_nodes(
+            pos,
+            is_mesh,
+            is_any_grid,
+            disc_grid_np,
+            disc_mesh_np,
+            graph_dir_path,
+        )
+
+    # Check for disconnected nodes
+    if len(disc_grid) > 0 or len(disc_mesh) > 0:
+        msg = "Disconnected nodes found in G2M\n"
+        msg += f"{len(disc_grid)} disconnected grid nodes (outdeg==0)\n"
+        msg += f"{len(disc_mesh)} disconnected mesh nodes (indeg==0)"
+        if allow_disconnected:
+            print("Warning:", msg)
+        else:
+            raise ValueError(msg)
+
+    if create_plot:
+        vis.plot_graph(
+            pyg_g2m, "Grid-to-mesh", graph_dir_path, order_by_degree=True
+        )
+        plt.show()
+        pyg_g2m_r = pyg_g2m.clone()
+        pyg_g2m_r.edge_index = pyg_g2m.edge_index[[1, 0]]
+        vis.plot_graph(pyg_g2m_r, "Grid-to-mesh-r", graph_dir_path)
         plt.show()
 
     #
     # Mesh2Grid
     #
 
-    # start out from Grid2Mesh and then replace edges
-    G_m2g = G_g2m.copy()
-    G_m2g.clear_edges()
-
-    # build kd tree for mesh point pos
-    # order in vm should be same as in vm_xy
-    vm_list = list(vm)
-    kdt_m = scipy.spatial.KDTree(vm_xy)
+    # similar to Grid2Mesh, but only with grid nodes
+    G_m2g = networkx.DiGraph()
+    G_m2g.add_nodes_from(G_bottom_mesh.nodes(data=True))
+    G_m2g.add_nodes_from(sorted(G_interior.nodes(data=True)))
 
     # add edges from mesh to grid
+    # order in vm should be same as in vm_xy
     for v in vg_list:
-        # find 4 nearest neighbours (index to vm_xy)
-        neigh_idxs = kdt_m.query(G_m2g.nodes[v]["pos"], 4)[1]
+        # find k nearest neighbours (index to vm_xy)
+        if m2g_k == 1:
+            _, neigh_idx = kdt_m.query(G_m2g.nodes[v]["pos"], k=1)
+            neigh_idxs = (
+                [neigh_idx]
+                if not isinstance(neigh_idx, np.ndarray)
+                else neigh_idx.flatten()
+            )
+        else:
+            _, neigh_idxs = kdt_m.query(G_m2g.nodes[v]["pos"], k=m2g_k)
+            if neigh_idxs.ndim > 1:
+                neigh_idxs = neigh_idxs.flatten()
         for i in neigh_idxs:
             u = vm_list[i]
             # add edge from mesh to grid
             G_m2g.add_edge(u, v)
-            d = np.sqrt(
-                np.sum((G_m2g.nodes[u]["pos"] - G_m2g.nodes[v]["pos"]) ** 2)
-            )
-            G_m2g.edges[u, v]["len"] = d
-            G_m2g.edges[u, v]["vdiff"] = (
-                G_m2g.nodes[u]["pos"] - G_m2g.nodes[v]["pos"]
-            )
+            vdiff = G_m2g.nodes[v]["pos"] - G_m2g.nodes[u]["pos"]
+            G_m2g.edges[u, v]["len"] = np.linalg.norm(vdiff)
+            G_m2g.edges[u, v]["vdiff"] = vdiff
 
-    # relabel nodes to integers (sorted)
-    G_m2g_int = networkx.convert_node_labels_to_integers(
-        G_m2g, first_label=0, ordering="sorted"
+    pyg_m2g = from_networkx(G_m2g)
+
+    # Remove m2g edges over land
+    gutils.filter_edges_land(pyg_m2g, xy, xy_land)
+
+    # Check for disconnected nodes in m2g
+    m2g_node_list = list(G_m2g.nodes)
+    m2g_is_mesh = np.array([not isinstance(n, tuple) for n in m2g_node_list])
+    m2g_is_grid = np.array(
+        [isinstance(n, tuple) and n[0] == 1 for n in m2g_node_list]
     )
-    pyg_m2g = from_networkx(G_m2g_int)
+
+    m2g_dst = pyg_m2g.edge_index[1]
+    m2g_num_nodes = pyg_m2g.num_nodes
+
+    m2g_indeg = degree(m2g_dst, num_nodes=m2g_num_nodes)
+    m2g_grid_mask_t = torch.as_tensor(m2g_is_grid, device=m2g_indeg.device)
+
+    # Find grid nodes with no incoming edges from mesh
+    m2g_disc_grid = torch.where((m2g_indeg == 0) & m2g_grid_mask_t)[0]
+
+    if len(m2g_disc_grid) > 0:
+        msg = "Disconnected nodes found in M2G\n"
+        msg += f"{len(m2g_disc_grid)} disconnected grid nodes (indeg==0)"
+        print("Warning:", msg)
+
+    # Connect disconnected nodes if requested
+    if connect_disconnected and len(m2g_disc_grid) > 0:
+        gutils.connect_disconnected_m2g(
+            pyg_m2g,
+            m2g_is_mesh,
+            m2g_is_grid,
+            xy,
+            vm_list,
+            vm_xy,
+            kdt_m,
+            xy_land,
+        )
+        # Re-check disconnected nodes after connecting
+        m2g_dst = pyg_m2g.edge_index[1]
+        m2g_indeg = degree(m2g_dst, num_nodes=pyg_m2g.num_nodes)
+        m2g_disc_grid = torch.where((m2g_indeg == 0) & m2g_grid_mask_t)[0]
+
+    # Plot disconnected nodes
+    if create_plot:
+        m2g_pos = pyg_m2g.pos.cpu().numpy()
+        m2g_disc_grid_np = m2g_disc_grid.cpu().numpy()
+
+        vis.plot_disconnected_nodes(
+            m2g_pos,
+            m2g_is_mesh,
+            m2g_is_grid,
+            m2g_disc_grid_np,
+            np.array([], dtype=int),  # No disconnected mesh nodes in m2g
+            graph_dir_path,
+            title="m2g_disconnected",
+        )
+
+    # Check for disconnected nodes
+    if len(m2g_disc_grid) > 0:
+        msg = "Disconnected nodes found in M2G\n"
+        msg += f"{len(m2g_disc_grid)} disconnected grid nodes (indeg==0)"
+        if allow_disconnected:
+            print("Warning:", msg)
+        else:
+            raise ValueError(msg)
 
     if create_plot:
-        plot_graph(pyg_m2g, "Mesh-to-grid", graph_dir_path)
+        vis.plot_graph(
+            pyg_m2g, "Mesh-to-grid", graph_dir_path, reindex_edges=False
+        )
+        plt.show()
+        pyg_m2g_r = pyg_m2g.clone()
+        pyg_m2g_r.edge_index = pyg_m2g.edge_index[[1, 0]]
+        vis.plot_graph(
+            pyg_m2g_r,
+            "Mesh-to-grid-r",
+            graph_dir_path,
+            reindex_edges=False,
+            order_by_degree=True,
+        )
         plt.show()
 
     # Save g2m and m2g everything
     # g2m
-    save_edges(pyg_g2m, "g2m", graph_dir_path)
+    saving.save_edges(pyg_g2m, "g2m", graph_dir_path)
     # m2g
-    save_edges(pyg_m2g, "m2g", graph_dir_path)
+    saving.save_edges(pyg_m2g, "m2g", graph_dir_path)
+
+    gutils.print_graph_stats(save_graphs, pyg_g2m, pyg_m2g)
 
 
 def create_graph_from_datastore(
     datastore: BaseRegularGridDatastore,
-    output_root_path: str,
-    n_max_levels: int = None,
-    hierarchical: bool = False,
-    create_plot: bool = False,
+    datastore_boundary: BaseRegularGridDatastore,
+    datastore_atmosphere: BaseRegularGridDatastore,
+    use_atmosphere_g2m: bool,
+    **kwargs,
 ):
-    if isinstance(datastore, BaseRegularGridDatastore):
-        land_mask = datastore.get_mask(surface=True, stacked=False, invert=True)
-        y_idx, x_idx = np.indices(land_mask.shape)
-        xy = np.stack([x_idx, y_idx], axis=0)
-    else:
-        raise NotImplementedError(
-            "Only graph creation for BaseRegularGridDatastore is supported"
-        )
+    interior_mask = datastore.get_mask(surface=True, stacked=True, invert=False)
+    xy_interior = datastore.get_projected_xy("state", stacked=True)
 
+    boundary_mask = datastore_boundary.get_mask(
+        surface=True, stacked=True, invert=False
+    )
+    xy_boundary = datastore_boundary.get_projected_xy("forcing", stacked=True)
+
+    if use_atmosphere_g2m:
+        atmosphere_mask = datastore_atmosphere.get_atmosphere_mask(
+            stacked=True, invert=False
+        )
+        xy_atmosphere = datastore_atmosphere.get_projected_xy(
+            "forcing", stacked=True
+        )[atmosphere_mask]
+    else:
+        xy_atmosphere = np.empty((0, 2), dtype=xy_interior.dtype)
+
+    # Node ordering is: 1) interior, 2) boundary, 3) atmosphere (if specified)
     create_graph(
-        graph_dir_path=output_root_path,
-        xy=xy,
-        land_mask=land_mask,
-        n_max_levels=n_max_levels,
-        hierarchical=hierarchical,
-        create_plot=create_plot,
+        xy=xy_interior[interior_mask],
+        xy_land=xy_interior[~interior_mask],  # Coordinates of land points
+        xy_boundary=xy_boundary[
+            boundary_mask
+        ],  # Only encode from these additional grid nodes
+        xy_atmosphere=xy_atmosphere,
+        use_atmosphere_g2m=use_atmosphere_g2m,
+        **kwargs,
     )
 
 
 def cli(input_args=None):
-    parser = ArgumentParser(description="Graph generation arguments")
+    parser = ArgumentParser(
+        description="Graph generation arguments",
+        formatter_class=ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument(
         "--config_path",
         type=str,
@@ -611,24 +583,94 @@ def cli(input_args=None):
         "--name",
         type=str,
         default="multiscale",
-        help="Name to save graph as (default: multiscale)",
+        help="Name to save graph as",
     )
     parser.add_argument(
         "--plot",
         action="store_true",
-        help="If graphs should be plotted during generation "
-        "(default: False)",
+        help="If graphs should be plotted during generation",
     )
     parser.add_argument(
         "--levels",
         type=int,
         help="Limit multi-scale mesh to given number of levels, "
-        "from bottom up (default: None (no limit))",
+        "from bottom up",
     )
     parser.add_argument(
-        "--hierarchical",
+        "--g2m_radius",
+        type=float,
+        default=0.67,
+        help="Radius within which to connect grid nodes (interior and boundary)"
+        "to mesh, a multiple of mean edge length in mesh",
+    )
+    parser.add_argument(
+        "--g2m_radius_boundary",
+        type=float,
+        default=0.67,
+        help="Radius within which to connect grid nodes (boundary)"
+        "to mesh, a multiple of mean edge length in mesh",
+    )
+    parser.add_argument(
+        "--g2m_radius_atm",
+        type=float,
+        default=0.67,
+        help="Radius within which to connect grid nodes (atmospheric)"
+        "to mesh, a multiple of mean edge length in mesh",
+    )
+    parser.add_argument(
+        "--mesh_node_distance",
+        type=float,
+        default=5000.0,
+        help="(For hierarchical/multiscale graphs) "
+        "Distance between mesh nodes, in meters",
+    )
+    parser.add_argument(
+        "--mesh_refinement_factor",
+        type=float,
+        default=4,
+        help="Factor between number of mesh nodes at each cluster mesh level.",
+    )
+    parser.add_argument(
+        "--grid_to_first_mesh_refinement",
+        type=float,
+        default=6,
+        help="Factor between number of grid nodes and mesh nodes at bottom "
+        "level.",
+    )
+    parser.add_argument(
+        "--type",
+        type=str,
+        help="Which type of graph structure to generate",
+        choices=["multiscale", "hierarchical", "cluster"],
+    )
+    parser.add_argument(
+        "--allow_disconnected",
         action="store_true",
-        help="Generate hierarchical mesh graph (default: False)",
+        help="Allow disconnected nodes in g2m. This is generally a bad idea and"
+        "should only be used for testing purposes.",
+    )
+    parser.add_argument(
+        "--m2g_k",
+        type=int,
+        default=3,
+        help="Number of nearest mesh nodes connected to each grid node in m2g.",
+    )
+    parser.add_argument(
+        "--g2m_mean_degree",
+        type=int,
+        default=None,
+        help="Search for G2M radii (interior, boundary, atmosphere) "
+        "that achieve mean connectivity N per grid node.",
+    )
+    parser.add_argument(
+        "--connect_disconnected",
+        action="store_true",
+        help="Connect remaining disconnected nodes using nearest neighbor.",
+    )
+    parser.add_argument(
+        "--use_atmosphere_g2m",
+        action="store_true",
+        help="Atmosphere as separate grid nodes in g2m encoding (experimental)",
     )
     args = parser.parse_args(input_args)
 
@@ -637,14 +679,29 @@ def cli(input_args=None):
     ), "Specify your config with --config_path"
 
     # Load neural-lam configuration and datastore to use
-    _, datastore = load_config_and_datastore(config_path=args.config_path)
+    _, datastore, datastore_boundary, datastore_atmosphere = (
+        load_config_and_datastores(config_path=args.config_path)
+    )
 
     create_graph_from_datastore(
         datastore=datastore,
-        output_root_path=os.path.join(datastore.root_path, "graph", args.name),
+        datastore_boundary=datastore_boundary,
+        datastore_atmosphere=datastore_atmosphere,
+        graph_dir_path=os.path.join(datastore.root_path, "graphs", args.name),
+        g2m_radius=args.g2m_radius,
+        g2m_radius_boundary=args.g2m_radius_boundary,
+        g2m_radius_atm=args.g2m_radius_atm,
+        mesh_node_distance=args.mesh_node_distance,
+        mesh_refinement_factor=args.mesh_refinement_factor,
+        grid_to_first_mesh_refinement=args.grid_to_first_mesh_refinement,
         n_max_levels=args.levels,
-        hierarchical=args.hierarchical,
+        graph_type=args.type,
         create_plot=args.plot,
+        allow_disconnected=args.allow_disconnected,
+        m2g_k=args.m2g_k,
+        g2m_mean_degree=args.g2m_mean_degree,
+        connect_disconnected=args.connect_disconnected,
+        use_atmosphere_g2m=args.use_atmosphere_g2m,
     )
 
 

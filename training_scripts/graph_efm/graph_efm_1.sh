@@ -13,22 +13,21 @@ pdm run python -m neural_lam.train_model \
     --num_workers 2 \
     --precision bf16-mixed \
     --model graph_efm \
-    --graph hierarchical \
-    --hidden_dim 8 \
-    --processor_layers 2 \
+    --graph cluster \
+    --hidden_dim 128 \
+    --processor_layers 6 \
     --num_past_forcing_steps 1 \
     --num_future_forcing_steps 1 \
     --n_example_pred 1 \
-    --ensemble_size 5 \
-    --batch_size 2 \
+    --batch_size 1 \
     --lr 0.001 \
     --kl_beta 0 \
     --crps_weight 0 \
     --ar_steps_train 1 \
-    --epochs 300 \
-    --val_interval 20 \
+    --epochs 200 \
+    --val_interval 5 \
     --ar_steps_eval 4 \
     --num_sanity_val_steps 0 \
-    --val_steps_to_log 1 2 4 \
+    --val_steps_to_log 1 4 \
     --var_leads_val_plot '{"0":[1,4], "1":[1,4], "2":[1,4], "3":[1,4], "4":[1,4]}' \
-    --devices 1 2
+    --devices 5

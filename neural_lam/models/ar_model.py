@@ -250,6 +250,16 @@ class ARModel(pl.LightningModule):
         # For storing spatial loss maps during evaluation
         self.spatial_loss_maps = []
 
+        # Whether to perform gradient checkpointing at each unroll step
+        if args.grad_checkpointing:
+            self.unroll_ckpt_func = (
+                lambda f, *args: torch.utils.checkpoint.checkpoint(
+                    f, *args, use_reentrant=False
+                )
+            )
+        else:
+            self.unroll_ckpt_func = lambda f, *args: f(*args)
+
     def _create_dataarray_from_tensor(
         self,
         tensor: torch.Tensor,
@@ -360,7 +370,8 @@ class ARModel(pl.LightningModule):
             else:
                 atmosphere_forcing_step = None
 
-            pred_state, pred_std = self.predict_step(
+            pred_state, pred_std = self.unroll_ckpt_func(
+                self.predict_step,
                 prev_state,
                 prev_prev_state,
                 forcing_step,

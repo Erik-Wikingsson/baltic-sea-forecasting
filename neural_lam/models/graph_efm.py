@@ -697,7 +697,8 @@ class GraphEFM(ARProbModel):
                 loss_kl_term,
                 pred_mean,
                 pred_std,
-            ) = self.compute_step_loss(
+            ) = self.unroll_ckpt_func(
+                self.compute_step_loss,
                 prev_states_stacked,
                 target_state,
                 forcing[:, i],

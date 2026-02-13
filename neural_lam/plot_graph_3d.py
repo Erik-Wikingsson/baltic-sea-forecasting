@@ -108,6 +108,11 @@ def main():
         help="Color of boundary grid nodes",
     )
     parser.add_argument(
+        "--use_atmosphere_g2m",
+        action="store_true",
+        help="Include atmosphere grid nodes in the plot",
+    )
+    parser.add_argument(
         "--atmosphere_grid_color",
         type=str,
         default="mediumpurple",
@@ -163,22 +168,21 @@ def main():
     )
     xy_boundary = datastore_boundary.get_xy("forcing", stacked=True)
 
-    atmosphere_mask = datastore_atmosphere.get_atmosphere_mask(
-        stacked=True, invert=False
-    )
-    xy_atmosphere = datastore_atmosphere.get_xy("forcing", stacked=True)
-
     interior_lat_lon = xy_interior[interior_mask]
     boundary_lat_lon = xy_boundary[boundary_mask]
-    atmosphere_lat_lon = xy_atmosphere[atmosphere_mask]
+
+    atmosphere_lat_lon = None
+    if args.use_atmosphere_g2m:
+        atmosphere_mask = datastore_atmosphere.get_atmosphere_mask(
+            stacked=True, invert=False
+        )
+        xy_atmosphere = datastore_atmosphere.get_xy("forcing", stacked=True)
+        atmosphere_lat_lon = xy_atmosphere[atmosphere_mask]
 
     # Plotting is in 3d, with lat-lons
     grid_lat_lon = np.concatenate(
-        (
-            interior_lat_lon,
-            boundary_lat_lon,
-            atmosphere_lat_lon,
-        ),
+        (interior_lat_lon, boundary_lat_lon)
+        + ((atmosphere_lat_lon,) if atmosphere_lat_lon is not None else ()),
         axis=0,
     )  # (num_grid, 2)
 
@@ -253,16 +257,17 @@ def main():
                 pos_filter_func=corner_filter_func,
             )
         )
-        data_objs.append(
-            vis.create_node_plot(
-                atmosphere_lat_lon,
-                "Atmospheric grid Nodes",
-                color=args.atmosphere_grid_color,
-                radius=GRID_RADIUS,
-                size=args.grid_node_size,
-                pos_filter_func=corner_filter_func,
+        if args.use_atmosphere_g2m:
+            data_objs.append(
+                vis.create_node_plot(
+                    atmosphere_lat_lon,
+                    "Atmospheric grid Nodes",
+                    color=args.atmosphere_grid_color,
+                    radius=GRID_RADIUS,
+                    size=args.grid_node_size,
+                    pos_filter_func=corner_filter_func,
+                )
             )
-        )
     else:
         # All grid nodes together
         data_objs.append(

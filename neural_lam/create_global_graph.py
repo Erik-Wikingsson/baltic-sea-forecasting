@@ -22,22 +22,22 @@ from .graphs import vis
 
 
 def load_grid_from_zarr(dataset_path: str) -> np.ndarray:
-    """Load grid lat-lon from zarr. Expects 'latitude' and 'longitude' arrays.
+    """Load grid from zarr. Expects 'latitude' and 'longitude' arrays.
 
     Handles 1D (n_points,) or 2D (n_lat, n_lon) arrays. Returns (n_points, 2)
-    with columns [lat, lon] in degrees.
+    with columns [longitude, latitude] in degrees (x=lon, y=lat convention).
     """
     root = zarr.open(dataset_path, mode="r")
     lat = np.asarray(root["latitude"]).astype(np.float32)
     lon = np.asarray(root["longitude"]).astype(np.float32)
     if lat.ndim == 1 and lon.ndim == 1:
         if lat.shape[0] == lon.shape[0]:
-            return np.stack([lat, lon], axis=1)
+            return np.stack([lon, lat], axis=1)
         # Assume 2D grid: lat (n_lat,), lon (n_lon,)
         lon_2d, lat_2d = np.meshgrid(lon, lat)
-        return np.stack([lat_2d.ravel(), lon_2d.ravel()], axis=1)
+        return np.stack([lon_2d.ravel(), lat_2d.ravel()], axis=1)
     if lat.ndim == 2 and lon.ndim == 2:
-        return np.stack([lat.ravel(), lon.ravel()], axis=1)
+        return np.stack([lon.ravel(), lat.ravel()], axis=1)
     raise ValueError(
         f"Unsupported latitude/longitude shapes: {lat.shape}, {lon.shape}"
     )
@@ -50,12 +50,12 @@ def load_grid_from_datastore(
 
     Returns
     -------
-    grid_lat_lon : (n_interior, 2) interior (sea) points only
-    sea_xy : (n_interior, 2) same as grid_lat_lon (for filter_edges_land)
-    land_xy : (n_land, 2) land points
+    grid_xy : (n_interior, 2) interior (sea) points, [longitude, latitude]
+    sea_xy : (n_interior, 2) same as grid_xy (for filter_edges_land)
+    land_xy : (n_land, 2) land points, [longitude, latitude]
     """
     interior_mask = datastore.get_mask(surface=True, stacked=True, invert=False)
-    xy = datastore.get_xy("state", stacked=True)
+    xy = datastore.get_xy("state", stacked=True)  # (lon, lat) = (x, y)
     sea_xy = xy[interior_mask].astype(np.float32)
     land_xy = xy[~interior_mask].astype(np.float32)
     return sea_xy, sea_xy, land_xy
@@ -63,14 +63,14 @@ def load_grid_from_datastore(
 
 def _filter_icosahedral_mesh_to_sea(
     mesh_cart: np.ndarray,
-    mesh_lat_lon: np.ndarray,
+    mesh_xy: np.ndarray,
     mesh_edge_index: np.ndarray,
     sea_xy: np.ndarray,
     land_xy: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Keep only icosahedral mesh nodes over sea (nearest sea <= nearest land).
 
-    sea_xy, land_xy are (lat, lon). Returns reduced mesh_cart, mesh_lat_lon,
+    sea_xy, land_xy are (lon, lat). Returns reduced mesh_cart, mesh_xy,
     mesh_edge_index (reindexed).
     """
     sea_cart = gutils.node_lat_lon_to_cart(sea_xy)
@@ -88,18 +88,18 @@ def _filter_icosahedral_mesh_to_sea(
             old_to_new[old_idx] = new_idx
             new_idx += 1
     new_mesh_cart = mesh_cart[keep_mask]
-    new_mesh_lat_lon = mesh_lat_lon[keep_mask]
+    new_mesh_xy = mesh_xy[keep_mask]
     # Keep only edges whose endpoints are both kept; reindex
     kept_src = keep_mask[mesh_edge_index[0]] & keep_mask[mesh_edge_index[1]]
     new_src = old_to_new[mesh_edge_index[0, kept_src]]
     new_dst = old_to_new[mesh_edge_index[1, kept_src]]
     new_mesh_edge_index = np.stack([new_src, new_dst], axis=0)
-    return new_mesh_cart, new_mesh_lat_lon, new_mesh_edge_index
+    return new_mesh_cart, new_mesh_xy, new_mesh_edge_index
 
 
 def create_global_graph(
     graph_dir_path: str,
-    grid_lat_lon: np.ndarray,
+    grid_xy: np.ndarray,
     splits: int = 3,
     levels: Optional[int] = None,
     graph_type: str = "multiscale",
@@ -114,6 +114,8 @@ def create_global_graph(
     grid_to_first_mesh_refinement: float = 25,
 ):
     """Create global graph: icosahedral mesh + g2m + m2g.
+
+    grid_xy, sea_xy, land_xy: (N, 2) [longitude, latitude] in degrees (x=lon, y=lat).
 
     Node convention for loader: mesh 0..N_mesh-1, grid N_mesh..N_mesh+N_grid-1.
     When sea_xy and land_xy are provided, m2g edges over land are filtered.
@@ -135,11 +137,11 @@ def create_global_graph(
                 base_max_edge_len_deg=max_edge_len_deg,
             )
         )
-        mesh_lat_lon = bottom_mesh.pos.numpy()
-        mesh_cart = gutils.node_lat_lon_to_cart(mesh_lat_lon)
+        mesh_xy = bottom_mesh.pos.numpy()
+        mesh_cart = gutils.node_lat_lon_to_cart(mesh_xy)
         mesh_edge_index = bottom_mesh.edge_index.numpy()
-        num_mesh = mesh_lat_lon.shape[0]
-        num_grid = grid_lat_lon.shape[0]
+        num_mesh = mesh_xy.shape[0]
+        num_grid = grid_xy.shape[0]
         hierarchical_cluster = len(mesh_pos_list) > 1
     else:
         # Icosahedral (multiscale or hierarchical)
@@ -150,21 +152,21 @@ def create_global_graph(
                 splits=splits, levels=levels
             )
         )
-        mesh_cart, mesh_lat_lon, mesh_edge_index = mesh_levels[-1]
+        mesh_cart, mesh_xy, mesh_edge_index = mesh_levels[-1]
         num_mesh = mesh_cart.shape[0]
-        num_grid = grid_lat_lon.shape[0]
+        num_grid = grid_xy.shape[0]
         hierarchical_cluster = False
         mesh_pos_list = None
         save_graphs_cluster = None
 
         # Restrict mesh to sea-only when ocean/land mask is provided
         if sea_xy is not None and land_xy is not None and land_xy.shape[0] > 0:
-            mesh_cart, mesh_lat_lon, mesh_edge_index = (
+            mesh_cart, mesh_xy, mesh_edge_index = (
                 _filter_icosahedral_mesh_to_sea(
-                    mesh_cart, mesh_lat_lon, mesh_edge_index, sea_xy, land_xy
+                    mesh_cart, mesh_xy, mesh_edge_index, sea_xy, land_xy
                 )
             )
-            num_mesh = mesh_cart.shape[0]
+            num_mesh = mesh_xy.shape[0]
             print(f"Filtered icosahedral mesh to sea-only: {num_mesh} nodes")
 
     num_m2m_edges = mesh_edge_index.shape[1]
@@ -180,10 +182,10 @@ def create_global_graph(
     print(f"Mesh: {num_mesh} nodes, mean edge length (chord) = {dm:.6f}")
 
     # G2M: grid -> mesh (radius query in Cartesian for chord distance on sphere;
-    #      icosahedral mesh is native Cartesian; cluster is lat-lon but we pass
+    #      icosahedral mesh is native Cartesian; cluster is lon-lat but we pass
     #      mesh_cart so radius is correct globally)
     g2m_ei, g2m_len, g2m_vdiff = global_icosahedral_mesh.g2m_radius_query(
-        grid_lat_lon,
+        grid_xy,
         mesh_cart,
         mesh_edge_index,
         radius_factor=g2m_radius,
@@ -197,7 +199,7 @@ def create_global_graph(
 
     # Connect disconnected g2m nodes
     if connect_disconnected:
-        pos_g2m = np.concatenate([mesh_lat_lon, grid_lat_lon], axis=0)
+        pos_g2m = np.concatenate([mesh_xy, grid_xy], axis=0)
         pyg_g2m = pyg.data.Data(
             pos=torch.from_numpy(pos_g2m).float(),
             edge_index=g2m_edge_index_t.clone(),
@@ -207,7 +209,7 @@ def create_global_graph(
         is_grid_interior = np.array([False] * num_mesh + [True] * num_grid)
         is_grid_boundary = np.zeros(num_mesh + num_grid, dtype=bool)
         is_grid_atm = np.zeros(num_mesh + num_grid, dtype=bool)
-        kdt_m = scipy.spatial.KDTree(mesh_lat_lon)
+        kdt_m = scipy.spatial.KDTree(mesh_xy)
         gutils.connect_disconnected_g2m(
             pyg_g2m,
             is_mesh,
@@ -215,7 +217,7 @@ def create_global_graph(
             is_grid_boundary,
             is_grid_atm,
             list(range(num_mesh)),
-            mesh_lat_lon,
+            mesh_xy,
             kdt_m,
             dm,
             g2m_radius,
@@ -235,7 +237,7 @@ def create_global_graph(
 
     # M2G: mesh -> grid (knn)
     m2g_ei, m2g_len, m2g_vdiff = global_icosahedral_mesh.m2g_knn(
-        grid_lat_lon, mesh_cart, k=m2g_k
+        grid_xy, mesh_cart, k=m2g_k
     )
     m2g_edge_index_saved = np.stack(
         [m2g_ei[0], m2g_ei[1] + num_mesh], axis=0
@@ -246,7 +248,7 @@ def create_global_graph(
 
     # Filter m2g edges over land when sea_xy and land_xy are provided
     if sea_xy is not None and land_xy is not None and land_xy.shape[0] > 0:
-        pos_m2g = np.concatenate([mesh_lat_lon, grid_lat_lon], axis=0)
+        pos_m2g = np.concatenate([mesh_xy, grid_xy], axis=0)
         pyg_m2g = pyg.data.Data(
             pos=torch.from_numpy(pos_m2g).float(),
             edge_index=m2g_edge_index_t.clone(),
@@ -264,7 +266,7 @@ def create_global_graph(
 
     # Connect disconnected m2g grid nodes
     if connect_disconnected:
-        pos_m2g = np.concatenate([mesh_lat_lon, grid_lat_lon], axis=0)
+        pos_m2g = np.concatenate([mesh_xy, grid_xy], axis=0)
         pyg_m2g = pyg.data.Data(
             pos=torch.from_numpy(pos_m2g).float(),
             edge_index=m2g_edge_index_t.clone(),
@@ -272,15 +274,15 @@ def create_global_graph(
         gutils.add_edge_features_pyg(pyg_m2g)
         is_mesh = np.array([True] * num_mesh + [False] * num_grid)
         is_grid = np.array([False] * num_mesh + [True] * num_grid)
-        kdt_m = scipy.spatial.KDTree(mesh_lat_lon)
+        kdt_m = scipy.spatial.KDTree(mesh_xy)
         xy_land = land_xy if land_xy is not None else np.empty((0, 2))
         gutils.connect_disconnected_m2g(
             pyg_m2g,
             is_mesh,
             is_grid,
-            grid_lat_lon,
+            grid_xy,
             list(range(num_mesh)),
-            mesh_lat_lon,
+            mesh_xy,
             kdt_m,
             xy_land,
         )
@@ -300,9 +302,7 @@ def create_global_graph(
     if graph_type == "cluster" and save_graphs_cluster is not None:
         m2m_graphs = save_graphs_cluster["m2m"]
         saving.save_edges_list(m2m_graphs, "m2m", graph_dir_path)
-        mesh_features_list = [
-            g.pos[:, [1, 0]] for g in m2m_graphs
-        ]  # (lon, lat) for PlateCarree
+        mesh_features_list = [g.pos for g in m2m_graphs]  # (lon, lat) already
         if hierarchical_cluster:
             mesh_up = save_graphs_cluster["mesh_up"]
             mesh_down = save_graphs_cluster["mesh_down"]
@@ -314,61 +314,57 @@ def create_global_graph(
             mesh_cart, mesh_edge_index
         )
         m2m_src, m2m_dst = mesh_edge_index[0], mesh_edge_index[1]
-        m2m_lat_lon_src = global_icosahedral_mesh._cartesian_to_lat_lon(
+        m2m_lon_lat_src = global_icosahedral_mesh._cartesian_to_lat_lon(
             mesh_cart[m2m_src]
         )
-        m2m_lat_lon_dst = global_icosahedral_mesh._cartesian_to_lat_lon(
+        m2m_lon_lat_dst = global_icosahedral_mesh._cartesian_to_lat_lon(
             mesh_cart[m2m_dst]
         )
-        m2m_vdiff = (m2m_lat_lon_dst - m2m_lat_lon_src).astype(np.float32)
+        # Edge feature (dlat, dlon) to match g2m/m2g
+        dlon = (m2m_lon_lat_dst[:, 0] - m2m_lon_lat_src[:, 0]).astype(
+            np.float32
+        )
+        dlat = (m2m_lon_lat_dst[:, 1] - m2m_lon_lat_src[:, 1]).astype(
+            np.float32
+        )
+        m2m_vdiff = np.stack([dlat, dlon], axis=1)
         m2m_graph = SimpleNamespace(
             edge_index=mesh_edge_index_t,
             len=torch.from_numpy(m2m_len),
             vdiff=torch.from_numpy(m2m_vdiff),
         )
         saving.save_edges_list([m2m_graph], "m2m", graph_dir_path)
-        mesh_lon_lat = mesh_lat_lon[:, [1, 0]]
-        mesh_features_list = [torch.from_numpy(mesh_lon_lat)]
+        mesh_features_list = [torch.from_numpy(mesh_xy)]  # (lon, lat) already
     torch.save(
         mesh_features_list,
         os.path.join(graph_dir_path, "mesh_features.pt"),
     )
 
     if create_plot:
-        # (lon, lat) for plotting: x=lon, y=lat
-        # Cluster mesh pos is (lon, lat) when sea_xy is (lon, lat).
-        # Icosahedral mesh is (lat, lon); swap to (lon, lat) for plot.
-        if graph_type == "cluster":
-            mesh_lon_lat = mesh_lat_lon  # already (lon, lat)
-        else:
-            mesh_lon_lat = mesh_lat_lon[:, [1, 0]]
-        # Grid: (lon, lat) for plot. If col0 looks like lat (|col0|<=90), swap.
-        col0_max_abs = np.nanmax(np.abs(grid_lat_lon[:, 0]))
-        grid_lon_lat = (
-            grid_lat_lon[:, [1, 0]] if col0_max_abs <= 90 else grid_lat_lon
-        )
+        # grid_xy and mesh_xy are (lon, lat) throughout; plot x=lon, y=lat
+        mesh_plot_xy = mesh_xy
+        grid_plot_xy = grid_xy
 
         # Overview: x=lon, y=lat
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.scatter(
-            mesh_lon_lat[:, 0],
-            mesh_lon_lat[:, 1],
+            mesh_plot_xy[:, 0],
+            mesh_plot_xy[:, 1],
             s=1,
             c="orange",
             label="Mesh",
         )
-        step = max(1, num_grid // 5000)
         ax.scatter(
-            grid_lon_lat[::step, 0],
-            grid_lon_lat[::step, 1],
+            grid_plot_xy[:, 0],
+            grid_plot_xy[:, 1],
             s=0.5,
             c="blue",
-            alpha=0.5,
-            label="Grid (subsample)",
+            alpha=0.3,
+            label="Grid",
         )
         ax.set_xlabel("Longitude")
         ax.set_ylabel("Latitude")
-        ax.legend()
+        ax.legend(loc="upper right")
         ax.set_title("Global graph: mesh and grid")
         fig.savefig(
             os.path.join(graph_dir_path, "global_graph_overview.png"),
@@ -377,7 +373,7 @@ def create_global_graph(
         plt.close(fig)
 
         # Combined pos (lon, lat) for g2m/m2g plots
-        pos_combined = np.concatenate([mesh_lon_lat, grid_lon_lat], axis=0)
+        pos_combined = np.concatenate([mesh_plot_xy, grid_plot_xy], axis=0)
         is_mesh = np.array([True] * num_mesh + [False] * num_grid)
         is_any_grid = np.array([False] * num_mesh + [True] * num_grid)
 
@@ -397,7 +393,7 @@ def create_global_graph(
                 )
         else:
             mesh_level_graph = pyg.data.Data(
-                pos=torch.from_numpy(mesh_lon_lat).float(),
+                pos=torch.from_numpy(mesh_plot_xy).float(),
                 edge_index=mesh_edge_index_t,
             )
             vis.plot_graph(
@@ -558,12 +554,12 @@ def cli(input_args=None):
     _, datastore, _, _ = load_config_and_datastores(
         config_path=args.config_path
     )
-    grid_lat_lon, sea_xy, land_xy = load_grid_from_datastore(datastore)
+    grid_xy, sea_xy, land_xy = load_grid_from_datastore(datastore)
     graph_dir_path = os.path.join(datastore.root_path, "graphs", args.name)
 
     create_global_graph(
         graph_dir_path=graph_dir_path,
-        grid_lat_lon=grid_lat_lon,
+        grid_xy=grid_xy,
         splits=args.splits,
         levels=args.levels,
         graph_type=args.type,

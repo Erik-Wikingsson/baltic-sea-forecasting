@@ -15,17 +15,16 @@ from . import utils as gutils
 BASE_MAX_EDGE_LEN_DEG = 2.0
 
 
-def _cart_to_lat_lon_matching_utils(cart: np.ndarray) -> np.ndarray:
-    """Convert 3D Cartesian (from node_lat_lon_to_cart) to (lat, lon)."""
+def _cart_to_lon_lat_matching_utils(cart: np.ndarray) -> np.ndarray:
+    """Convert 3D Cartesian (from node_lat_lon_to_cart) to (lon, lat) in degrees."""
     r = np.linalg.norm(cart, axis=1, keepdims=True)
     cart = cart / (r + 1e-12)
-    # node_lat_lon_to_cart: phi=lat, theta=90-lon, x=cos(phi)*sin(theta), ...
-    # So theta = arccos(z), phi = atan2(y, x)
-    theta = np.arccos(np.clip(cart[:, 2], -1, 1))
-    phi = np.arctan2(cart[:, 1], cart[:, 0])
-    lat = np.rad2deg(phi)
-    lon = 90.0 - np.rad2deg(theta)
-    return np.stack([lat, lon], axis=1).astype(np.float32)
+    # z = sin(lat), x = cos(lat)*cos(lon), y = cos(lat)*sin(lon)
+    lat_rad = np.arcsin(np.clip(cart[:, 2], -1, 1))
+    lon_rad = np.arctan2(cart[:, 1], cart[:, 0])
+    lon = np.rad2deg(lon_rad)
+    lat = np.rad2deg(lat_rad)
+    return np.stack([lon, lat], axis=1).astype(np.float32)
 
 
 def _faces_to_edges_both_dirs(faces: np.ndarray) -> np.ndarray:
@@ -41,16 +40,16 @@ def _faces_to_edges_both_dirs(faces: np.ndarray) -> np.ndarray:
     return edges_both
 
 
-def build_graph_from_mesh_pos_sphere(mesh_lat_lon: np.ndarray) -> pyg.data.Data:
+def build_graph_from_mesh_pos_sphere(mesh_xy: np.ndarray) -> pyg.data.Data:
     """Build mesh graph from node positions on sphere using 3D ConvexHull.
 
-    mesh_lat_lon: (N, 2) lat-lon in degrees. Edges from spherical Delaunay
-    (ConvexHull of 3D points on unit sphere).
+    mesh_xy: (N, 2) [longitude, latitude] in degrees (x=lon, y=lat).
+    Edges from spherical Delaunay (ConvexHull of 3D points on unit sphere).
     """
-    mesh_3d = gutils.node_lat_lon_to_cart(mesh_lat_lon)
+    mesh_3d = gutils.node_lat_lon_to_cart(mesh_xy)
     hull = scipy.spatial.ConvexHull(mesh_3d)
     edge_index = _faces_to_edges_both_dirs(hull.simplices)
-    pos = torch.tensor(mesh_lat_lon, dtype=torch.float32)
+    pos = torch.tensor(mesh_xy, dtype=torch.float32)
     graph = pyg.data.Data(
         pos=pos,
         edge_index=torch.from_numpy(edge_index).long(),
@@ -77,8 +76,8 @@ def build_cluster_mesh_graph_global(
 
     Parameters
     ----------
-    sea_xy : (N_sea, 2) lat-lon in degrees (interior / sea grid points)
-    land_xy : (N_land, 2) lat-lon in degrees (land grid points)
+    sea_xy : (N_sea, 2) [longitude, latitude] in degrees (interior / sea grid points)
+    land_xy : (N_land, 2) [longitude, latitude] in degrees (land grid points)
     mesh_refinement_factor : factor between levels
     grid_to_first_mesh_refinement : ratio grid nodes / first-level mesh nodes
     limit_mesh_levels : max number of levels (default: from formula)
@@ -89,7 +88,7 @@ def build_cluster_mesh_graph_global(
 
     Returns
     -------
-    mesh_pos : list of (N_i, 2) tensors, lat-lon per level
+    mesh_pos : list of (N_i, 2) tensors, [lon, lat] per level
     bottom_mesh : pyg Data (pos, edge_index, len, vdiff) for finest level
     save_graphs : dict with "m2m", "mesh_up", "mesh_down"
     """
@@ -120,7 +119,7 @@ def build_cluster_mesh_graph_global(
             num_clusters = max(4, num_clusters)  # ConvexHull needs >= 4 in 3D
         else:
             prev_level_pos = gutils.node_lat_lon_to_cart(
-                mesh_level_graphs[-1].pos.numpy()
+                mesh_level_graphs[-1].pos.numpy()  # (lon, lat)
             )
             num_clusters = int(
                 np.round(prev_level_pos.shape[0] / mesh_refinement_factor)
@@ -137,9 +136,9 @@ def build_cluster_mesh_graph_global(
         centers_3d = kmeans.cluster_centers_
         r = np.linalg.norm(centers_3d, axis=1, keepdims=True)
         centers_3d = centers_3d / (r + 1e-12)
-        level_lat_lon = _cart_to_lat_lon_matching_utils(centers_3d)
+        level_lon_lat = _cart_to_lon_lat_matching_utils(centers_3d)
 
-        level_graph = build_graph_from_mesh_pos_sphere(level_lat_lon)
+        level_graph = build_graph_from_mesh_pos_sphere(level_lon_lat)
         # Coarsest level (0) has longest edges; use largest max for level 0.
         max_edge_len = base_max_edge_len_deg * (
             mesh_refinement_factor ** (0.5 * (num_mesh_levels - 1 - level_i))

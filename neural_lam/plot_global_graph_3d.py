@@ -131,30 +131,28 @@ def main():
         datastore=datastore,
     )
 
-    # Interior grid
+    # Interior grid: get_xy returns (lon, lat) = (x, y); use as-is for vis
     interior_mask = datastore.get_mask(surface=True, stacked=True, invert=False)
     xy = datastore.get_xy("state", stacked=True)
-    grid_lat_lon_raw = xy[interior_mask]  # (lon, lat) from MDP
-    # vis uses node_lat_lon_to_cart(lat, lon) -> swap to (lat, lon)
-    grid_lat_lon = np.asarray(grid_lat_lon_raw[:, [1, 0]], dtype=np.float32)
+    grid_xy = np.asarray(xy[interior_mask], dtype=np.float32)
 
-    # Mesh positions
+    # Mesh positions: mesh_features.pt stores (lon, lat) per level
     mesh_pos_list = torch.load(
         os.path.join(graph_dir_path, "mesh_features.pt"),
         map_location="cpu",
         weights_only=True,
     )
 
-    # Convert each level (lon, lat) -> (lat, lon) for vis
-    def to_lat_lon(level_pos):
-        p = (
+    def to_numpy(level_pos):
+        return (
             level_pos.numpy()
             if isinstance(level_pos, torch.Tensor)
             else level_pos
         )
-        return np.asarray(p[:, [1, 0]], dtype=np.float32)
 
-    mesh_lat_lon_level = [to_lat_lon(p) for p in mesh_pos_list]
+    mesh_xy_level = [
+        np.asarray(to_numpy(p), dtype=np.float32) for p in mesh_pos_list
+    ]
 
     # Edge indices (reindexed by load_graph: grid 0..N_grid-1, mesh 0..N_mesh-1)
     g2m_edge_index = graph_ldict["g2m_edge_index"].numpy()
@@ -169,10 +167,10 @@ def main():
 
     data_objs = []
 
-    # Grid nodes
+    # Grid nodes (lon, lat) = (x, y)
     data_objs.append(
         vis.create_node_plot(
-            grid_lat_lon,
+            grid_xy,
             "Grid Nodes",
             color=args.grid_color,
             radius=GRID_RADIUS,
@@ -192,7 +190,7 @@ def main():
 
         for bot_level_i, intra_ei in enumerate(m2m_edge_index):
             top_level_i = bot_level_i + 1
-            bot_pos = mesh_lat_lon_level[bot_level_i]
+            bot_pos = mesh_xy_level[bot_level_i]
             bot_radius = mesh_radius + bot_level_i * args.mesh_level_dist
 
             data_objs.append(
@@ -220,7 +218,7 @@ def main():
             if top_level_i < len(m2m_edge_index):
                 up_ei = mesh_up_edge_index[bot_level_i]
                 down_ei = mesh_down_edge_index[bot_level_i]
-                top_pos = mesh_lat_lon_level[top_level_i]
+                top_pos = mesh_xy_level[top_level_i]
                 top_radius = mesh_radius + top_level_i * args.mesh_level_dist
                 data_objs.append(
                     vis.create_edge_plot(
@@ -247,9 +245,9 @@ def main():
                     )
                 )
 
-        grid_con_lat_lon = mesh_lat_lon_level[0]
+        grid_con_xy = mesh_xy_level[0]
     else:
-        mesh_lat_lon = mesh_lat_lon_level[0]
+        mesh_xy = mesh_xy_level[0]
         # Non-hierarchical: m2m_edge_index is a single tensor
         m2m_ei = graph_ldict["m2m_edge_index"]
         m2m_edge_index = (
@@ -257,7 +255,7 @@ def main():
         )
         data_objs.append(
             vis.create_node_plot(
-                mesh_lat_lon,
+                mesh_xy,
                 "Mesh Nodes",
                 radius=mesh_radius,
                 color=args.mesh_color,
@@ -267,8 +265,8 @@ def main():
         data_objs.append(
             vis.create_edge_plot(
                 m2m_edge_index,
-                mesh_lat_lon,
-                mesh_lat_lon,
+                mesh_xy,
+                mesh_xy,
                 "Mesh Edges",
                 from_radius=mesh_radius,
                 to_radius=mesh_radius,
@@ -276,14 +274,14 @@ def main():
                 width=mesh_edge_width,
             )
         )
-        grid_con_lat_lon = mesh_lat_lon
+        grid_con_xy = mesh_xy
 
     # G2M edges (grid -> mesh bottom)
     data_objs.append(
         vis.create_edge_plot(
             g2m_edge_index,
-            grid_lat_lon,
-            grid_con_lat_lon,
+            grid_xy,
+            grid_con_xy,
             "G2M Edges",
             color=args.g2m_color,
             width=args.edge_width,
@@ -296,8 +294,8 @@ def main():
     data_objs.append(
         vis.create_edge_plot(
             m2g_edge_index,
-            grid_con_lat_lon,
-            grid_lat_lon,
+            grid_con_xy,
+            grid_xy,
             "M2G Edges",
             color=args.m2g_color,
             width=args.edge_width,

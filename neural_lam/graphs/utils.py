@@ -7,21 +7,27 @@ import torch_geometric as pyg
 from torch_geometric.utils.convert import from_networkx
 
 
-def node_lat_lon_to_cart(node_lat_lon):
-    """Convert node positions from lat-lon to cartesian.
+def node_lat_lon_to_cart(node_xy):
+    """Convert node positions from longitude-latitude to Cartesian on unit sphere.
+
+    Convention: x = longitude (column 0), y = latitude (column 1), matching
+    datastore get_xy and plotting (x-axis = lon, y-axis = lat).
 
     Parameters
     ----------
-    node_pos_lat_lon : np.ndarray
-        (N_nodes, 2) array, lat-lon coordinates.
+    node_xy : np.ndarray
+        (N_nodes, 2) array, columns [longitude, latitude] in degrees.
 
     Returns
     -------
     np.ndarray
-        (N_nodes, 3) array, cartesian coordinates.
+        (N_nodes, 3) array, Cartesian coordinates on unit sphere.
     """
-    phi_grid = np.deg2rad(node_lat_lon[:, 0])
-    theta_grid = np.deg2rad(90 - node_lat_lon[:, 1])
+    lon_rad = np.deg2rad(node_xy[:, 0])
+    lat_rad = np.deg2rad(node_xy[:, 1])
+    # theta = 90 - lat (so z = cos(theta) = sin(lat)), phi = lon
+    theta_grid = np.deg2rad(90.0) - lat_rad
+    phi_grid = lon_rad
 
     cart = np.stack(
         [

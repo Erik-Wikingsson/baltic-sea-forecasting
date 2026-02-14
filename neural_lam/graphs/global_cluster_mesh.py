@@ -1,0 +1,204 @@
+# Standard library
+from typing import Optional
+
+# Third-party
+import numpy as np
+import scipy.spatial
+import torch
+import torch_geometric as pyg
+from sklearn.cluster import KMeans
+
+# Local
+from . import utils as gutils
+
+# Max m2m edge length for land filtering in degrees
+BASE_MAX_EDGE_LEN_DEG = 2.0
+
+
+def _cart_to_lat_lon_matching_utils(cart: np.ndarray) -> np.ndarray:
+    """Convert 3D Cartesian (from node_lat_lon_to_cart) to (lat, lon)."""
+    r = np.linalg.norm(cart, axis=1, keepdims=True)
+    cart = cart / (r + 1e-12)
+    # node_lat_lon_to_cart: phi=lat, theta=90-lon, x=cos(phi)*sin(theta), ...
+    # So theta = arccos(z), phi = atan2(y, x)
+    theta = np.arccos(np.clip(cart[:, 2], -1, 1))
+    phi = np.arctan2(cart[:, 1], cart[:, 0])
+    lat = np.rad2deg(phi)
+    lon = 90.0 - np.rad2deg(theta)
+    return np.stack([lat, lon], axis=1).astype(np.float32)
+
+
+def _faces_to_edges_both_dirs(faces: np.ndarray) -> np.ndarray:
+    """Convert (F, 3) faces to (2, E) edge index, both directions."""
+    edges = set()
+    for f in faces:
+        a, b, c = f[0], f[1], f[2]
+        edges.add((min(a, b), max(a, b)))
+        edges.add((min(b, c), max(b, c)))
+        edges.add((min(c, a), max(c, a)))
+    edges = np.array(list(edges), dtype=np.int64).T
+    edges_both = np.concatenate([edges, edges[[1, 0]]], axis=1)
+    return edges_both
+
+
+def build_graph_from_mesh_pos_sphere(mesh_lat_lon: np.ndarray) -> pyg.data.Data:
+    """Build mesh graph from node positions on sphere using 3D ConvexHull.
+
+    mesh_lat_lon: (N, 2) lat-lon in degrees. Edges from spherical Delaunay
+    (ConvexHull of 3D points on unit sphere).
+    """
+    mesh_3d = gutils.node_lat_lon_to_cart(mesh_lat_lon)
+    hull = scipy.spatial.ConvexHull(mesh_3d)
+    edge_index = _faces_to_edges_both_dirs(hull.simplices)
+    pos = torch.tensor(mesh_lat_lon, dtype=torch.float32)
+    graph = pyg.data.Data(
+        pos=pos,
+        edge_index=torch.from_numpy(edge_index).long(),
+    )
+    gutils.add_edge_features_pyg(graph)
+    return graph
+
+
+def build_cluster_mesh_graph_global(
+    sea_xy: np.ndarray,
+    land_xy: np.ndarray,
+    mesh_refinement_factor: float = 9,
+    grid_to_first_mesh_refinement: float = 25,
+    limit_mesh_levels: Optional[int] = None,
+    mesh_plot_function=None,
+    random_state: int = 42,
+    base_max_edge_len_deg: float = BASE_MAX_EDGE_LEN_DEG,
+):
+    """Build hierarchical cluster mesh over the globe (sea points only).
+
+    Uses KMeans in 3D Cartesian (unit sphere) so clusters respect spherical
+    geometry. Mesh edges from ConvexHull (spherical Delaunay). Edges crossing
+    land are filtered (same as LAM cluster_mesh).
+
+    Parameters
+    ----------
+    sea_xy : (N_sea, 2) lat-lon in degrees (interior / sea grid points)
+    land_xy : (N_land, 2) lat-lon in degrees (land grid points)
+    mesh_refinement_factor : factor between levels
+    grid_to_first_mesh_refinement : ratio grid nodes / first-level mesh nodes
+    limit_mesh_levels : max number of levels (default: from formula)
+    mesh_plot_function : optional callback(level_graph, title)
+    random_state : for KMeans
+    base_max_edge_len_deg : max edge length in degrees for land filter (scale
+        per level)
+
+    Returns
+    -------
+    mesh_pos : list of (N_i, 2) tensors, lat-lon per level
+    bottom_mesh : pyg Data (pos, edge_index, len, vdiff) for finest level
+    save_graphs : dict with "m2m", "mesh_up", "mesh_down"
+    """
+    n_sea = sea_xy.shape[0]
+    possible_mesh_levels = int(
+        np.floor(
+            np.log(n_sea / grid_to_first_mesh_refinement)
+            / np.log(mesh_refinement_factor)
+        )
+    )
+    if limit_mesh_levels is None:
+        num_mesh_levels = possible_mesh_levels
+    else:
+        num_mesh_levels = min(possible_mesh_levels, limit_mesh_levels)
+    num_mesh_levels = max(1, num_mesh_levels)
+
+    sea_3d = gutils.node_lat_lon_to_cart(sea_xy)
+
+    mesh_level_graphs = []
+    mesh_up_graphs = []
+    mesh_down_graphs = []
+
+    for level_i in range(num_mesh_levels):
+        print(f"Running KMeans for global cluster level {level_i}...")
+        if level_i == 0:
+            prev_level_pos = sea_3d
+            num_clusters = int(np.round(n_sea / grid_to_first_mesh_refinement))
+            num_clusters = max(4, num_clusters)  # ConvexHull needs >= 4 in 3D
+        else:
+            prev_level_pos = gutils.node_lat_lon_to_cart(
+                mesh_level_graphs[-1].pos.numpy()
+            )
+            num_clusters = int(
+                np.round(prev_level_pos.shape[0] / mesh_refinement_factor)
+            )
+            num_clusters = max(2, num_clusters)
+
+        kmeans = KMeans(
+            n_clusters=num_clusters,
+            init="k-means++",
+            n_init=1,
+            random_state=random_state,
+        )
+        closest_cluster_index = kmeans.fit_predict(prev_level_pos)
+        centers_3d = kmeans.cluster_centers_
+        r = np.linalg.norm(centers_3d, axis=1, keepdims=True)
+        centers_3d = centers_3d / (r + 1e-12)
+        level_lat_lon = _cart_to_lat_lon_matching_utils(centers_3d)
+
+        level_graph = build_graph_from_mesh_pos_sphere(level_lat_lon)
+        # Coarsest level (0) has longest edges; use largest max for level 0.
+        max_edge_len = base_max_edge_len_deg * (
+            mesh_refinement_factor ** (0.5 * (num_mesh_levels - 1 - level_i))
+        )
+        gutils.filter_edges_land(
+            level_graph,
+            sea_xy,
+            land_xy,
+            max_edge_len=max_edge_len,
+        )
+        gutils.add_edge_features_pyg(level_graph)
+        mesh_level_graphs.append(level_graph)
+
+        if mesh_plot_function is not None:
+            mesh_plot_function(level_graph, f"Mesh graph, level {level_i}")
+
+        if level_i > 0:
+            n_prev = mesh_level_graphs[level_i - 1].pos.shape[0]
+            up_edge_index = torch.stack(
+                (
+                    torch.arange(n_prev, dtype=torch.long),
+                    n_prev
+                    + torch.tensor(closest_cluster_index, dtype=torch.long),
+                ),
+                dim=0,
+            )
+            up_graph = pyg.data.Data(
+                edge_index=up_edge_index,
+                pos=torch.cat(
+                    (
+                        mesh_level_graphs[level_i - 1].pos,
+                        level_graph.pos,
+                    ),
+                    dim=0,
+                ),
+            )
+            gutils.add_edge_features_pyg(up_graph)
+            mesh_up_graphs.append(up_graph)
+
+            down_graph = pyg.data.Data(
+                edge_index=torch.stack((up_edge_index[1], up_edge_index[0])),
+                pos=up_graph.pos,
+            )
+            gutils.add_edge_features_pyg(down_graph)
+            mesh_down_graphs.append(down_graph)
+
+            if mesh_plot_function is not None:
+                mesh_plot_function(
+                    down_graph, f"Down graph, {level_i} -> {level_i - 1}"
+                )
+                mesh_plot_function(
+                    up_graph, f"Up graph, {level_i - 1} -> {level_i}"
+                )
+
+    mesh_pos = [g.pos for g in mesh_level_graphs]
+    save_graphs = {
+        "m2m": mesh_level_graphs,
+        "mesh_up": mesh_up_graphs,
+        "mesh_down": mesh_down_graphs,
+    }
+    bottom_mesh = mesh_level_graphs[0]
+    return mesh_pos, bottom_mesh, save_graphs

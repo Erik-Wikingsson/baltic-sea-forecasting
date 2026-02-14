@@ -111,6 +111,8 @@ def load_graph(graph_dir_path, datastore, device="cpu"):
         """
         Make both sender and receiver indices of edge_index start at 0
         """
+        if edge_index.numel() == 0 or edge_index.shape[1] == 0:
+            return edge_index
         return edge_index - edge_index.min(dim=1, keepdim=True)[0]
 
     # Load static node features
@@ -202,9 +204,15 @@ def load_graph(graph_dir_path, datastore, device="cpu"):
     m2g_features = loads_file("m2g_features.pt")  # (M_m2g, d_edge_f)
 
     # Normalize by dividing with longest edge (found in m2m)
+    # Skip empty levels (e.g. global cluster level with all edges filtered)
     longest_edge = max(
-        torch.max(level_features[:, 0]) for level_features in m2m_features
-    )  # Col. 0 is length
+        (
+            torch.max(level_features[:, 0]).item()
+            for level_features in m2m_features
+            if level_features.shape[0] > 0
+        ),
+        default=1.0,
+    )
 
     m2m_features = BufferList(m2m_features, persistent=False)
     m2m_features /= longest_edge

@@ -1,0 +1,317 @@
+# Standard library
+from typing import List, Tuple
+
+# Third-party
+import numpy as np
+import scipy.spatial
+
+# Local
+from . import utils as gutils
+
+
+def _icosahedron_vertices() -> np.ndarray:
+    """Vertices of unit icosahedron (12 points on sphere)."""
+    phi = (1.0 + np.sqrt(5.0)) / 2.0
+    verts = np.array(
+        [
+            [-1, phi, 0],
+            [1, phi, 0],
+            [-1, -phi, 0],
+            [1, -phi, 0],
+            [0, -1, phi],
+            [0, 1, phi],
+            [0, -1, -phi],
+            [0, 1, -phi],
+            [phi, 0, -1],
+            [phi, 0, 1],
+            [-phi, 0, -1],
+            [-phi, 0, 1],
+        ],
+        dtype=np.float64,
+    )
+    verts /= np.linalg.norm(verts, axis=1, keepdims=True)
+    return verts
+
+
+def _icosahedron_faces() -> np.ndarray:
+    """Faces of icosahedron (20 triangles, 3 vertex indices each)."""
+    return np.array(
+        [
+            [0, 11, 5],
+            [0, 5, 1],
+            [0, 1, 7],
+            [0, 7, 10],
+            [0, 10, 11],
+            [1, 5, 9],
+            [5, 11, 4],
+            [11, 10, 2],
+            [10, 7, 6],
+            [7, 1, 8],
+            [3, 9, 4],
+            [3, 4, 2],
+            [3, 2, 6],
+            [3, 6, 8],
+            [3, 8, 9],
+            [4, 9, 5],
+            [2, 4, 11],
+            [6, 2, 10],
+            [8, 6, 7],
+            [9, 8, 1],
+        ],
+        dtype=np.int64,
+    )
+
+
+def _cartesian_to_lat_lon(cart: np.ndarray) -> np.ndarray:
+    """Convert (N, 3) Cartesian on unit sphere to (N, 2) lat-lon in degrees."""
+    r = np.linalg.norm(cart, axis=1, keepdims=True)
+    cart = cart / (r + 1e-12)
+    # z = sin(lat), x = cos(lat)*cos(lon), y = cos(lat)*sin(lon)
+    lat_rad = np.arcsin(np.clip(cart[:, 2], -1, 1))
+    lon_rad = np.arctan2(cart[:, 1], cart[:, 0])
+    lat_lon = np.stack(
+        [np.rad2deg(lat_rad), np.rad2deg(lon_rad)], axis=1
+    ).astype(np.float32)
+    return lat_lon
+
+
+def _subdivide_to_sphere(
+    vertices: np.ndarray, faces: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Subdivide each triangle into 4, project new vertices to unit sphere.
+    Shared edges get a single new vertex (deduplicated by edge key).
+    """
+    new_vertices = list(vertices)
+    edge_to_idx = {}
+
+    def get_midpoint(i: int, j: int) -> int:
+        key = (min(i, j), max(i, j))
+        if key not in edge_to_idx:
+            mid = (vertices[i] + vertices[j]) / 2
+            mid /= np.linalg.norm(mid)
+            edge_to_idx[key] = len(new_vertices)
+            new_vertices.append(mid)
+        return edge_to_idx[key]
+
+    new_faces = []
+    for f in faces:
+        a, b, c = f[0], f[1], f[2]
+        m_ab = get_midpoint(a, b)
+        m_bc = get_midpoint(b, c)
+        m_ca = get_midpoint(c, a)
+        new_faces.append([a, m_ab, m_ca])
+        new_faces.append([m_ab, b, m_bc])
+        new_faces.append([m_ca, m_bc, c])
+        new_faces.append([m_ab, m_bc, m_ca])
+
+    return np.array(new_vertices, dtype=np.float64), np.array(
+        new_faces, dtype=np.int64
+    )
+
+
+def faces_to_edges(faces: np.ndarray) -> np.ndarray:
+    """Convert (F, 3) faces to (2, E) edge index, undirected."""
+    edges = set()
+    for f in faces:
+        a, b, c = f[0], f[1], f[2]
+        edges.add((min(a, b), max(a, b)))
+        edges.add((min(b, c), max(b, c)))
+        edges.add((min(c, a), max(c, a)))
+    edges = np.array(list(edges), dtype=np.int64).T  # (2, E)
+    # Both directions for directed graph
+    edges_both = np.concatenate([edges, edges[[1, 0]]], axis=1)
+    return edges_both
+
+
+def get_icosahedral_mesh_level(
+    splits: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build one level of icosahedral mesh on unit sphere.
+
+    splits: number of 1-to-4 subdivisions (0 = base icosahedron).
+
+    Returns
+    -------
+    vertices_cart : (N, 3)
+    vertices_lat_lon : (N, 2) in degrees, [lat, lon]
+    edge_index : (2, E)
+    """
+    vertices = _icosahedron_vertices()
+    faces = _icosahedron_faces()
+    for _ in range(splits):
+        vertices, faces = _subdivide_to_sphere(vertices, faces)
+    vertices_lat_lon = _cartesian_to_lat_lon(vertices)
+    edge_index = faces_to_edges(faces)
+    return vertices, vertices_lat_lon, edge_index
+
+
+def get_hierarchy_of_triangular_meshes(
+    splits: int,
+    levels: int | None = None,
+) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Build hierarchy of icosahedral meshes (coarsest to finest).
+
+    splits: number of subdivisions for the finest level.
+    levels: number of levels to keep (1 = single level, finest). If None, use
+        splits+1 levels (level 0..splits).
+
+    Returns
+    -------
+    list of (vertices_cart, vertices_lat_lon, edge_index) for each level.
+    """
+    all_levels = []
+    for s in range(splits + 1):
+        vert_cart, vert_lat_lon, edge_idx = get_icosahedral_mesh_level(s)
+        all_levels.append((vert_cart, vert_lat_lon, edge_idx))
+    if levels is not None:
+        # Keep last `levels` levels (finest)
+        all_levels = all_levels[-levels:]
+    return all_levels
+
+
+def mesh_edge_lengths_cart(
+    vertices_cart: np.ndarray, edge_index: np.ndarray
+) -> np.ndarray:
+    """Edge lengths (chord length on unit sphere) for mesh edges."""
+    src, dst = edge_index[0], edge_index[1]
+    vdiff = vertices_cart[dst] - vertices_cart[src]
+    return np.linalg.norm(vdiff, axis=1).astype(np.float32)
+
+
+def g2m_radius_query(
+    grid_lat_lon: np.ndarray,
+    mesh_vertices_cart: np.ndarray,
+    mesh_edge_index: np.ndarray,
+    radius_factor: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Grid-to-mesh edges by radius query (chord distance on unit sphere).
+
+    Node convention: grid 0..N_grid-1, mesh N_grid..N_grid+N_mesh-1 in output.
+    So g2m_edge_index[0] = grid indices (0..N_grid-1), [1] = mesh indices
+    (0..N_mesh-1) in mesh_vertices_cart. Caller will shift for saved format.
+
+    Returns
+    -------
+    g2m_edge_index : (2, M) with [0]=grid_idx, [1]=mesh_idx (0-based mesh)
+    g2m_len : (M,) edge lengths (chord)
+    g2m_vdiff : (M, 2) lat-lon difference in degrees
+    """
+    grid_cart = gutils.node_lat_lon_to_cart(grid_lat_lon)
+    mesh_cart = mesh_vertices_cart
+    dm = np.mean(mesh_edge_lengths_cart(mesh_vertices_cart, mesh_edge_index))
+    radius = dm * radius_factor
+
+    kdt = scipy.spatial.cKDTree(mesh_cart)
+    g2m_src_list = []
+    g2m_dst_list = []
+    g2m_len_list = []
+    g2m_vdiff_list = []
+
+    for gi in range(grid_lat_lon.shape[0]):
+        neighs = kdt.query_ball_point(grid_cart[gi], radius)
+        for mi in neighs:
+            d = np.linalg.norm(mesh_cart[mi] - grid_cart[gi])
+            # Approximate lat-lon diff in degrees for edge feature
+            g_lat, g_lon = np.deg2rad(grid_lat_lon[gi, 0]), np.deg2rad(
+                grid_lat_lon[gi, 1]
+            )
+            m_lat, m_lon = _cartesian_to_lat_lon(mesh_cart[mi].reshape(1, 3))[0]
+            m_lat, m_lon = np.deg2rad(m_lat), np.deg2rad(m_lon)
+            dlat = np.rad2deg(m_lat - g_lat)
+            dlon = np.rad2deg(m_lon - g_lon)
+            g2m_src_list.append(gi)
+            g2m_dst_list.append(mi)
+            g2m_len_list.append(d)
+            g2m_vdiff_list.append([dlat, dlon])
+
+    g2m_edge_index = np.stack(
+        [np.array(g2m_src_list), np.array(g2m_dst_list)], axis=0
+    )
+    g2m_len = np.array(g2m_len_list, dtype=np.float32)
+    g2m_vdiff = np.array(g2m_vdiff_list, dtype=np.float32)
+    return g2m_edge_index, g2m_len, g2m_vdiff
+
+
+def m2g_knn(
+    grid_lat_lon: np.ndarray,
+    mesh_vertices_cart: np.ndarray,
+    k: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Mesh-to-grid edges by k nearest mesh nodes per grid point.
+
+    Returns
+    -------
+    m2g_edge_index : (2, M) with [0]=mesh_idx, [1]=grid_idx (0-based)
+    m2g_len : (M,) chord lengths
+    m2g_vdiff : (M, 2) lat-lon diff in degrees (grid - mesh)
+    """
+    grid_cart = gutils.node_lat_lon_to_cart(grid_lat_lon)
+    kdt = scipy.spatial.cKDTree(mesh_vertices_cart)
+    dists, mesh_idx = kdt.query(grid_cart, k=k)
+    if dists.ndim == 1:
+        dists = dists.reshape(-1, 1)
+        mesh_idx = mesh_idx.reshape(-1, 1)
+
+    m2g_src = []
+    m2g_dst = []
+    m2g_len = []
+    m2g_vdiff = []
+    for gi in range(grid_lat_lon.shape[0]):
+        for j in range(mesh_idx.shape[1]):
+            mi = mesh_idx[gi, j]
+            d = dists[gi, j]
+            g_lat, g_lon = np.deg2rad(grid_lat_lon[gi, 0]), np.deg2rad(
+                grid_lat_lon[gi, 1]
+            )
+            m_lat_lon = _cartesian_to_lat_lon(
+                mesh_vertices_cart[mi].reshape(1, 3)
+            )[0]
+            m_lat, m_lon = np.deg2rad(m_lat_lon[0]), np.deg2rad(m_lat_lon[1])
+            dlat = np.rad2deg(g_lat - m_lat)
+            dlon = np.rad2deg(g_lon - m_lon)
+            m2g_src.append(mi)
+            m2g_dst.append(gi)
+            m2g_len.append(float(d))
+            m2g_vdiff.append([dlat, dlon])
+
+    m2g_edge_index = np.stack([np.array(m2g_src), np.array(m2g_dst)], axis=0)
+    m2g_len = np.array(m2g_len, dtype=np.float32)
+    m2g_vdiff = np.array(m2g_vdiff, dtype=np.float32)
+    return m2g_edge_index, m2g_len, m2g_vdiff
+
+
+def inter_mesh_connection(
+    from_cart: np.ndarray,
+    to_cart: np.ndarray,
+    radius_factor: float = 1.1,
+    from_edge_length: float | None = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Connect coarse (from) mesh to fine (to) mesh by radius query.
+
+    Returns
+    -------
+    edge_index : (2, M) [from_idx, to_idx]
+    edge_len : (M,)
+    edge_vdiff : (M, 2) lat-lon diff in degrees
+    """
+    if from_edge_length is None:
+        from_edge_length = 0.1  # fallback
+    radius = from_edge_length * radius_factor
+    kdt = scipy.spatial.cKDTree(to_cart)
+    from_lat_lon = _cartesian_to_lat_lon(from_cart)
+    to_lat_lon = _cartesian_to_lat_lon(to_cart)
+    src_list, dst_list, len_list, vdiff_list = [], [], [], []
+    for fi in range(from_cart.shape[0]):
+        neighs = kdt.query_ball_point(from_cart[fi], radius)
+        for ti in neighs:
+            d = np.linalg.norm(to_cart[ti] - from_cart[fi])
+            f_lat, f_lon = from_lat_lon[fi, 0], from_lat_lon[fi, 1]
+            t_lat, t_lon = to_lat_lon[ti, 0], to_lat_lon[ti, 1]
+            src_list.append(fi)
+            dst_list.append(ti)
+            len_list.append(float(d))
+            vdiff_list.append([t_lat - f_lat, t_lon - f_lon])
+    edge_index = np.stack([np.array(src_list), np.array(dst_list)], axis=0)
+    edge_len = np.array(len_list, dtype=np.float32)
+    edge_vdiff = np.array(vdiff_list, dtype=np.float32)
+    return edge_index, edge_len, edge_vdiff

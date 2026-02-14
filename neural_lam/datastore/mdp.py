@@ -334,14 +334,12 @@ class MDPDatastore(BaseRegularGridDatastore):
         """
         Return the projection of the coordinates.
 
-        NOTE: currently this expects the projection information to be in the
-        `extra` section of the configuration file, with a `projection` key
-        containing a `class_name` and `kwargs` for constructing the
-        `cartopy.crs.Projection` object. This is a temporary solution until
-        the projection information can be parsed in the produced dataset
-        itself. `mllam-data-prep` ignores the contents of the `extra` section
-        of the config file which is why we need to check that the necessary
-        parts are there.
+        If no projection is specified in the config `extra` section, returns
+        PlateCarree (lon/lat in degrees) for global lat-lon grids.
+        NOTE: when projection is specified, it is read from the `extra` section
+        of the configuration file, with a `projection` key containing a
+        `class_name` and `kwargs` for constructing the `cartopy.crs.Projection`
+        object. `mllam-data-prep` ignores the contents of the `extra` section.
 
         Returns
         -------
@@ -349,16 +347,11 @@ class MDPDatastore(BaseRegularGridDatastore):
             The projection of the coordinates.
 
         """
-        if "projection" not in self._config.extra:
-            raise ValueError(
-                "projection information not found in the configuration file "
-                f"({self._config_path}). Please add the projection information"
-                "to the `extra` section of the config, by adding a "
-                "`projection` key with the class name and kwargs of the "
-                "projection."
-            )
+        extra = getattr(self._config, "extra", None)
+        if not isinstance(extra, dict) or "projection" not in extra:
+            return ccrs.PlateCarree()
 
-        projection_info = self._config.extra["projection"]
+        projection_info = extra["projection"]
         if "class_name" not in projection_info:
             raise ValueError(
                 "class_name not found in the projection information. Please "

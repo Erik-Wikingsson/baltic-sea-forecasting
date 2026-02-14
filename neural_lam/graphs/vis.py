@@ -76,6 +76,7 @@ def plot_graph(
 
     if graph_dir_path is not None:
         plt.savefig(os.path.join(graph_dir_path, f"{title}.png"))
+    plt.close(fig)
 
 
 def make_earth(radius, resolution_reduction=1.0):

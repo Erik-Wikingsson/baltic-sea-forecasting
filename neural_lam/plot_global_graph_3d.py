@@ -1,0 +1,347 @@
+# Standard library
+import os
+from argparse import ArgumentParser
+
+# Third-party
+import numpy as np
+import plotly.graph_objects as go
+import torch
+
+# Local
+from . import utils
+from .config import load_config_and_datastores
+from .graphs import vis
+
+GRID_RADIUS = 1
+
+
+def main():
+    """Plot global graph structure in 3D."""
+    parser = ArgumentParser()
+    parser.add_argument(
+        "--config_path",
+        type=str,
+        help="Path to config file.",
+    )
+    parser.add_argument(
+        "--graph_name",
+        type=str,
+        default="global_multiscale",
+        help="Name of saved graph to plot.",
+    )
+    parser.add_argument(
+        "--save",
+        type=str,
+        help="Name of .html file to save interactive plot to.",
+    )
+    parser.add_argument(
+        "--show_axis",
+        action="store_true",
+        help="If the axis should be displayed.",
+    )
+    # Geometry
+    parser.add_argument(
+        "--mesh_height",
+        type=float,
+        default=0.02,
+        help="Height of mesh over grid (radius offset).",
+    )
+    parser.add_argument(
+        "--mesh_level_dist",
+        type=float,
+        default=0.02,
+        help="Distance between mesh levels (radius offset).",
+    )
+    parser.add_argument(
+        "--edge_width",
+        type=float,
+        default=0.4,
+        help="Width of g2m/m2g edges.",
+    )
+    parser.add_argument(
+        "--mesh_edge_width",
+        type=float,
+        help="Width of mesh edges, if different than --edge_width.",
+    )
+    parser.add_argument(
+        "--grid_node_size",
+        type=float,
+        default=2.0,
+        help="Size of grid nodes.",
+    )
+    parser.add_argument(
+        "--mesh_node_size",
+        type=float,
+        default=3.0,
+        help="Size of mesh nodes.",
+    )
+    # Colors
+    parser.add_argument(
+        "--g2m_color",
+        type=str,
+        default="black",
+        help="Color of g2m edges.",
+    )
+    parser.add_argument(
+        "--m2g_color",
+        type=str,
+        default="black",
+        help="Color of m2g edges.",
+    )
+    parser.add_argument(
+        "--grid_color",
+        type=str,
+        default="dodgerblue",
+        help="Color of grid nodes.",
+    )
+    parser.add_argument(
+        "--mesh_color",
+        type=str,
+        default="orange",
+        help="Color of mesh nodes and edges.",
+    )
+    # Earth
+    parser.add_argument(
+        "--texture_resolution",
+        type=float,
+        default=0.5,
+        help="Resolution of texture on earth (1.0 = full).",
+    )
+
+    args = parser.parse_args()
+
+    assert args.config_path is not None, "Specify --config_path"
+
+    _, datastore, _, _ = load_config_and_datastores(
+        config_path=args.config_path
+    )
+
+    graph_dir_path = os.path.join(
+        datastore.root_path, "graphs", args.graph_name
+    )
+    if not os.path.isdir(graph_dir_path):
+        raise FileNotFoundError(
+            f"Graph directory not found: {graph_dir_path}. "
+            "Run create_global_graph first."
+        )
+
+    # Load graph (g2m, m2g, m2m, mesh_up/down, reindexed)
+    hierarchical, graph_ldict = utils.load_graph(
+        graph_dir_path=graph_dir_path,
+        datastore=datastore,
+    )
+
+    # Interior grid
+    interior_mask = datastore.get_mask(surface=True, stacked=True, invert=False)
+    xy = datastore.get_xy("state", stacked=True)
+    grid_lat_lon_raw = xy[interior_mask]  # (lon, lat) from MDP
+    # vis uses node_lat_lon_to_cart(lat, lon) -> swap to (lat, lon)
+    grid_lat_lon = np.asarray(grid_lat_lon_raw[:, [1, 0]], dtype=np.float32)
+
+    # Mesh positions
+    mesh_pos_list = torch.load(
+        os.path.join(graph_dir_path, "mesh_features.pt"),
+        map_location="cpu",
+        weights_only=True,
+    )
+
+    # Convert each level (lon, lat) -> (lat, lon) for vis
+    def to_lat_lon(level_pos):
+        p = (
+            level_pos.numpy()
+            if isinstance(level_pos, torch.Tensor)
+            else level_pos
+        )
+        return np.asarray(p[:, [1, 0]], dtype=np.float32)
+
+    mesh_lat_lon_level = [to_lat_lon(p) for p in mesh_pos_list]
+
+    # Edge indices (reindexed by load_graph: grid 0..N_grid-1, mesh 0..N_mesh-1)
+    g2m_edge_index = graph_ldict["g2m_edge_index"].numpy()
+    m2g_edge_index = graph_ldict["m2g_edge_index"].numpy()
+
+    mesh_edge_width = (
+        args.edge_width
+        if args.mesh_edge_width is None
+        else args.mesh_edge_width
+    )
+    mesh_radius = GRID_RADIUS + args.mesh_height
+
+    data_objs = []
+
+    # Grid nodes
+    data_objs.append(
+        vis.create_node_plot(
+            grid_lat_lon,
+            "Grid Nodes",
+            color=args.grid_color,
+            radius=GRID_RADIUS,
+            size=args.grid_node_size,
+        )
+    )
+
+    # Mesh levels and edges
+    if hierarchical:
+        m2m_edge_index = [ei.numpy() for ei in graph_ldict["m2m_edge_index"]]
+        mesh_up_edge_index = [
+            ei.numpy() for ei in graph_ldict["mesh_up_edge_index"]
+        ]
+        mesh_down_edge_index = [
+            ei.numpy() for ei in graph_ldict["mesh_down_edge_index"]
+        ]
+
+        for bot_level_i, intra_ei in enumerate(m2m_edge_index):
+            top_level_i = bot_level_i + 1
+            bot_pos = mesh_lat_lon_level[bot_level_i]
+            bot_radius = mesh_radius + bot_level_i * args.mesh_level_dist
+
+            data_objs.append(
+                vis.create_node_plot(
+                    bot_pos,
+                    f"Mesh level {bot_level_i} nodes",
+                    color=args.mesh_color,
+                    radius=bot_radius,
+                    size=args.mesh_node_size,
+                )
+            )
+            data_objs.append(
+                vis.create_edge_plot(
+                    intra_ei,
+                    bot_pos,
+                    bot_pos,
+                    f"Mesh level {bot_level_i} edges",
+                    color=args.mesh_color,
+                    width=mesh_edge_width,
+                    from_radius=bot_radius,
+                    to_radius=bot_radius,
+                )
+            )
+
+            if top_level_i < len(m2m_edge_index):
+                up_ei = mesh_up_edge_index[bot_level_i]
+                down_ei = mesh_down_edge_index[bot_level_i]
+                top_pos = mesh_lat_lon_level[top_level_i]
+                top_radius = mesh_radius + top_level_i * args.mesh_level_dist
+                data_objs.append(
+                    vis.create_edge_plot(
+                        up_ei,
+                        bot_pos,
+                        top_pos,
+                        f"Mesh up {bot_level_i}->{top_level_i}",
+                        color=args.mesh_color,
+                        width=mesh_edge_width,
+                        from_radius=bot_radius,
+                        to_radius=top_radius,
+                    )
+                )
+                data_objs.append(
+                    vis.create_edge_plot(
+                        down_ei,
+                        top_pos,
+                        bot_pos,
+                        f"Mesh down {top_level_i}->{bot_level_i}",
+                        color=args.mesh_color,
+                        width=mesh_edge_width,
+                        from_radius=top_radius,
+                        to_radius=bot_radius,
+                    )
+                )
+
+        grid_con_lat_lon = mesh_lat_lon_level[0]
+    else:
+        mesh_lat_lon = mesh_lat_lon_level[0]
+        # Non-hierarchical: m2m_edge_index is a single tensor
+        m2m_ei = graph_ldict["m2m_edge_index"]
+        m2m_edge_index = (
+            m2m_ei.numpy() if torch.is_tensor(m2m_ei) else m2m_ei[0].numpy()
+        )
+        data_objs.append(
+            vis.create_node_plot(
+                mesh_lat_lon,
+                "Mesh Nodes",
+                radius=mesh_radius,
+                color=args.mesh_color,
+                size=args.mesh_node_size,
+            )
+        )
+        data_objs.append(
+            vis.create_edge_plot(
+                m2m_edge_index,
+                mesh_lat_lon,
+                mesh_lat_lon,
+                "Mesh Edges",
+                from_radius=mesh_radius,
+                to_radius=mesh_radius,
+                color=args.mesh_color,
+                width=mesh_edge_width,
+            )
+        )
+        grid_con_lat_lon = mesh_lat_lon
+
+    # G2M edges (grid -> mesh bottom)
+    data_objs.append(
+        vis.create_edge_plot(
+            g2m_edge_index,
+            grid_lat_lon,
+            grid_con_lat_lon,
+            "G2M Edges",
+            color=args.g2m_color,
+            width=args.edge_width,
+            from_radius=GRID_RADIUS,
+            to_radius=mesh_radius,
+        )
+    )
+
+    # M2G edges (mesh bottom -> grid)
+    data_objs.append(
+        vis.create_edge_plot(
+            m2g_edge_index,
+            grid_con_lat_lon,
+            grid_lat_lon,
+            "M2G Edges",
+            color=args.m2g_color,
+            width=args.edge_width,
+            from_radius=mesh_radius,
+            to_radius=GRID_RADIUS,
+        )
+    )
+
+    # Earth texture
+    try:
+        data_objs.append(
+            vis.make_earth(
+                radius=GRID_RADIUS,
+                resolution_reduction=args.texture_resolution,
+            )
+        )
+    except Exception as e:
+        print(f"Earth texture skipped ({e}).")
+
+    fig = go.Figure(data=data_objs)
+    fig.update_layout(scene_aspectmode="data")
+    fig.update_traces(connectgaps=False)
+
+    if not args.show_axis:
+        fig.update_layout(
+            margin=dict(l=0, r=0, t=0, b=0),
+            legend=dict(
+                yanchor="bottom",
+                y=0.01,
+                xanchor="right",
+                x=0.99,
+            ),
+            scene={
+                "xaxis": {"visible": False},
+                "yaxis": {"visible": False},
+                "zaxis": {"visible": False},
+            },
+        )
+
+    if args.save:
+        fig.write_html(args.save, include_plotlyjs="cdn")
+    else:
+        fig.show()
+
+
+if __name__ == "__main__":
+    main()

@@ -151,8 +151,8 @@ def create_edge_plot(
     to_node_xy: (N, 2) [longitude, latitude] in degrees
     label: str, label of plot object
     """
-    from_node_cart = gutils.node_lat_lon_to_cart(from_node_xy) * from_radius
-    to_node_cart = gutils.node_lat_lon_to_cart(to_node_xy) * to_radius
+    from_node_cart = gutils.node_lon_lat_to_cart(from_node_xy) * from_radius
+    to_node_cart = gutils.node_lon_lat_to_cart(to_node_xy) * to_radius
 
     edge_start = from_node_cart[edge_index[0]]  # (M, 2)
     edge_end = to_node_cart[edge_index[1]]  # (M, 2)
@@ -200,7 +200,7 @@ def create_node_plot(
     node_xy: (N, 2) [longitude, latitude] in degrees (x=lon, y=lat)
     label: str, label of plot object
     """
-    node_pos = gutils.node_lat_lon_to_cart(node_xy) * radius
+    node_pos = gutils.node_lon_lat_to_cart(node_xy) * radius
     if pos_filter_func is not None:
         # Filter nodes before plotting
         node_pos = node_pos[pos_filter_func(node_xy)]

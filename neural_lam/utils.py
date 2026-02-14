@@ -227,7 +227,8 @@ def load_graph(graph_dir_path, datastore, device="cpu"):
         len(mesh_static_features) == n_levels
     ), "Inconsistent number of levels in mesh"
 
-    mesh_lat_lon = [
+    # mesh_pos columns are (lon, lat); transform to PlateCarree gives (lon, lat)
+    mesh_lon_lat = [
         torch.tensor(
             ccrs.PlateCarree().transform_points(
                 datastore.coords_projection,
@@ -293,7 +294,7 @@ def load_graph(graph_dir_path, datastore, device="cpu"):
         "mesh_up_features": mesh_up_features,
         "mesh_down_features": mesh_down_features,
         "mesh_static_features": mesh_static_features,
-        "mesh_lat_lon": mesh_lat_lon,
+        "mesh_lon_lat": mesh_lon_lat,
     }
 
 

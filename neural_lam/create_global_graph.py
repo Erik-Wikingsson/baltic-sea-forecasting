@@ -22,24 +22,24 @@ from .graphs import vis
 
 
 def load_grid_from_zarr(dataset_path: str) -> np.ndarray:
-    """Load grid from zarr. Expects 'latitude' and 'longitude' arrays.
+    """Load grid from zarr. Expects 'longitude' and 'latitude' arrays.
 
-    Handles 1D (n_points,) or 2D (n_lat, n_lon) arrays. Returns (n_points, 2)
+    Handles 1D (n_points,) or 2D (n_lon, n_lat) arrays. Returns (n_points, 2)
     with columns [longitude, latitude] in degrees (x=lon, y=lat convention).
     """
     root = zarr.open(dataset_path, mode="r")
-    lat = np.asarray(root["latitude"]).astype(np.float32)
     lon = np.asarray(root["longitude"]).astype(np.float32)
-    if lat.ndim == 1 and lon.ndim == 1:
-        if lat.shape[0] == lon.shape[0]:
+    lat = np.asarray(root["latitude"]).astype(np.float32)
+    if lon.ndim == 1 and lat.ndim == 1:
+        if lon.shape[0] == lat.shape[0]:
             return np.stack([lon, lat], axis=1)
-        # Assume 2D grid: lat (n_lat,), lon (n_lon,)
+        # Assume 2D grid: lon (n_lon,), lat (n_lat,)
         lon_2d, lat_2d = np.meshgrid(lon, lat)
         return np.stack([lon_2d.ravel(), lat_2d.ravel()], axis=1)
-    if lat.ndim == 2 and lon.ndim == 2:
+    if lon.ndim == 2 and lat.ndim == 2:
         return np.stack([lon.ravel(), lat.ravel()], axis=1)
     raise ValueError(
-        f"Unsupported latitude/longitude shapes: {lat.shape}, {lon.shape}"
+        f"Unsupported longitude/latitude shapes: {lon.shape}, {lat.shape}"
     )
 
 
@@ -73,8 +73,8 @@ def _filter_icosahedral_mesh_to_sea(
     sea_xy, land_xy are (lon, lat). Returns reduced mesh_cart, mesh_xy,
     mesh_edge_index (reindexed).
     """
-    sea_cart = gutils.node_lat_lon_to_cart(sea_xy)
-    land_cart = gutils.node_lat_lon_to_cart(land_xy)
+    sea_cart = gutils.node_lon_lat_to_cart(sea_xy)
+    land_cart = gutils.node_lon_lat_to_cart(land_xy)
     kdt_sea = scipy.spatial.KDTree(sea_cart)
     kdt_land = scipy.spatial.KDTree(land_cart)
     num_mesh = mesh_cart.shape[0]
@@ -115,7 +115,7 @@ def create_global_graph(
 ):
     """Create global graph: icosahedral mesh + g2m + m2g.
 
-    grid_xy, sea_xy, land_xy: (N, 2) [longitude, latitude] in degrees (x=lon, y=lat).
+    grid_xy, sea_xy, land_xy: (N, 2) [longitude, latitude] in degrees.
 
     Node convention for loader: mesh 0..N_mesh-1, grid N_mesh..N_mesh+N_grid-1.
     When sea_xy and land_xy are provided, m2g edges over land are filtered.
@@ -138,7 +138,7 @@ def create_global_graph(
             )
         )
         mesh_xy = bottom_mesh.pos.numpy()
-        mesh_cart = gutils.node_lat_lon_to_cart(mesh_xy)
+        mesh_cart = gutils.node_lon_lat_to_cart(mesh_xy)
         mesh_edge_index = bottom_mesh.edge_index.numpy()
         num_mesh = mesh_xy.shape[0]
         num_grid = grid_xy.shape[0]
@@ -314,10 +314,10 @@ def create_global_graph(
             mesh_cart, mesh_edge_index
         )
         m2m_src, m2m_dst = mesh_edge_index[0], mesh_edge_index[1]
-        m2m_lon_lat_src = global_icosahedral_mesh._cartesian_to_lat_lon(
+        m2m_lon_lat_src = global_icosahedral_mesh._cartesian_to_lon_lat(
             mesh_cart[m2m_src]
         )
-        m2m_lon_lat_dst = global_icosahedral_mesh._cartesian_to_lat_lon(
+        m2m_lon_lat_dst = global_icosahedral_mesh._cartesian_to_lon_lat(
             mesh_cart[m2m_dst]
         )
         # Edge feature (dlat, dlon) to match g2m/m2g

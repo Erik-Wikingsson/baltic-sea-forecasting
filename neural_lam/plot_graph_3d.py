@@ -168,41 +168,38 @@ def main():
     )
     xy_boundary = datastore_boundary.get_xy("forcing", stacked=True)
 
-    interior_lat_lon = xy_interior[interior_mask]
-    boundary_lat_lon = xy_boundary[boundary_mask]
+    # get_xy returns (lon, lat) = (x, y)
+    interior_lon_lat = xy_interior[interior_mask]
+    boundary_lon_lat = xy_boundary[boundary_mask]
 
-    atmosphere_lat_lon = None
+    atmosphere_lon_lat = None
     if args.use_atmosphere_g2m:
         atmosphere_mask = datastore_atmosphere.get_atmosphere_mask(
             stacked=True, invert=False
         )
         xy_atmosphere = datastore_atmosphere.get_xy("forcing", stacked=True)
-        atmosphere_lat_lon = xy_atmosphere[atmosphere_mask]
+        atmosphere_lon_lat = xy_atmosphere[atmosphere_mask]
 
-    # Plotting is in 3d, with lat-lons
-    grid_lat_lon = np.concatenate(
-        (interior_lat_lon, boundary_lat_lon)
-        + ((atmosphere_lat_lon,) if atmosphere_lat_lon is not None else ()),
+    # Plotting is in 3d; grid positions (lon, lat)
+    grid_lon_lat = np.concatenate(
+        (interior_lon_lat, boundary_lon_lat)
+        + ((atmosphere_lon_lat,) if atmosphere_lon_lat is not None else ()),
         axis=0,
     )  # (num_grid, 2)
 
     # Optionally create corner filter
     if args.corner_filter_radius is not None:
-        # Prep for filtering
-        interior_lat_lon = interior_lat_lon
-        # Define corner in terms of last point
-        # Note: Could we do something more clever?
-        corner = interior_lat_lon[-1]
+        # Define corner in terms of last point (lon, lat)
+        corner = interior_lon_lat[-1]
         lon_corner, lat_corner = corner
 
-        def corner_filter_func(pos_lat_lon):
+        def corner_filter_func(pos_lon_lat):
             """
-            pos is (N, 2)
-            measure distance using haversine dist
+            pos_lon_lat is (N, 2) [longitude, latitude].
+            Measure distance using haversine.
             """
-
-            lon_pos = pos_lat_lon[:, 0]
-            lat_pos = pos_lat_lon[:, 1]
+            lon_pos = pos_lon_lat[:, 0]
+            lat_pos = pos_lon_lat[:, 1]
 
             lon_rad_corner, lat_rad_corner, lon_rad_pos, lat_rad_pos = map(
                 np.radians, [lon_corner, lat_corner, lon_pos, lat_pos]
@@ -239,7 +236,7 @@ def main():
         # Create separate plot objects for interior and boundary
         data_objs.append(
             vis.create_node_plot(
-                interior_lat_lon,
+                interior_lon_lat,
                 "Interior grid Nodes",
                 color=args.grid_color,
                 radius=GRID_RADIUS,
@@ -249,7 +246,7 @@ def main():
         )
         data_objs.append(
             vis.create_node_plot(
-                boundary_lat_lon,
+                boundary_lon_lat,
                 "Boundary grid Nodes",
                 color=args.boundary_grid_color,
                 radius=GRID_RADIUS,
@@ -260,7 +257,7 @@ def main():
         if args.use_atmosphere_g2m:
             data_objs.append(
                 vis.create_node_plot(
-                    atmosphere_lat_lon,
+                    atmosphere_lon_lat,
                     "Atmospheric grid Nodes",
                     color=args.atmosphere_grid_color,
                     radius=GRID_RADIUS,
@@ -272,7 +269,7 @@ def main():
         # All grid nodes together
         data_objs.append(
             vis.create_node_plot(
-                grid_lat_lon,
+                grid_lon_lat,
                 "Grid Nodes",
                 color=args.grid_color,
                 radius=GRID_RADIUS,
@@ -292,7 +289,7 @@ def main():
             return [elem.numpy() for elem in tensor_list]
 
         m2m_edge_index = tensor_list_to_numpy(graph_ldict["m2m_edge_index"])
-        mesh_lat_lon_level = tensor_list_to_numpy(graph_ldict["mesh_lat_lon"])
+        mesh_lon_lat_level = tensor_list_to_numpy(graph_ldict["mesh_lon_lat"])
         mesh_up_edge_index = tensor_list_to_numpy(
             graph_ldict["mesh_up_edge_index"]
         )
@@ -306,7 +303,7 @@ def main():
         ):
             # Extract position and radius
             top_level_i = bot_level_i + 1
-            bot_pos = mesh_lat_lon_level[bot_level_i]
+            bot_pos = mesh_lon_lat_level[bot_level_i]
             bot_radius = mesh_radius + bot_level_i * args.mesh_level_dist
 
             # Mesh nodes at bottom level
@@ -339,7 +336,7 @@ def main():
             if top_level_i < len(m2m_edge_index):
                 up_ei = mesh_up_edge_index[bot_level_i]
                 down_ei = mesh_down_edge_index[bot_level_i]
-                top_pos = mesh_lat_lon_level[top_level_i]
+                top_pos = mesh_lon_lat_level[top_level_i]
                 top_radius = mesh_radius + (top_level_i) * args.mesh_level_dist
 
                 # Up edges
@@ -372,14 +369,14 @@ def main():
                 )
 
         # Connect g2m and m2g only to bottom level
-        grid_con_lat_lon = mesh_lat_lon_level[0]
+        grid_con_lon_lat = mesh_lon_lat_level[0]
     else:
         # Non-hierarchical
-        mesh_lat_lon = graph_ldict["mesh_lat_lon"][0].numpy()
+        mesh_lon_lat = graph_ldict["mesh_lon_lat"][0].numpy()
         m2m_edge_index = graph_ldict["m2m_edge_index"].numpy()
 
         # Calculate degree-dependent node sizes
-        num_mesh_nodes = mesh_lat_lon.shape[0]
+        num_mesh_nodes = mesh_lon_lat.shape[0]
         mesh_degrees = np.zeros(num_mesh_nodes, dtype=int)
         # Count edges where node is source (outgoing)
         np.add.at(mesh_degrees, m2m_edge_index[0], 1)
@@ -395,7 +392,7 @@ def main():
 
         data_objs.append(
             vis.create_node_plot(
-                mesh_lat_lon,
+                mesh_lon_lat,
                 "Mesh Nodes",
                 radius=mesh_radius,
                 color=args.mesh_color,
@@ -406,8 +403,8 @@ def main():
         data_objs.append(
             vis.create_edge_plot(
                 m2m_edge_index,
-                mesh_lat_lon,
-                mesh_lat_lon,
+                mesh_lon_lat,
+                mesh_lon_lat,
                 "Mesh Edges",
                 from_radius=mesh_radius,
                 to_radius=mesh_radius,
@@ -417,14 +414,14 @@ def main():
             )
         )
 
-        grid_con_lat_lon = mesh_lat_lon
+        grid_con_lon_lat = mesh_lon_lat
 
     # Plot G2M
     data_objs.append(
         vis.create_edge_plot(
             g2m_edge_index,
-            grid_lat_lon,
-            grid_con_lat_lon,
+            grid_lon_lat,
+            grid_con_lon_lat,
             "G2M Edges",
             color=args.g2m_color,
             width=args.edge_width,
@@ -438,8 +435,8 @@ def main():
     data_objs.append(
         vis.create_edge_plot(
             m2g_edge_index,
-            grid_con_lat_lon,
-            grid_lat_lon,
+            grid_con_lon_lat,
+            grid_lon_lat,
             "M2G Edges",
             color=args.m2g_color,
             width=args.edge_width,

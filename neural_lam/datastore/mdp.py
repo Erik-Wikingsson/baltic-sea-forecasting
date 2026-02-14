@@ -335,7 +335,7 @@ class MDPDatastore(BaseRegularGridDatastore):
         Return the projection of the coordinates.
 
         If no projection is specified in the config `extra` section, returns
-        PlateCarree (lon/lat in degrees) for global lat-lon grids.
+        PlateCarree (lon/lat in degrees) for global lon-lat grids.
         NOTE: when projection is specified, it is read from the `extra` section
         of the configuration file, with a `projection` key containing a
         `class_name` and `kwargs` for constructing the `cartopy.crs.Projection`
@@ -494,7 +494,7 @@ class MDPDatastore(BaseRegularGridDatastore):
         surface : bool
             Whether to return only surface layer.
         stacked : bool
-            Whether to stack the lat, lon coordinates.
+            Whether to stack the lon, lat (longitude, latitude) coordinates.
         invert : bool
             Whether to invert the mask.
 
@@ -503,7 +503,7 @@ class MDPDatastore(BaseRegularGridDatastore):
         np.ndarray
             The dataset mask, returned differently based on
             the values of `surface` and `stacked`:
-            - `surface=True`, `stacked=True`: (N_lon*N_lon,)
+            - `surface=True`, `stacked=True`: (N_lon*N_lat,)
             - `surface=True`, `stacked=False`: (N_lon, N_lat)
             - `surface=False`, `stacked=True`: (N_lon*N_lat, d_features)
             - `surface=False`, `stacked=False`: (N_lon, N_lat, d_features)
@@ -529,7 +529,7 @@ class MDPDatastore(BaseRegularGridDatastore):
             else:
                 da_mask = da_mask.transpose("grid_index", "mask_feature")
         else:
-            # unstack grid_index -> (lat, lon)
+            # unstack grid_index -> (longitude, latitude)
             da_mask = self.unstack_grid_coords(da_mask)
 
             # select surface
@@ -556,7 +556,7 @@ class MDPDatastore(BaseRegularGridDatastore):
         Parameters
         ----------
         stacked : bool
-            Whether to stack the lat, lon coordinates.
+            Whether to stack the lon, lat (longitude, latitude) coordinates.
         invert : bool
             Whether to invert the mask.
 
@@ -575,7 +575,7 @@ class MDPDatastore(BaseRegularGridDatastore):
             # already has grid_index dimension, return (N_grid,)
             mask_arr = da_mask
         else:
-            # unstack to (lat, lon)
+            # unstack to (longitude, latitude)
             mask_arr = self.unstack_grid_coords(da_mask)
             mask_arr = mask_arr.transpose("longitude", "latitude")
 

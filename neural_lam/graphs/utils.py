@@ -7,8 +7,9 @@ import torch_geometric as pyg
 from torch_geometric.utils.convert import from_networkx
 
 
-def node_lat_lon_to_cart(node_xy):
-    """Convert node positions from longitude-latitude to Cartesian on unit sphere.
+def node_lon_lat_to_cart(node_xy):
+    """Convert node positions from longitude-latitude to
+    Cartesian on unit sphere.
 
     Convention: x = longitude (column 0), y = latitude (column 1), matching
     datastore get_xy and plotting (x-axis = lon, y-axis = lat).

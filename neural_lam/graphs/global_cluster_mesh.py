@@ -16,7 +16,7 @@ BASE_MAX_EDGE_LEN_DEG = 2.0
 
 
 def _cart_to_lon_lat_matching_utils(cart: np.ndarray) -> np.ndarray:
-    """Convert 3D Cartesian (from node_lat_lon_to_cart) to (lon, lat) in degrees."""
+    """Convert 3D Cartesian to (lon, lat) in degrees."""
     r = np.linalg.norm(cart, axis=1, keepdims=True)
     cart = cart / (r + 1e-12)
     # z = sin(lat), x = cos(lat)*cos(lon), y = cos(lat)*sin(lon)
@@ -46,7 +46,7 @@ def build_graph_from_mesh_pos_sphere(mesh_xy: np.ndarray) -> pyg.data.Data:
     mesh_xy: (N, 2) [longitude, latitude] in degrees (x=lon, y=lat).
     Edges from spherical Delaunay (ConvexHull of 3D points on unit sphere).
     """
-    mesh_3d = gutils.node_lat_lon_to_cart(mesh_xy)
+    mesh_3d = gutils.node_lon_lat_to_cart(mesh_xy)
     hull = scipy.spatial.ConvexHull(mesh_3d)
     edge_index = _faces_to_edges_both_dirs(hull.simplices)
     pos = torch.tensor(mesh_xy, dtype=torch.float32)
@@ -76,7 +76,7 @@ def build_cluster_mesh_graph_global(
 
     Parameters
     ----------
-    sea_xy : (N_sea, 2) [longitude, latitude] in degrees (interior / sea grid points)
+    sea_xy : (N_sea, 2) [longitude, latitude] in degrees (interior grid points)
     land_xy : (N_land, 2) [longitude, latitude] in degrees (land grid points)
     mesh_refinement_factor : factor between levels
     grid_to_first_mesh_refinement : ratio grid nodes / first-level mesh nodes
@@ -105,7 +105,7 @@ def build_cluster_mesh_graph_global(
         num_mesh_levels = min(possible_mesh_levels, limit_mesh_levels)
     num_mesh_levels = max(1, num_mesh_levels)
 
-    sea_3d = gutils.node_lat_lon_to_cart(sea_xy)
+    sea_3d = gutils.node_lon_lat_to_cart(sea_xy)
 
     mesh_level_graphs = []
     mesh_up_graphs = []
@@ -118,7 +118,7 @@ def build_cluster_mesh_graph_global(
             num_clusters = int(np.round(n_sea / grid_to_first_mesh_refinement))
             num_clusters = max(4, num_clusters)  # ConvexHull needs >= 4 in 3D
         else:
-            prev_level_pos = gutils.node_lat_lon_to_cart(
+            prev_level_pos = gutils.node_lon_lat_to_cart(
                 mesh_level_graphs[-1].pos.numpy()  # (lon, lat)
             )
             num_clusters = int(

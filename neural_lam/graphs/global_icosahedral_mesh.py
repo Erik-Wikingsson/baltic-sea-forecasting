@@ -62,8 +62,9 @@ def _icosahedron_faces() -> np.ndarray:
     )
 
 
-def _cartesian_to_lat_lon(cart: np.ndarray) -> np.ndarray:
-    """Convert (N, 3) Cartesian on unit sphere to (N, 2) [longitude, latitude] in degrees."""
+def _cartesian_to_lon_lat(cart: np.ndarray) -> np.ndarray:
+    """Convert (N, 3) Cartesian on unit sphere to (N, 2)
+    [longitude, latitude] in degrees."""
     r = np.linalg.norm(cart, axis=1, keepdims=True)
     cart = cart / (r + 1e-12)
     # z = sin(lat), x = cos(lat)*cos(lon), y = cos(lat)*sin(lon)
@@ -141,7 +142,7 @@ def get_icosahedral_mesh_level(
     faces = _icosahedron_faces()
     for _ in range(splits):
         vertices, faces = _subdivide_to_sphere(vertices, faces)
-    vertices_lon_lat = _cartesian_to_lat_lon(vertices)
+    vertices_lon_lat = _cartesian_to_lon_lat(vertices)
     edge_index = faces_to_edges(faces)
     return vertices, vertices_lon_lat, edge_index
 
@@ -197,9 +198,9 @@ def g2m_radius_query(
     -------
     g2m_edge_index : (2, M) with [0]=grid_idx, [1]=mesh_idx (0-based mesh)
     g2m_len : (M,) edge lengths (chord)
-    g2m_vdiff : (M, 2) lat-lon difference in degrees (dlat, dlon)
+    g2m_vdiff : (M, 2) lon-lat difference in degrees (dlat, dlon)
     """
-    grid_cart = gutils.node_lat_lon_to_cart(grid_xy)
+    grid_cart = gutils.node_lon_lat_to_cart(grid_xy)
     mesh_cart = mesh_vertices_cart
     dm = np.mean(mesh_edge_lengths_cart(mesh_vertices_cart, mesh_edge_index))
     radius = dm * radius_factor
@@ -218,7 +219,7 @@ def g2m_radius_query(
             g_lon, g_lat = np.deg2rad(grid_xy[gi, 0]), np.deg2rad(
                 grid_xy[gi, 1]
             )
-            m_lon_lat = _cartesian_to_lat_lon(mesh_cart[mi].reshape(1, 3))[0]
+            m_lon_lat = _cartesian_to_lon_lat(mesh_cart[mi].reshape(1, 3))[0]
             m_lon, m_lat = np.deg2rad(m_lon_lat[0]), np.deg2rad(m_lon_lat[1])
             dlat = np.rad2deg(m_lat - g_lat)
             dlon = np.rad2deg(m_lon - g_lon)
@@ -248,9 +249,9 @@ def m2g_knn(
     -------
     m2g_edge_index : (2, M) with [0]=mesh_idx, [1]=grid_idx (0-based)
     m2g_len : (M,) chord lengths
-    m2g_vdiff : (M, 2) lat-lon diff in degrees (grid - mesh), (dlat, dlon)
+    m2g_vdiff : (M, 2) lon-lat diff in degrees (grid - mesh), (dlat, dlon)
     """
-    grid_cart = gutils.node_lat_lon_to_cart(grid_xy)
+    grid_cart = gutils.node_lon_lat_to_cart(grid_xy)
     kdt = scipy.spatial.cKDTree(mesh_vertices_cart)
     dists, mesh_idx = kdt.query(grid_cart, k=k)
     if dists.ndim == 1:
@@ -268,7 +269,7 @@ def m2g_knn(
             g_lon, g_lat = np.deg2rad(grid_xy[gi, 0]), np.deg2rad(
                 grid_xy[gi, 1]
             )
-            m_lon_lat = _cartesian_to_lat_lon(
+            m_lon_lat = _cartesian_to_lon_lat(
                 mesh_vertices_cart[mi].reshape(1, 3)
             )[0]
             m_lon, m_lat = np.deg2rad(m_lon_lat[0]), np.deg2rad(m_lon_lat[1])
@@ -297,14 +298,14 @@ def inter_mesh_connection(
     -------
     edge_index : (2, M) [from_idx, to_idx]
     edge_len : (M,)
-    edge_vdiff : (M, 2) lat-lon diff in degrees
+    edge_vdiff : (M, 2) lon-lat diff in degrees
     """
     if from_edge_length is None:
         from_edge_length = 0.1  # fallback
     radius = from_edge_length * radius_factor
     kdt = scipy.spatial.cKDTree(to_cart)
-    from_lon_lat = _cartesian_to_lat_lon(from_cart)
-    to_lon_lat = _cartesian_to_lat_lon(to_cart)
+    from_lon_lat = _cartesian_to_lon_lat(from_cart)
+    to_lon_lat = _cartesian_to_lon_lat(to_cart)
     src_list, dst_list, len_list, vdiff_list = [], [], [], []
     for fi in range(from_cart.shape[0]):
         neighs = kdt.query_ball_point(from_cart[fi], radius)

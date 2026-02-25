@@ -1,4 +1,5 @@
 # Standard library
+import os
 from typing import Union
 
 # Third-party
@@ -45,6 +46,10 @@ class ARProbModel(ARModel):
 
         self.ensemble_size = args.ensemble_size
 
+        # Per-rank RNG for reproducible but distinct noise across DDP ranks.
+        self._rank = self._get_rank()
+        self._rng_generators = {}  # device -> torch.Generator
+
         self.val_metrics.update(
             {
                 "ens_mse": [],
@@ -60,6 +65,26 @@ class ARProbModel(ARModel):
                 "spread_squared": [],
             }
         )
+
+    def _get_rank(self) -> int:
+        """Current process rank (0 if not distributed) used for per-rank RNG."""
+        if (
+            torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+        ):
+            return torch.distributed.get_rank()
+        return int(os.environ.get("LOCAL_RANK", 0))
+
+    def _get_generator(self, device: torch.device) -> torch.Generator:
+        """
+        Per-rank Generator for noise sampling. Seeded with args.seed + rank so
+        each DDP rank has a different but reproducible stream.
+        """
+        if device not in self._rng_generators:
+            self._rng_generators[device] = torch.Generator(
+                device=device
+            ).manual_seed(self.args.seed + self._rank)
+        return self._rng_generators[device]
 
     def sample_trajectories(
         self,

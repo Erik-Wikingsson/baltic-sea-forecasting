@@ -78,7 +78,10 @@ class CRPS(ARProbModel):
         )  # (B, N_grid, d_input)
 
         z = torch.randn(
-            prev_state.shape[0], self.model.noise_dim, device=prev_state.device
+            prev_state.shape[0],
+            self.model.noise_dim,
+            device=prev_state.device,
+            generator=self._get_generator(prev_state.device),
         )
 
         next_state = self.model(

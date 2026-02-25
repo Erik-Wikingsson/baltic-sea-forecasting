@@ -44,15 +44,20 @@ def load_grid_from_zarr(dataset_path: str) -> np.ndarray:
 
 
 def _lon_lat_to_node_features(lon_lat_deg: np.ndarray) -> np.ndarray:
-    """Convert (lon, lat) in degrees to GraphCast-style node features.
-
-    Returns (cos(lat), sin(lon), cos(lon)) as (N, 3) float32.
+    """
+    Returns (sin(lon), cos(lon), sin(lat), cos(lat)) as (N, 4).
     Convention: lon = column 0, lat = column 1.
     """
     lon_rad = np.deg2rad(lon_lat_deg[:, 0].astype(np.float64))
     lat_rad = np.deg2rad(lon_lat_deg[:, 1].astype(np.float64))
     return np.stack(
-        [np.cos(lat_rad), np.sin(lon_rad), np.cos(lon_rad)], axis=1
+        [
+            np.sin(lon_rad),
+            np.cos(lon_rad),
+            np.sin(lat_rad),
+            np.cos(lat_rad),
+        ],
+        axis=1,
     ).astype(np.float32)
 
 

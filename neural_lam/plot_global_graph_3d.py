@@ -136,7 +136,7 @@ def main():
     xy = datastore.get_xy("state", stacked=True)
     grid_xy = np.asarray(xy[interior_mask], dtype=np.float32)
 
-    # Mesh positions: mesh_features.pt stores (lon, lat) per level
+    # Mesh positions: (sin_lon, cos_lon, sin_lat, cos_lat) per level
     mesh_pos_list = torch.load(
         os.path.join(graph_dir_path, "mesh_features.pt"),
         map_location="cpu",
@@ -150,9 +150,26 @@ def main():
             else level_pos
         )
 
-    mesh_xy_level = [
-        np.asarray(to_numpy(p), dtype=np.float32) for p in mesh_pos_list
-    ]
+    def node_features_to_lon_lat(feats: np.ndarray) -> np.ndarray:
+        """Invert node features to (lon, lat) in degrees."""
+        sin_lon, cos_lon, sin_lat, cos_lat = (
+            feats[:, 0],
+            feats[:, 1],
+            feats[:, 2],
+            feats[:, 3],
+        )
+        lon_rad = np.arctan2(sin_lon, cos_lon)
+        lat_rad = np.arctan2(sin_lat, cos_lat)
+        lon_deg = np.float32(np.rad2deg(lon_rad))
+        lat_deg = np.float32(np.rad2deg(lat_rad))
+        return np.stack([lon_deg, lat_deg], axis=1)
+
+    mesh_xy_level = []
+    for p in mesh_pos_list:
+        arr = np.asarray(to_numpy(p), dtype=np.float32)
+        if arr.shape[1] in (3, 4):
+            arr = node_features_to_lon_lat(arr)
+        mesh_xy_level.append(arr)
 
     # Edge indices (reindexed by load_graph: grid 0..N_grid-1, mesh 0..N_mesh-1)
     g2m_edge_index = graph_ldict["g2m_edge_index"].numpy()

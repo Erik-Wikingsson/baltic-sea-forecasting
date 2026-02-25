@@ -76,6 +76,28 @@ def add_edge_features_pyg(graph):
     graph["len"] = torch.norm(graph["vdiff"], dim=-1)
 
 
+def add_edge_features_pyg_sphere(graph):
+    """
+    Adds `len` (chord length) and `vdiff` (3D Cartesian receiver - sender)
+    from graph with `pos` (N, 2) [longitude, latitude] in degrees.
+    Use for global/spherical meshes to match GraphCast-style edge features.
+    Modifies graph in-place; leaves graph.pos unchanged (lon, lat).
+    """
+    pos_xy = (
+        graph.pos.cpu().numpy()
+        if graph.pos.is_cuda
+        else graph.pos.detach().numpy()
+    )
+    pos_3d = node_lon_lat_to_cart(pos_xy)
+    pos_3d = torch.from_numpy(pos_3d.astype(np.float32)).to(
+        device=graph.pos.device, dtype=graph.pos.dtype
+    )
+    src, dst = graph.edge_index[0], graph.edge_index[1]
+    vdiff = pos_3d[dst] - pos_3d[src]
+    graph["vdiff"] = vdiff
+    graph["len"] = torch.norm(vdiff, dim=-1)
+
+
 def filter_edges_land(
     graph: pyg.data.Data,
     sea_xy: np.ndarray,

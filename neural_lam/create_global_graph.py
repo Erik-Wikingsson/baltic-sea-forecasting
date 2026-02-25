@@ -43,7 +43,7 @@ def load_grid_from_zarr(dataset_path: str) -> np.ndarray:
     )
 
 
-def _lon_lat_to_graphcast_node_features(lon_lat_deg: np.ndarray) -> np.ndarray:
+def _lon_lat_to_node_features(lon_lat_deg: np.ndarray) -> np.ndarray:
     """Convert (lon, lat) in degrees to GraphCast-style node features.
 
     Returns (cos(lat), sin(lon), cos(lon)) as (N, 3) float32.
@@ -400,7 +400,11 @@ def create_global_graph(
     if graph_type == "cluster" and save_graphs_cluster is not None:
         m2m_graphs = save_graphs_cluster["m2m"]
         saving.save_edges_list(m2m_graphs, "m2m", graph_dir_path)
-        mesh_features_list = [g.pos for g in m2m_graphs]  # (lon, lat) already
+        # Node features: cos(lat), sin(lon), cos(lon)
+        mesh_features_list = [
+            torch.from_numpy(_lon_lat_to_node_features(g.pos.numpy()))
+            for g in m2m_graphs
+        ]
         if hierarchical_cluster:
             mesh_up = save_graphs_cluster["mesh_up"]
             mesh_down = save_graphs_cluster["mesh_down"]
@@ -434,8 +438,8 @@ def create_global_graph(
                         vdiff=torch.from_numpy(lvl_vdiff_3d),
                     )
                 )
-                # GraphCast-style node features: cos(lat), sin(lon), cos(lon)
-                lvl_node_feat = _lon_lat_to_graphcast_node_features(lvl_xy)
+                # Node features: cos(lat), sin(lon), cos(lon)
+                lvl_node_feat = _lon_lat_to_node_features(lvl_xy)
                 mesh_features_list.append(torch.from_numpy(lvl_node_feat))
 
             saving.save_edges_list(m2m_graphs, "m2m", graph_dir_path)
@@ -510,8 +514,8 @@ def create_global_graph(
                 vdiff=torch.from_numpy(m2m_vdiff_3d),
             )
             saving.save_edges_list([m2m_graph], "m2m", graph_dir_path)
-            # GraphCast-style node features: cos(lat), sin(lon), cos(lon)
-            mesh_node_feat = _lon_lat_to_graphcast_node_features(mesh_xy)
+            # Node features: cos(lat), sin(lon), cos(lon)
+            mesh_node_feat = _lon_lat_to_node_features(mesh_xy)
             mesh_features_list = [torch.from_numpy(mesh_node_feat)]
     torch.save(
         mesh_features_list,

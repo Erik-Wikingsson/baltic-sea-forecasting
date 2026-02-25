@@ -65,7 +65,6 @@ def build_graph_from_mesh_pos_sphere(
         pos=pos,
         edge_index=torch.from_numpy(edge_index).long(),
     )
-    gutils.add_edge_features_pyg(graph)
     return graph
 
 
@@ -157,7 +156,7 @@ def build_cluster_mesh_graph_global(
             land_xy,
             max_edge_len=360,
         )
-        gutils.add_edge_features_pyg(level_graph)
+        gutils.add_edge_features_pyg_sphere(level_graph)
         mesh_level_graphs.append(level_graph)
 
         if mesh_plot_function is not None:
@@ -183,14 +182,14 @@ def build_cluster_mesh_graph_global(
                     dim=0,
                 ),
             )
-            gutils.add_edge_features_pyg(up_graph)
+            gutils.add_edge_features_pyg_sphere(up_graph)
             mesh_up_graphs.append(up_graph)
 
             down_graph = pyg.data.Data(
                 edge_index=torch.stack((up_edge_index[1], up_edge_index[0])),
                 pos=up_graph.pos,
             )
-            gutils.add_edge_features_pyg(down_graph)
+            gutils.add_edge_features_pyg_sphere(down_graph)
             mesh_down_graphs.append(down_graph)
 
             if mesh_plot_function is not None:

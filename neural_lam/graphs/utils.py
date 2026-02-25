@@ -41,6 +41,81 @@ def node_lon_lat_to_cart(node_xy):
     return cart
 
 
+def node_cart_to_lon_lat(node_cart: np.ndarray) -> np.ndarray:
+    """Convert (N, 3) Cartesian on unit sphere to (N, 2) [longitude, latitude]
+    in degrees. Inverse of node_lon_lat_to_cart (x=lon, y=lat convention)."""
+    r = np.linalg.norm(node_cart, axis=1, keepdims=True)
+    node_cart = node_cart / (r + 1e-12)
+    lon_rad = np.arctan2(node_cart[:, 1], node_cart[:, 0])
+    lat_rad = np.arcsin(np.clip(node_cart[:, 2], -1.0, 1.0))
+    return np.stack([np.rad2deg(lon_rad), np.rad2deg(lat_rad)], axis=1).astype(
+        np.float32
+    )
+
+
+def filter_global_edges_land(
+    mesh_cart: np.ndarray,
+    mesh_edge_index: np.ndarray,
+    sea_xy: np.ndarray,
+    land_xy: np.ndarray,
+    edges_only: bool = False,
+) -> tuple:
+    """Keep only mesh nodes over sea and/or edges whose midpoint is over sea.
+
+    Uses 3D Cartesian. When edges_only=False (default): node kept if dist to
+    nearest sea <= dist to nearest land; edge kept if both endpoints kept AND
+    edge midpoint (normalized to unit sphere) is over sea; returns reindexed
+    mesh and edge index. When edges_only=True: no node filter, no reindexing;
+    keep only edges whose midpoint is over sea (e.g. for m2g with pos_3d =
+    mesh|grid). Returns (pos_3d, edge_index_filtered).
+
+    Parameters
+    ----------
+    mesh_cart : (N, 3) pos on unit sphere (mesh only or mesh|grid if edges_only)
+    mesh_edge_index : (2, E) edge index [src, dst]
+    sea_xy, land_xy : (n_sea, 2), (n_land, 2) [longitude, latitude] in degrees
+    edges_only : if True, only filter by edge midpoint, no node filter
+
+    Returns
+    -------
+    mesh_cart_filtered : (N', 3) or unchanged pos if edges_only
+    edge_index_filtered : (2, E') reindexed into N' if not edges_only
+    """
+    sea_cart = node_lon_lat_to_cart(sea_xy)
+    land_cart = node_lon_lat_to_cart(land_xy)
+    kdt_sea = scipy.spatial.KDTree(sea_cart)
+    kdt_land = scipy.spatial.KDTree(land_cart)
+    src, dst = mesh_edge_index[0], mesh_edge_index[1]
+    mid = (mesh_cart[src] + mesh_cart[dst]) / 2.0
+    norm = np.linalg.norm(mid, axis=1, keepdims=True)
+    norm = np.where(norm > 1e-12, norm, 1.0)
+    mid_unit = mid / norm
+    d_sea_mid, _ = kdt_sea.query(mid_unit, k=1)
+    d_land_mid, _ = kdt_land.query(mid_unit, k=1)
+    mid_over_sea = (d_sea_mid <= d_land_mid).ravel()
+
+    if edges_only:
+        return mesh_cart, mesh_edge_index[:, mid_over_sea]
+
+    num_mesh = mesh_cart.shape[0]
+    d_sea, _ = kdt_sea.query(mesh_cart, k=1)
+    d_land, _ = kdt_land.query(mesh_cart, k=1)
+    keep_node = (d_sea <= d_land).ravel()
+    old_to_new = np.full(num_mesh, -1, dtype=np.int64)
+    new_idx = 0
+    for old_idx in range(num_mesh):
+        if keep_node[old_idx]:
+            old_to_new[old_idx] = new_idx
+            new_idx += 1
+    mesh_cart_filtered = mesh_cart[keep_node]
+    both_kept = keep_node[src] & keep_node[dst]
+    keep_edge = both_kept & mid_over_sea
+    new_src = old_to_new[src[keep_edge]]
+    new_dst = old_to_new[dst[keep_edge]]
+    edge_index_filtered = np.stack([new_src, new_dst], axis=0)
+    return mesh_cart_filtered, edge_index_filtered
+
+
 def sort_nodes_internally(nx_graph):
     # For some reason the networkx .nodes() return list can not be sorted,
     # but this is the ordering used by pyg when converting.

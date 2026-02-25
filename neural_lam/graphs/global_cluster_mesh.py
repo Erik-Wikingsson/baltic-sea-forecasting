@@ -98,8 +98,8 @@ def build_cluster_mesh_graph_global(
 
     Returns
     -------
-    mesh_pos : list of (N_i, 2) tensors, [lon, lat] per level
-    bottom_mesh : pyg Data (pos, edge_index, len, vdiff) for finest level
+    mesh_pos : list of (N_i, 3) tensors, 3D Cartesian per level
+    bottom_mesh : pyg Data (pos 3D, edge_index, len, vdiff) for finest level
     save_graphs : dict with "m2m", "mesh_up", "mesh_down"
     """
     n_sea = sea_xy.shape[0]
@@ -128,9 +128,7 @@ def build_cluster_mesh_graph_global(
             num_clusters = int(np.round(n_sea / grid_to_first_mesh_refinement))
             num_clusters = max(4, num_clusters)  # ConvexHull needs >= 4 in 3D
         else:
-            prev_level_pos = gutils.node_lon_lat_to_cart(
-                mesh_level_graphs[-1].pos.numpy()  # (lon, lat)
-            )
+            prev_level_pos = mesh_level_graphs[-1].pos.numpy()  # (N, 3)
             num_clusters = int(
                 np.round(prev_level_pos.shape[0] / mesh_refinement_factor)
             )
@@ -142,33 +140,39 @@ def build_cluster_mesh_graph_global(
             n_init=1,
             random_state=random_state,
         )
-        closest_cluster_index = kmeans.fit_predict(prev_level_pos)
+        kmeans.fit(prev_level_pos)
         centers_3d = kmeans.cluster_centers_
         r = np.linalg.norm(centers_3d, axis=1, keepdims=True)
         centers_3d = centers_3d / (r + 1e-12)
         level_lon_lat = _cart_to_lon_lat_matching_utils(centers_3d)
 
         level_graph = build_graph_from_mesh_pos_sphere(level_lon_lat)
-        # max_edge_len = base_max_edge_len_deg * mesh_refinement_factor**level_i
-        gutils.filter_edges_land(
-            level_graph,
-            sea_xy,
-            land_xy,
-            max_edge_len=360,
+        mesh_cart = gutils.node_lon_lat_to_cart(level_graph.pos.numpy())
+        edge_index_np = level_graph.edge_index.numpy()
+        mesh_cart_f, edge_index_f = gutils.filter_global_edges_land(
+            mesh_cart, edge_index_np, sea_xy, land_xy
         )
-        gutils.add_edge_features_pyg_sphere(level_graph)
+        level_graph.pos = torch.from_numpy(mesh_cart_f.astype(np.float32))
+        level_graph.edge_index = torch.from_numpy(edge_index_f.astype(np.int64))
+        gutils.add_edge_features_pyg(level_graph)
         mesh_level_graphs.append(level_graph)
 
         if mesh_plot_function is not None:
             mesh_plot_function(level_graph, f"Mesh graph, level {level_i}")
 
         if level_i > 0:
-            n_prev = mesh_level_graphs[level_i - 1].pos.shape[0]
+            # Build up/down edges after filtering:
+            # coarse->nearest fine, fine->nearest coarse (3D)
+            coarse_pos = mesh_level_graphs[level_i - 1].pos.numpy()
+            fine_pos = level_graph.pos.numpy()
+            n_prev = coarse_pos.shape[0]
+            kdt_fine = scipy.spatial.cKDTree(fine_pos)
+            _, coarse_to_fine = kdt_fine.query(coarse_pos, k=1)
+            coarse_to_fine = np.asarray(coarse_to_fine, dtype=np.int64).ravel()
             up_edge_index = torch.stack(
                 (
                     torch.arange(n_prev, dtype=torch.long),
-                    n_prev
-                    + torch.tensor(closest_cluster_index, dtype=torch.long),
+                    torch.from_numpy(coarse_to_fine) + n_prev,
                 ),
                 dim=0,
             )
@@ -182,14 +186,18 @@ def build_cluster_mesh_graph_global(
                     dim=0,
                 ),
             )
-            gutils.add_edge_features_pyg_sphere(up_graph)
+            gutils.add_edge_features_pyg(up_graph)
             mesh_up_graphs.append(up_graph)
 
+            # Down = reverse of up (same edges, level 1 -> level 0)
+            down_edge_index = torch.stack(
+                (up_edge_index[1], up_edge_index[0]), dim=0
+            )
             down_graph = pyg.data.Data(
-                edge_index=torch.stack((up_edge_index[1], up_edge_index[0])),
+                edge_index=down_edge_index,
                 pos=up_graph.pos,
             )
-            gutils.add_edge_features_pyg_sphere(down_graph)
+            gutils.add_edge_features_pyg(down_graph)
             mesh_down_graphs.append(down_graph)
 
             if mesh_plot_function is not None:

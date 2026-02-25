@@ -79,71 +79,54 @@ def load_grid_from_datastore(
     return sea_xy, sea_xy, land_xy
 
 
-def _filter_icosahedral_mesh_to_sea(
-    mesh_cart: np.ndarray,
-    mesh_xy: np.ndarray,
-    mesh_edge_index: np.ndarray,
-    sea_xy: np.ndarray,
-    land_xy: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Keep only icosahedral mesh nodes over sea (nearest sea <= nearest land).
-
-    sea_xy, land_xy are (lon, lat). Returns reduced mesh_cart, mesh_xy,
-    mesh_edge_index (reindexed).
+def _cart_to_node_features(mesh_cart: np.ndarray) -> np.ndarray:
     """
-    sea_cart = gutils.node_lon_lat_to_cart(sea_xy)
-    land_cart = gutils.node_lon_lat_to_cart(land_xy)
-    kdt_sea = scipy.spatial.KDTree(sea_cart)
-    kdt_land = scipy.spatial.KDTree(land_cart)
-    num_mesh = mesh_cart.shape[0]
-    d_sea, _ = kdt_sea.query(mesh_cart, k=1)
-    d_land, _ = kdt_land.query(mesh_cart, k=1)
-    keep_mask = (d_sea <= d_land).ravel()
-    old_to_new = np.full(num_mesh, -1, dtype=np.int64)
-    new_idx = 0
-    for old_idx in range(num_mesh):
-        if keep_mask[old_idx]:
-            old_to_new[old_idx] = new_idx
-            new_idx += 1
-    new_mesh_cart = mesh_cart[keep_mask]
-    new_mesh_xy = mesh_xy[keep_mask]
-    # Keep only edges whose endpoints are both kept; reindex
-    kept_src = keep_mask[mesh_edge_index[0]] & keep_mask[mesh_edge_index[1]]
-    new_src = old_to_new[mesh_edge_index[0, kept_src]]
-    new_dst = old_to_new[mesh_edge_index[1, kept_src]]
-    new_mesh_edge_index = np.stack([new_src, new_dst], axis=0)
-    return new_mesh_cart, new_mesh_xy, new_mesh_edge_index
+    Convert (N, 3) Cartesian on unit sphere to
+    (sin_lon, cos_lon, sin_lat, cos_lat).
+    """
+    r = np.linalg.norm(mesh_cart, axis=1, keepdims=True)
+    mesh_cart = mesh_cart / (r + 1e-12)
+    x, y, z = mesh_cart[:, 0], mesh_cart[:, 1], mesh_cart[:, 2]
+    lon_rad = np.arctan2(y, x)
+    lat_rad = np.arcsin(np.clip(z, -1.0, 1.0))
+    return np.stack(
+        [
+            np.sin(lon_rad),
+            np.cos(lon_rad),
+            np.sin(lat_rad),
+            np.cos(lat_rad),
+        ],
+        axis=1,
+    ).astype(np.float32)
 
 
 def _combine_icosahedral_multiscale_to_fine(
-    mesh_levels: list[Tuple[np.ndarray, np.ndarray, np.ndarray]],
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    mesh_levels: list[Tuple[np.ndarray, np.ndarray]],
+) -> Tuple[np.ndarray, np.ndarray]:
     """Combine edges from multiple icosahedral levels onto finest node set.
 
     Parameters
     ----------
-    mesh_levels : list of (cart, xy, edge_index), ordered finest -> coarsest.
+    mesh_levels : list of (cart, edge_index), ordered finest -> coarsest.
 
     Returns
     -------
     fine_cart : (N_fine, 3)
-    fine_xy : (N_fine, 2) [lon, lat]
     combined_edge_index : (2, E_combined) directed edges on finest node indices
     """
-    fine_cart, fine_xy, fine_ei = mesh_levels[0]
+    fine_cart, fine_ei = mesh_levels[0]
     if len(mesh_levels) == 1:
-        return fine_cart, fine_xy, fine_ei
+        return fine_cart, fine_ei
 
     fine_kdt = scipy.spatial.cKDTree(fine_cart)
 
-    # Keep directed edges; remove self loops created by coarse->fine mapping.
     edge_set = {
         (int(src), int(dst))
         for src, dst in zip(fine_ei[0], fine_ei[1])
         if src != dst
     }
 
-    for lvl_cart, _, lvl_ei in mesh_levels[1:]:
+    for lvl_cart, lvl_ei in mesh_levels[1:]:
         _, lvl_to_fine = fine_kdt.query(lvl_cart, k=1)
         lvl_to_fine = np.asarray(lvl_to_fine, dtype=np.int64).ravel()
 
@@ -159,7 +142,7 @@ def _combine_icosahedral_multiscale_to_fine(
     else:
         combined_ei = np.array(list(edge_set), dtype=np.int64).T
 
-    return fine_cart, fine_xy, combined_ei
+    return fine_cart, combined_ei
 
 
 def create_global_graph(
@@ -202,10 +185,9 @@ def create_global_graph(
                 base_max_edge_len_deg=max_edge_len_deg,
             )
         )
-        mesh_xy = bottom_mesh.pos.numpy()
-        mesh_cart = gutils.node_lon_lat_to_cart(mesh_xy)
+        mesh_cart = bottom_mesh.pos.numpy()
         mesh_edge_index = bottom_mesh.edge_index.numpy()
-        num_mesh = mesh_xy.shape[0]
+        num_mesh = mesh_cart.shape[0]
         num_grid = grid_xy.shape[0]
         hierarchical_cluster = len(mesh_pos_list) > 1
     else:
@@ -220,9 +202,10 @@ def create_global_graph(
         # get_hierarchy_of_triangular_meshes returns coarsest->finest.
         # Our hierarchical models assume level 0 is the bottom one
         mesh_levels = list(reversed(mesh_levels))  # finest->coarsest
+        mesh_levels = [(c, e) for c, _, e in mesh_levels]  # (cart, ei) only
 
         # Diagnostics: mean chord per level
-        for level_i, (lvl_cart, _, lvl_ei) in enumerate(mesh_levels):
+        for level_i, (lvl_cart, lvl_ei) in enumerate(mesh_levels):
             if lvl_ei.shape[1] == 0:
                 print(
                     f"Mesh level {level_i}: {lvl_cart.shape[0]} nodes, 0 edges"
@@ -242,30 +225,30 @@ def create_global_graph(
 
         mesh_levels_filtered = []
         if sea_xy is not None and land_xy is not None and land_xy.shape[0] > 0:
-            for level_i, (lvl_cart, lvl_xy, lvl_ei) in enumerate(mesh_levels):
-                f_cart, f_xy, f_ei = _filter_icosahedral_mesh_to_sea(
-                    lvl_cart, lvl_xy, lvl_ei, sea_xy, land_xy
+            for level_i, (lvl_cart, lvl_ei) in enumerate(mesh_levels):
+                f_cart, f_ei = gutils.filter_global_edges_land(
+                    lvl_cart, lvl_ei, sea_xy, land_xy
                 )
-                mesh_levels_filtered.append((f_cart, f_xy, f_ei))
+                mesh_levels_filtered.append((f_cart, f_ei))
                 print(
                     f"Filtered icosahedral mesh level {level_i} to sea-only: "
-                    f"{f_xy.shape[0]} nodes"
+                    f"{f_cart.shape[0]} nodes"
                 )
             mesh_levels = mesh_levels_filtered
 
         # Bottom (level 0) mesh is the finest. For multiscale,
         # combine edges from coarser levels onto this finest node set.
         if graph_type == "multiscale" and len(mesh_levels) > 1:
-            mesh_cart, mesh_xy, mesh_edge_index = (
+            mesh_cart, mesh_edge_index = (
                 _combine_icosahedral_multiscale_to_fine(mesh_levels)
             )
             print(
                 "Combined multiscale icosahedral mesh: "
-                f"{mesh_xy.shape[0]} nodes, {mesh_edge_index.shape[1]} "
+                f"{mesh_cart.shape[0]} nodes, {mesh_edge_index.shape[1]} "
                 f"directed m2m edges across {len(mesh_levels)} levels"
             )
         else:
-            mesh_cart, mesh_xy, mesh_edge_index = mesh_levels[0]
+            mesh_cart, mesh_edge_index = mesh_levels[0]
         num_mesh = mesh_cart.shape[0]
         num_grid = grid_xy.shape[0]
         hierarchical_cluster = False
@@ -283,6 +266,8 @@ def create_global_graph(
         )
     )
     print(f"Mesh: {num_mesh} nodes, mean edge length (chord) = {dm:.6f}")
+    grid_cart = gutils.node_lon_lat_to_cart(grid_xy)
+    mesh_xy = gutils.node_cart_to_lon_lat(mesh_cart)
 
     # G2M: grid -> mesh (radius query in Cartesian for chord distance on sphere;
     #      icosahedral mesh is native Cartesian; cluster is lon-lat but we pass
@@ -300,11 +285,11 @@ def create_global_graph(
     g2m_len_t = torch.from_numpy(g2m_len)
     g2m_vdiff_t = torch.from_numpy(g2m_vdiff)
 
-    # Connect disconnected g2m nodes
+    # Connect disconnected g2m nodes (3D Cartesian for chord distance)
     if connect_disconnected:
-        pos_g2m = np.concatenate([mesh_xy, grid_xy], axis=0)
+        pos_g2m = np.concatenate([mesh_cart, grid_cart], axis=0)
         pyg_g2m = pyg.data.Data(
-            pos=torch.from_numpy(pos_g2m).float(),
+            pos=torch.from_numpy(pos_g2m.astype(np.float32)).float(),
             edge_index=g2m_edge_index_t.clone(),
         )
         gutils.add_edge_features_pyg(pyg_g2m)
@@ -312,7 +297,7 @@ def create_global_graph(
         is_grid_interior = np.array([False] * num_mesh + [True] * num_grid)
         is_grid_boundary = np.zeros(num_mesh + num_grid, dtype=bool)
         is_grid_atm = np.zeros(num_mesh + num_grid, dtype=bool)
-        kdt_m = scipy.spatial.KDTree(mesh_xy)
+        kdt_m = scipy.spatial.KDTree(mesh_cart)
         gutils.connect_disconnected_g2m(
             pyg_g2m,
             is_mesh,
@@ -320,7 +305,7 @@ def create_global_graph(
             is_grid_boundary,
             is_grid_atm,
             list(range(num_mesh)),
-            mesh_xy,
+            mesh_cart,
             kdt_m,
             dm,
             g2m_radius,
@@ -349,43 +334,41 @@ def create_global_graph(
     m2g_len_t = torch.from_numpy(m2g_len)
     m2g_vdiff_t = torch.from_numpy(m2g_vdiff)
 
-    # Filter m2g edges over land when sea_xy and land_xy are provided
+    # Filter m2g edges over land (3D Cartesian: keep edge if midpoint over sea)
     if sea_xy is not None and land_xy is not None and land_xy.shape[0] > 0:
-        pos_m2g = np.concatenate([mesh_xy, grid_xy], axis=0)
+        pos_m2g_3d = np.concatenate([mesh_cart, grid_cart], axis=0)
+        ei_np = m2g_edge_index_t.numpy()
+        _, ei_filtered = gutils.filter_global_edges_land(
+            pos_m2g_3d, ei_np, sea_xy, land_xy, edges_only=True
+        )
         pyg_m2g = pyg.data.Data(
-            pos=torch.from_numpy(pos_m2g).float(),
-            edge_index=m2g_edge_index_t.clone(),
+            pos=torch.from_numpy(pos_m2g_3d.astype(np.float32)).float(),
+            edge_index=torch.from_numpy(ei_filtered),
         )
         gutils.add_edge_features_pyg(pyg_m2g)
-        gutils.filter_edges_land(
-            pyg_m2g,
-            sea_xy,
-            land_xy,
-            max_edge_len=max_edge_len_deg,
-        )
         m2g_edge_index_t = pyg_m2g.edge_index
         m2g_len_t = pyg_m2g.len
         m2g_vdiff_t = pyg_m2g.vdiff
 
-    # Connect disconnected m2g grid nodes
+    # Connect disconnected m2g grid nodes (3D Cartesian)
     if connect_disconnected:
-        pos_m2g = np.concatenate([mesh_xy, grid_xy], axis=0)
+        pos_m2g = np.concatenate([mesh_cart, grid_cart], axis=0)
         pyg_m2g = pyg.data.Data(
-            pos=torch.from_numpy(pos_m2g).float(),
+            pos=torch.from_numpy(pos_m2g.astype(np.float32)).float(),
             edge_index=m2g_edge_index_t.clone(),
         )
         gutils.add_edge_features_pyg(pyg_m2g)
         is_mesh = np.array([True] * num_mesh + [False] * num_grid)
         is_grid = np.array([False] * num_mesh + [True] * num_grid)
-        kdt_m = scipy.spatial.KDTree(mesh_xy)
+        kdt_m = scipy.spatial.KDTree(mesh_cart)
         xy_land = land_xy if land_xy is not None else np.empty((0, 2))
         gutils.connect_disconnected_m2g(
             pyg_m2g,
             is_mesh,
             is_grid,
-            grid_xy,
+            grid_cart,
             list(range(num_mesh)),
-            mesh_xy,
+            mesh_cart,
             kdt_m,
             xy_land,
         )
@@ -405,9 +388,9 @@ def create_global_graph(
     if graph_type == "cluster" and save_graphs_cluster is not None:
         m2m_graphs = save_graphs_cluster["m2m"]
         saving.save_edges_list(m2m_graphs, "m2m", graph_dir_path)
-        # Node features: cos(lat), sin(lon), cos(lon)
+        # Node features from 3D: cos(lat), sin(lat), sin(lon), cos(lon)
         mesh_features_list = [
-            torch.from_numpy(_lon_lat_to_node_features(g.pos.numpy()))
+            torch.from_numpy(_cart_to_node_features(g.pos.numpy()))
             for g in m2m_graphs
         ]
         if hierarchical_cluster:
@@ -422,7 +405,7 @@ def create_global_graph(
             # bottom mesh (matches model expectations).
             m2m_graphs = []
             mesh_features_list = []
-            for lvl_cart, lvl_xy, lvl_ei in mesh_levels:
+            for lvl_cart, lvl_ei in mesh_levels:
                 lvl_ei_t = torch.from_numpy(lvl_ei.astype(np.int64))
                 lvl_len = global_icosahedral_mesh.mesh_edge_lengths_cart(
                     lvl_cart, lvl_ei
@@ -443,8 +426,8 @@ def create_global_graph(
                         vdiff=torch.from_numpy(lvl_vdiff_3d),
                     )
                 )
-                # Node features: cos(lat), sin(lon), cos(lon)
-                lvl_node_feat = _lon_lat_to_node_features(lvl_xy)
+                # Node features from 3D: cos(lat), sin(lat), sin(lon), cos(lon)
+                lvl_node_feat = _cart_to_node_features(lvl_cart)
                 mesh_features_list.append(torch.from_numpy(lvl_node_feat))
 
             saving.save_edges_list(m2m_graphs, "m2m", graph_dir_path)
@@ -453,8 +436,8 @@ def create_global_graph(
             mesh_up_graphs = []
             mesh_down_graphs = []
             for level_i in range(len(mesh_levels) - 1):
-                fine_cart, fine_xy, _ = mesh_levels[level_i]
-                coarse_cart, coarse_xy, _ = mesh_levels[level_i + 1]
+                fine_cart, _ = mesh_levels[level_i]
+                coarse_cart, _ = mesh_levels[level_i + 1]
                 if fine_cart.shape[0] == 0 or coarse_cart.shape[0] == 0:
                     raise ValueError(
                         "Empty mesh level encountered while building hierarchy."
@@ -519,8 +502,8 @@ def create_global_graph(
                 vdiff=torch.from_numpy(m2m_vdiff_3d),
             )
             saving.save_edges_list([m2m_graph], "m2m", graph_dir_path)
-            # Node features: cos(lat), sin(lon), cos(lon)
-            mesh_node_feat = _lon_lat_to_node_features(mesh_xy)
+            # Node features from 3D: cos(lat), sin(lat), sin(lon), cos(lon)
+            mesh_node_feat = _cart_to_node_features(mesh_cart)
             mesh_features_list = [torch.from_numpy(mesh_node_feat)]
     torch.save(
         mesh_features_list,
@@ -568,9 +551,10 @@ def create_global_graph(
         if graph_type == "cluster" and save_graphs_cluster is not None:
             m2m_graphs = save_graphs_cluster["m2m"]
             for level_i, g in enumerate(m2m_graphs):
-                # Cluster mesh pos is (lon, lat); use (x=lon, y=lat) for plot
+                # Cluster mesh pos is 3D; convert to lon/lat for 2D plot
+                level_xy = gutils.node_cart_to_lon_lat(g.pos.numpy())
                 level_graph = pyg.data.Data(
-                    pos=g.pos.float(),
+                    pos=torch.from_numpy(level_xy).float(),
                     edge_index=g.edge_index,
                 )
                 vis.plot_graph(
@@ -579,23 +563,33 @@ def create_global_graph(
                     graph_dir_path,
                 )
             # Plot inter-level edges if present
+            # (convert 3D pos to lon/lat for 2D plot)
             mesh_up_graphs_plot = save_graphs_cluster.get("mesh_up", [])
             mesh_down_graphs_plot = save_graphs_cluster.get("mesh_down", [])
             for level_i, g in enumerate(mesh_up_graphs_plot):
+                g_xy = gutils.node_cart_to_lon_lat(g.pos.numpy())
                 vis.plot_graph(
-                    g,
+                    pyg.data.Data(
+                        pos=torch.from_numpy(g_xy).float(),
+                        edge_index=g.edge_index,
+                    ),
                     f"Mesh up {level_i} to {level_i + 1}",
                     graph_dir_path,
                 )
             for level_i, g in enumerate(mesh_down_graphs_plot):
+                g_xy = gutils.node_cart_to_lon_lat(g.pos.numpy())
                 vis.plot_graph(
-                    g,
+                    pyg.data.Data(
+                        pos=torch.from_numpy(g_xy).float(),
+                        edge_index=g.edge_index,
+                    ),
                     f"Mesh down {level_i + 1} -> {level_i}",
                     graph_dir_path,
                 )
         elif graph_type == "hierarchical":
             # Icosahedral hierarchy: plot m2m graph for each level (0=bottom)
-            for level_i, (lvl_cart, lvl_xy, lvl_ei) in enumerate(mesh_levels):
+            for level_i, (lvl_cart, lvl_ei) in enumerate(mesh_levels):
+                lvl_xy = gutils.node_cart_to_lon_lat(lvl_cart)
                 level_graph = pyg.data.Data(
                     pos=torch.from_numpy(lvl_xy).float(),
                     edge_index=torch.from_numpy(lvl_ei.astype(np.int64)),
@@ -607,14 +601,16 @@ def create_global_graph(
                 )
             # Plot inter-level edges (fine level_i -> coarse level_i+1)
             for level_i in range(len(mesh_levels) - 1):
-                fine_cart, fine_xy, _ = mesh_levels[level_i]
-                coarse_cart, coarse_xy, _ = mesh_levels[level_i + 1]
+                fine_cart, _ = mesh_levels[level_i]
+                coarse_cart, _ = mesh_levels[level_i + 1]
                 kdt_coarse = scipy.spatial.cKDTree(coarse_cart)
                 _, nn = kdt_coarse.query(fine_cart, k=1)
                 nn = nn.astype(np.int64).ravel()
 
                 n_fine = fine_cart.shape[0]
                 fine_idx = np.arange(n_fine, dtype=np.int64)
+                fine_xy = gutils.node_cart_to_lon_lat(fine_cart)
+                coarse_xy = gutils.node_cart_to_lon_lat(coarse_cart)
                 pos_updown = np.concatenate([fine_xy, coarse_xy], axis=0)
 
                 up_ei_plot = np.stack([fine_idx, nn + n_fine], axis=0)

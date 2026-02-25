@@ -27,28 +27,39 @@ def _cart_to_lon_lat_matching_utils(cart: np.ndarray) -> np.ndarray:
     return np.stack([lon, lat], axis=1).astype(np.float32)
 
 
-def _faces_to_edges_both_dirs(faces: np.ndarray) -> np.ndarray:
-    """Convert (F, 3) faces to (2, E) edge index, both directions."""
+def _knn_edges_sphere(mesh_3d: np.ndarray, k: int) -> np.ndarray:
+    """Build (2, E) edge index from k-NN on unit sphere (chord distance).
+    Each node connects to its k nearest neighbors; edges are undirected
+    (both directions). Guarantees every node has at least one edge.
+    """
+    n = mesh_3d.shape[0]
+    k = min(k, n - 1)
+    if k < 1:
+        return np.zeros((2, 0), dtype=np.int64)
+    kdt = scipy.spatial.cKDTree(mesh_3d)
+    dists, nn = kdt.query(mesh_3d, k=k + 1)  # k+1 to exclude self
+    # nn shape (n, k+1); column 0 is self (dist 0)
     edges = set()
-    for f in faces:
-        a, b, c = f[0], f[1], f[2]
-        edges.add((min(a, b), max(a, b)))
-        edges.add((min(b, c), max(b, c)))
-        edges.add((min(c, a), max(c, a)))
+    for i in range(n):
+        for j in nn[i, 1:]:  # skip self
+            edges.add((min(i, int(j)), max(i, int(j))))
     edges = np.array(list(edges), dtype=np.int64).T
     edges_both = np.concatenate([edges, edges[[1, 0]]], axis=1)
     return edges_both
 
 
-def build_graph_from_mesh_pos_sphere(mesh_xy: np.ndarray) -> pyg.data.Data:
-    """Build mesh graph from node positions on sphere using 3D ConvexHull.
+def build_graph_from_mesh_pos_sphere(
+    mesh_xy: np.ndarray,
+    k_nn: int = 5,
+) -> pyg.data.Data:
+    """Build mesh graph from node positions on sphere using k-NN.
 
     mesh_xy: (N, 2) [longitude, latitude] in degrees (x=lon, y=lat).
-    Edges from spherical Delaunay (ConvexHull of 3D points on unit sphere).
+    Edges from k-NN in 3D (chord distance on unit sphere) so every node
+    has same-level neighbors (avoids isolated nodes from ConvexHull interior).
     """
     mesh_3d = gutils.node_lon_lat_to_cart(mesh_xy)
-    hull = scipy.spatial.ConvexHull(mesh_3d)
-    edge_index = _faces_to_edges_both_dirs(hull.simplices)
+    edge_index = _knn_edges_sphere(mesh_3d, k=k_nn)
     pos = torch.tensor(mesh_xy, dtype=torch.float32)
     graph = pyg.data.Data(
         pos=pos,
@@ -71,8 +82,8 @@ def build_cluster_mesh_graph_global(
     """Build hierarchical cluster mesh over the globe (sea points only).
 
     Uses KMeans in 3D Cartesian (unit sphere) so clusters respect spherical
-    geometry. Mesh edges from ConvexHull (spherical Delaunay). Edges crossing
-    land are filtered (same as LAM cluster_mesh).
+    geometry. Same-level mesh edges from k-NN on the sphere (chord distance)
+    so every node has neighbors; edges crossing land are then filtered.
 
     Parameters
     ----------
@@ -139,15 +150,12 @@ def build_cluster_mesh_graph_global(
         level_lon_lat = _cart_to_lon_lat_matching_utils(centers_3d)
 
         level_graph = build_graph_from_mesh_pos_sphere(level_lon_lat)
-        # Coarsest level (0) has longest edges; use largest max for level 0.
-        max_edge_len = base_max_edge_len_deg * (
-            mesh_refinement_factor ** (0.5 * (num_mesh_levels - 1 - level_i))
-        )
+        # max_edge_len = base_max_edge_len_deg * mesh_refinement_factor**level_i
         gutils.filter_edges_land(
             level_graph,
             sea_xy,
             land_xy,
-            max_edge_len=max_edge_len,
+            max_edge_len=360,
         )
         gutils.add_edge_features_pyg(level_graph)
         mesh_level_graphs.append(level_graph)

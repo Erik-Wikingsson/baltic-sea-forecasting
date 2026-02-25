@@ -97,6 +97,53 @@ def _filter_icosahedral_mesh_to_sea(
     return new_mesh_cart, new_mesh_xy, new_mesh_edge_index
 
 
+def _combine_icosahedral_multiscale_to_fine(
+    mesh_levels: list[Tuple[np.ndarray, np.ndarray, np.ndarray]],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Combine edges from multiple icosahedral levels onto finest node set.
+
+    Parameters
+    ----------
+    mesh_levels : list of (cart, xy, edge_index), ordered finest -> coarsest.
+
+    Returns
+    -------
+    fine_cart : (N_fine, 3)
+    fine_xy : (N_fine, 2) [lon, lat]
+    combined_edge_index : (2, E_combined) directed edges on finest node indices
+    """
+    fine_cart, fine_xy, fine_ei = mesh_levels[0]
+    if len(mesh_levels) == 1:
+        return fine_cart, fine_xy, fine_ei
+
+    fine_kdt = scipy.spatial.cKDTree(fine_cart)
+
+    # Keep directed edges; remove self loops created by coarse->fine mapping.
+    edge_set = {
+        (int(src), int(dst))
+        for src, dst in zip(fine_ei[0], fine_ei[1])
+        if src != dst
+    }
+
+    for lvl_cart, _, lvl_ei in mesh_levels[1:]:
+        _, lvl_to_fine = fine_kdt.query(lvl_cart, k=1)
+        lvl_to_fine = np.asarray(lvl_to_fine, dtype=np.int64).ravel()
+
+        src_mapped = lvl_to_fine[lvl_ei[0]]
+        dst_mapped = lvl_to_fine[lvl_ei[1]]
+        for src, dst in zip(src_mapped, dst_mapped):
+            if src == dst:
+                continue
+            edge_set.add((int(src), int(dst)))
+
+    if len(edge_set) == 0:
+        combined_ei = np.zeros((2, 0), dtype=np.int64)
+    else:
+        combined_ei = np.array(list(edge_set), dtype=np.int64).T
+
+    return fine_cart, fine_xy, combined_ei
+
+
 def create_global_graph(
     graph_dir_path: str,
     grid_xy: np.ndarray,
@@ -152,22 +199,60 @@ def create_global_graph(
                 splits=splits, levels=levels
             )
         )
-        mesh_cart, mesh_xy, mesh_edge_index = mesh_levels[-1]
+        # get_hierarchy_of_triangular_meshes returns coarsest->finest.
+        # Our hierarchical models assume level 0 is the bottom one
+        mesh_levels = list(reversed(mesh_levels))  # finest->coarsest
+
+        # Diagnostics: mean chord per level
+        for level_i, (lvl_cart, _, lvl_ei) in enumerate(mesh_levels):
+            if lvl_ei.shape[1] == 0:
+                print(
+                    f"Mesh level {level_i}: {lvl_cart.shape[0]} nodes, 0 edges"
+                )
+                continue
+            dm_lvl = float(
+                np.mean(
+                    global_icosahedral_mesh.mesh_edge_lengths_cart(
+                        lvl_cart, lvl_ei
+                    )
+                )
+            )
+            print(
+                f"Mesh level {level_i}: {lvl_cart.shape[0]} nodes, "
+                f"mean edge length (chord) = {dm_lvl:.6f}"
+            )
+
+        mesh_levels_filtered = []
+        if sea_xy is not None and land_xy is not None and land_xy.shape[0] > 0:
+            for level_i, (lvl_cart, lvl_xy, lvl_ei) in enumerate(mesh_levels):
+                f_cart, f_xy, f_ei = _filter_icosahedral_mesh_to_sea(
+                    lvl_cart, lvl_xy, lvl_ei, sea_xy, land_xy
+                )
+                mesh_levels_filtered.append((f_cart, f_xy, f_ei))
+                print(
+                    f"Filtered icosahedral mesh level {level_i} to sea-only: "
+                    f"{f_xy.shape[0]} nodes"
+                )
+            mesh_levels = mesh_levels_filtered
+
+        # Bottom (level 0) mesh is the finest. For multiscale,
+        # combine edges from coarser levels onto this finest node set.
+        if graph_type == "multiscale" and len(mesh_levels) > 1:
+            mesh_cart, mesh_xy, mesh_edge_index = (
+                _combine_icosahedral_multiscale_to_fine(mesh_levels)
+            )
+            print(
+                "Combined multiscale icosahedral mesh: "
+                f"{mesh_xy.shape[0]} nodes, {mesh_edge_index.shape[1]} "
+                f"directed m2m edges across {len(mesh_levels)} levels"
+            )
+        else:
+            mesh_cart, mesh_xy, mesh_edge_index = mesh_levels[0]
         num_mesh = mesh_cart.shape[0]
         num_grid = grid_xy.shape[0]
         hierarchical_cluster = False
         mesh_pos_list = None
         save_graphs_cluster = None
-
-        # Restrict mesh to sea-only when ocean/land mask is provided
-        if sea_xy is not None and land_xy is not None and land_xy.shape[0] > 0:
-            mesh_cart, mesh_xy, mesh_edge_index = (
-                _filter_icosahedral_mesh_to_sea(
-                    mesh_cart, mesh_xy, mesh_edge_index, sea_xy, land_xy
-                )
-            )
-            num_mesh = mesh_xy.shape[0]
-            print(f"Filtered icosahedral mesh to sea-only: {num_mesh} nodes")
 
     num_m2m_edges = mesh_edge_index.shape[1]
     if num_m2m_edges == 0:
@@ -309,32 +394,130 @@ def create_global_graph(
             saving.save_edges_list(mesh_up, "mesh_up", graph_dir_path)
             saving.save_edges_list(mesh_down, "mesh_down", graph_dir_path)
     else:
-        mesh_edge_index_t = torch.from_numpy(mesh_edge_index.astype(np.int64))
-        m2m_len = global_icosahedral_mesh.mesh_edge_lengths_cart(
-            mesh_cart, mesh_edge_index
-        )
-        m2m_src, m2m_dst = mesh_edge_index[0], mesh_edge_index[1]
-        m2m_lon_lat_src = global_icosahedral_mesh._cartesian_to_lon_lat(
-            mesh_cart[m2m_src]
-        )
-        m2m_lon_lat_dst = global_icosahedral_mesh._cartesian_to_lon_lat(
-            mesh_cart[m2m_dst]
-        )
-        # Edge feature (dlat, dlon) to match g2m/m2g
-        dlon = (m2m_lon_lat_dst[:, 0] - m2m_lon_lat_src[:, 0]).astype(
-            np.float32
-        )
-        dlat = (m2m_lon_lat_dst[:, 1] - m2m_lon_lat_src[:, 1]).astype(
-            np.float32
-        )
-        m2m_vdiff = np.stack([dlat, dlon], axis=1)
-        m2m_graph = SimpleNamespace(
-            edge_index=mesh_edge_index_t,
-            len=torch.from_numpy(m2m_len),
-            vdiff=torch.from_numpy(m2m_vdiff),
-        )
-        saving.save_edges_list([m2m_graph], "m2m", graph_dir_path)
-        mesh_features_list = [torch.from_numpy(mesh_xy)]  # (lon, lat) already
+        # Icosahedral meshes
+        if graph_type == "hierarchical":
+            # mesh_levels is finest->coarsest, and level 0 is grid connected
+            # bottom mesh (matches model expectations).
+            m2m_graphs = []
+            mesh_features_list = []
+            for lvl_cart, lvl_xy, lvl_ei in mesh_levels:
+                lvl_ei_t = torch.from_numpy(lvl_ei.astype(np.int64))
+                lvl_len = global_icosahedral_mesh.mesh_edge_lengths_cart(
+                    lvl_cart, lvl_ei
+                )
+                if lvl_ei.shape[1] > 0:
+                    src, dst = lvl_ei[0], lvl_ei[1]
+                    src_xy = global_icosahedral_mesh._cartesian_to_lon_lat(
+                        lvl_cart[src]
+                    )
+                    dst_xy = global_icosahedral_mesh._cartesian_to_lon_lat(
+                        lvl_cart[dst]
+                    )
+                    dlon = (dst_xy[:, 0] - src_xy[:, 0]).astype(np.float32)
+                    dlat = (dst_xy[:, 1] - src_xy[:, 1]).astype(np.float32)
+                    lvl_vdiff = np.stack([dlat, dlon], axis=1)
+                else:
+                    lvl_vdiff = np.zeros((0, 2), dtype=np.float32)
+
+                m2m_graphs.append(
+                    SimpleNamespace(
+                        edge_index=lvl_ei_t,
+                        len=torch.from_numpy(lvl_len),
+                        vdiff=torch.from_numpy(lvl_vdiff),
+                    )
+                )
+                mesh_features_list.append(torch.from_numpy(lvl_xy))
+
+            saving.save_edges_list(m2m_graphs, "m2m", graph_dir_path)
+
+            # Inter-level (up/down) edges between adjacent levels
+            mesh_up_graphs = []
+            mesh_down_graphs = []
+            for level_i in range(len(mesh_levels) - 1):
+                fine_cart, fine_xy, _ = mesh_levels[level_i]
+                coarse_cart, coarse_xy, _ = mesh_levels[level_i + 1]
+                if fine_cart.shape[0] == 0 or coarse_cart.shape[0] == 0:
+                    raise ValueError(
+                        "Empty mesh level encountered while building hierarchy."
+                    )
+
+                kdt_coarse = scipy.spatial.cKDTree(coarse_cart)
+                _, nn = kdt_coarse.query(fine_cart, k=1)
+                nn = nn.astype(np.int64).ravel()
+
+                fine_idx = np.arange(fine_cart.shape[0], dtype=np.int64)
+                up_ei = np.stack([fine_idx, nn], axis=0)  # fine -> coarse
+                down_ei = np.stack([nn, fine_idx], axis=0)  # coarse -> fine
+
+                # Chord length features
+                up_len = np.linalg.norm(
+                    coarse_cart[nn] - fine_cart, axis=1
+                ).astype(np.float32)
+                down_len = up_len.copy()
+
+                # vdiff features: (dlat, dlon) in degrees
+                up_dlon = (coarse_xy[nn, 0] - fine_xy[:, 0]).astype(np.float32)
+                up_dlat = (coarse_xy[nn, 1] - fine_xy[:, 1]).astype(np.float32)
+                up_vdiff = np.stack([up_dlat, up_dlon], axis=1)
+
+                down_dlon = (fine_xy[:, 0] - coarse_xy[nn, 0]).astype(
+                    np.float32
+                )
+                down_dlat = (fine_xy[:, 1] - coarse_xy[nn, 1]).astype(
+                    np.float32
+                )
+                down_vdiff = np.stack([down_dlat, down_dlon], axis=1)
+
+                mesh_up_graphs.append(
+                    SimpleNamespace(
+                        edge_index=torch.from_numpy(up_ei),
+                        len=torch.from_numpy(up_len),
+                        vdiff=torch.from_numpy(up_vdiff),
+                    )
+                )
+                mesh_down_graphs.append(
+                    SimpleNamespace(
+                        edge_index=torch.from_numpy(down_ei),
+                        len=torch.from_numpy(down_len),
+                        vdiff=torch.from_numpy(down_vdiff),
+                    )
+                )
+
+            saving.save_edges_list(mesh_up_graphs, "mesh_up", graph_dir_path)
+            saving.save_edges_list(
+                mesh_down_graphs, "mesh_down", graph_dir_path
+            )
+        else:
+            mesh_edge_index_t = torch.from_numpy(
+                mesh_edge_index.astype(np.int64)
+            )
+            m2m_len = global_icosahedral_mesh.mesh_edge_lengths_cart(
+                mesh_cart, mesh_edge_index
+            )
+            m2m_src, m2m_dst = mesh_edge_index[0], mesh_edge_index[1]
+            m2m_lon_lat_src = global_icosahedral_mesh._cartesian_to_lon_lat(
+                mesh_cart[m2m_src]
+            )
+            m2m_lon_lat_dst = global_icosahedral_mesh._cartesian_to_lon_lat(
+                mesh_cart[m2m_dst]
+            )
+            # Edge feature (dlat, dlon) to match g2m/m2g
+            dlon = (m2m_lon_lat_dst[:, 0] - m2m_lon_lat_src[:, 0]).astype(
+                np.float32
+            )
+            dlat = (m2m_lon_lat_dst[:, 1] - m2m_lon_lat_src[:, 1]).astype(
+                np.float32
+            )
+            m2m_vdiff = np.stack([dlat, dlon], axis=1)
+            m2m_graph = SimpleNamespace(
+                edge_index=mesh_edge_index_t,
+                len=torch.from_numpy(m2m_len),
+                vdiff=torch.from_numpy(m2m_vdiff),
+            )
+            saving.save_edges_list([m2m_graph], "m2m", graph_dir_path)
+            mesh_features_list = [
+                torch.from_numpy(mesh_xy)
+            ]  # (lon, lat) already
     torch.save(
         mesh_features_list,
         os.path.join(graph_dir_path, "mesh_features.pt"),
@@ -389,6 +572,66 @@ def create_global_graph(
                 vis.plot_graph(
                     level_graph,
                     f"Mesh graph, level {level_i}",
+                    graph_dir_path,
+                )
+            # Plot inter-level edges if present
+            mesh_up_graphs_plot = save_graphs_cluster.get("mesh_up", [])
+            mesh_down_graphs_plot = save_graphs_cluster.get("mesh_down", [])
+            for level_i, g in enumerate(mesh_up_graphs_plot):
+                vis.plot_graph(
+                    g,
+                    f"Mesh up {level_i} to {level_i + 1}",
+                    graph_dir_path,
+                )
+            for level_i, g in enumerate(mesh_down_graphs_plot):
+                vis.plot_graph(
+                    g,
+                    f"Mesh down {level_i + 1} -> {level_i}",
+                    graph_dir_path,
+                )
+        elif graph_type == "hierarchical":
+            # Icosahedral hierarchy: plot m2m graph for each level (0=bottom)
+            for level_i, (lvl_cart, lvl_xy, lvl_ei) in enumerate(mesh_levels):
+                level_graph = pyg.data.Data(
+                    pos=torch.from_numpy(lvl_xy).float(),
+                    edge_index=torch.from_numpy(lvl_ei.astype(np.int64)),
+                )
+                vis.plot_graph(
+                    level_graph,
+                    f"Mesh graph, level {level_i}",
+                    graph_dir_path,
+                )
+            # Plot inter-level edges (fine level_i -> coarse level_i+1)
+            for level_i in range(len(mesh_levels) - 1):
+                fine_cart, fine_xy, _ = mesh_levels[level_i]
+                coarse_cart, coarse_xy, _ = mesh_levels[level_i + 1]
+                kdt_coarse = scipy.spatial.cKDTree(coarse_cart)
+                _, nn = kdt_coarse.query(fine_cart, k=1)
+                nn = nn.astype(np.int64).ravel()
+
+                n_fine = fine_cart.shape[0]
+                fine_idx = np.arange(n_fine, dtype=np.int64)
+                pos_updown = np.concatenate([fine_xy, coarse_xy], axis=0)
+
+                up_ei_plot = np.stack([fine_idx, nn + n_fine], axis=0)
+                up_graph = pyg.data.Data(
+                    pos=torch.from_numpy(pos_updown).float(),
+                    edge_index=torch.from_numpy(up_ei_plot),
+                )
+                vis.plot_graph(
+                    up_graph,
+                    f"Mesh up {level_i} to {level_i + 1}",
+                    graph_dir_path,
+                )
+
+                down_ei_plot = np.stack([nn + n_fine, fine_idx], axis=0)
+                down_graph = pyg.data.Data(
+                    pos=torch.from_numpy(pos_updown).float(),
+                    edge_index=torch.from_numpy(down_ei_plot),
+                )
+                vis.plot_graph(
+                    down_graph,
+                    f"Mesh down {level_i + 1} -> {level_i}",
                     graph_dir_path,
                 )
         else:
@@ -506,8 +749,8 @@ def cli(input_args=None):
     parser.add_argument(
         "--levels",
         type=int,
-        default=None,
-        help="Number of mesh levels (default: from --type).",
+        default=3,
+        help="Number of mesh levels (default: 3).",
     )
     parser.add_argument(
         "--g2m_radius",
@@ -535,13 +778,13 @@ def cli(input_args=None):
     parser.add_argument(
         "--mesh_refinement_factor",
         type=float,
-        default=9,
+        default=5,
         help="(Cluster) factor between mesh nodes at consecutive levels.",
     )
     parser.add_argument(
         "--grid_to_first_mesh_refinement",
         type=float,
-        default=25,
+        default=5,
         help="(Cluster) ratio grid nodes / first-level mesh nodes.",
     )
     parser.add_argument(

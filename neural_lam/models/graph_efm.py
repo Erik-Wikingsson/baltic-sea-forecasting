@@ -99,7 +99,8 @@ class GraphEFM(ARProbModel):
         print(
             "GraphEFM, "
             f"self.interior_dim={self.interior_input_dim}, "
-            f"self.boundary_dim={self.boundary_dim}, "
+            f"self.boundary_dim={getattr(self, 'boundary_dim', None)}, "
+            f"self.atmosphere_dim={getattr(self, 'atmosphere_dim', None)}, "
         )
 
         # Feature embedders for interior

@@ -43,6 +43,19 @@ def load_grid_from_zarr(dataset_path: str) -> np.ndarray:
     )
 
 
+def _lon_lat_to_graphcast_node_features(lon_lat_deg: np.ndarray) -> np.ndarray:
+    """Convert (lon, lat) in degrees to GraphCast-style node features.
+
+    Returns (cos(lat), sin(lon), cos(lon)) as (N, 3) float32.
+    Convention: lon = column 0, lat = column 1.
+    """
+    lon_rad = np.deg2rad(lon_lat_deg[:, 0].astype(np.float64))
+    lat_rad = np.deg2rad(lon_lat_deg[:, 1].astype(np.float64))
+    return np.stack(
+        [np.cos(lat_rad), np.sin(lon_rad), np.cos(lon_rad)], axis=1
+    ).astype(np.float32)
+
+
 def load_grid_from_datastore(
     datastore: BaseRegularGridDatastore,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -407,26 +420,23 @@ def create_global_graph(
                 )
                 if lvl_ei.shape[1] > 0:
                     src, dst = lvl_ei[0], lvl_ei[1]
-                    src_xy = global_icosahedral_mesh._cartesian_to_lon_lat(
-                        lvl_cart[src]
-                    )
-                    dst_xy = global_icosahedral_mesh._cartesian_to_lon_lat(
-                        lvl_cart[dst]
-                    )
-                    dlon = (dst_xy[:, 0] - src_xy[:, 0]).astype(np.float32)
-                    dlat = (dst_xy[:, 1] - src_xy[:, 1]).astype(np.float32)
-                    lvl_vdiff = np.stack([dlat, dlon], axis=1)
+                    # 3D Cartesian vdiff (receiver - sender) on unit sphere
+                    lvl_vdiff_3d = lvl_cart[dst].astype(np.float32) - lvl_cart[
+                        src
+                    ].astype(np.float32)
                 else:
-                    lvl_vdiff = np.zeros((0, 2), dtype=np.float32)
+                    lvl_vdiff_3d = np.zeros((0, 3), dtype=np.float32)
 
                 m2m_graphs.append(
                     SimpleNamespace(
                         edge_index=lvl_ei_t,
                         len=torch.from_numpy(lvl_len),
-                        vdiff=torch.from_numpy(lvl_vdiff),
+                        vdiff=torch.from_numpy(lvl_vdiff_3d),
                     )
                 )
-                mesh_features_list.append(torch.from_numpy(lvl_xy))
+                # GraphCast-style node features: cos(lat), sin(lon), cos(lon)
+                lvl_node_feat = _lon_lat_to_graphcast_node_features(lvl_xy)
+                mesh_features_list.append(torch.from_numpy(lvl_node_feat))
 
             saving.save_edges_list(m2m_graphs, "m2m", graph_dir_path)
 
@@ -455,31 +465,26 @@ def create_global_graph(
                 ).astype(np.float32)
                 down_len = up_len.copy()
 
-                # vdiff features: (dlat, dlon) in degrees
-                up_dlon = (coarse_xy[nn, 0] - fine_xy[:, 0]).astype(np.float32)
-                up_dlat = (coarse_xy[nn, 1] - fine_xy[:, 1]).astype(np.float32)
-                up_vdiff = np.stack([up_dlat, up_dlon], axis=1)
-
-                down_dlon = (fine_xy[:, 0] - coarse_xy[nn, 0]).astype(
+                # vdiff: 3D Cartesian (receiver - sender) on unit sphere
+                up_vdiff_3d = coarse_cart[nn].astype(
                     np.float32
-                )
-                down_dlat = (fine_xy[:, 1] - coarse_xy[nn, 1]).astype(
-                    np.float32
-                )
-                down_vdiff = np.stack([down_dlat, down_dlon], axis=1)
+                ) - fine_cart.astype(np.float32)
+                down_vdiff_3d = fine_cart.astype(np.float32) - coarse_cart[
+                    nn
+                ].astype(np.float32)
 
                 mesh_up_graphs.append(
                     SimpleNamespace(
                         edge_index=torch.from_numpy(up_ei),
                         len=torch.from_numpy(up_len),
-                        vdiff=torch.from_numpy(up_vdiff),
+                        vdiff=torch.from_numpy(up_vdiff_3d),
                     )
                 )
                 mesh_down_graphs.append(
                     SimpleNamespace(
                         edge_index=torch.from_numpy(down_ei),
                         len=torch.from_numpy(down_len),
-                        vdiff=torch.from_numpy(down_vdiff),
+                        vdiff=torch.from_numpy(down_vdiff_3d),
                     )
                 )
 
@@ -495,29 +500,19 @@ def create_global_graph(
                 mesh_cart, mesh_edge_index
             )
             m2m_src, m2m_dst = mesh_edge_index[0], mesh_edge_index[1]
-            m2m_lon_lat_src = global_icosahedral_mesh._cartesian_to_lon_lat(
-                mesh_cart[m2m_src]
-            )
-            m2m_lon_lat_dst = global_icosahedral_mesh._cartesian_to_lon_lat(
-                mesh_cart[m2m_dst]
-            )
-            # Edge feature (dlat, dlon) to match g2m/m2g
-            dlon = (m2m_lon_lat_dst[:, 0] - m2m_lon_lat_src[:, 0]).astype(
-                np.float32
-            )
-            dlat = (m2m_lon_lat_dst[:, 1] - m2m_lon_lat_src[:, 1]).astype(
-                np.float32
-            )
-            m2m_vdiff = np.stack([dlat, dlon], axis=1)
+            # 3D Cartesian vdiff (receiver - sender) on unit sphere
+            m2m_vdiff_3d = mesh_cart[m2m_dst].astype(np.float32) - mesh_cart[
+                m2m_src
+            ].astype(np.float32)
             m2m_graph = SimpleNamespace(
                 edge_index=mesh_edge_index_t,
                 len=torch.from_numpy(m2m_len),
-                vdiff=torch.from_numpy(m2m_vdiff),
+                vdiff=torch.from_numpy(m2m_vdiff_3d),
             )
             saving.save_edges_list([m2m_graph], "m2m", graph_dir_path)
-            mesh_features_list = [
-                torch.from_numpy(mesh_xy)
-            ]  # (lon, lat) already
+            # GraphCast-style node features: cos(lat), sin(lon), cos(lon)
+            mesh_node_feat = _lon_lat_to_graphcast_node_features(mesh_xy)
+            mesh_features_list = [torch.from_numpy(mesh_node_feat)]
     torch.save(
         mesh_features_list,
         os.path.join(graph_dir_path, "mesh_features.pt"),

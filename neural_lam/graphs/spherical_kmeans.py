@@ -2,12 +2,13 @@
 Modified from https://github.com/jasonlaska/spherecluster.
 """
 
+# Standard library
 import warnings
 
+# Third-party
 import numpy as np
 import scipy.sparse as sp
 from joblib import Parallel, delayed
-
 from sklearn.cluster import KMeans
 from sklearn.cluster._kmeans import (
     _check_sample_weight,
@@ -71,16 +72,23 @@ def _spherical_kmeans_single_lloyd(
             for k in range(n_clusters):
                 mask = labels == k
                 if mask.any():
-                    centers[k] = np.asarray(
-                        X[mask].multiply(sample_weight[mask, None]).sum(axis=0)
-                    ) / sample_weight[mask].sum()
+                    centers[k] = (
+                        np.asarray(
+                            X[mask]
+                            .multiply(sample_weight[mask, None])
+                            .sum(axis=0)
+                        )
+                        / sample_weight[mask].sum()
+                    )
         else:
             for k in range(n_clusters):
                 mask = labels == k
                 if mask.any():
-                    centers[k] = np.average(X[mask], weights=sample_weight[mask], axis=0)
+                    centers[k] = np.average(
+                        X[mask], weights=sample_weight[mask], axis=0
+                    )
 
-        # l2-normalize centers (this is the main contibution here)
+        # l2-normalize centers (this is the main contribution here)
         centers = normalize(centers)
 
         if verbose:
@@ -96,14 +104,17 @@ def _spherical_kmeans_single_lloyd(
             if verbose:
                 print(
                     "Converged at iteration %d: "
-                    "center shift %e within tolerance %e" % (i, center_shift_total, tol)
+                    "center shift %e within tolerance %e"
+                    % (i, center_shift_total, tol)
                 )
             break
 
     if center_shift_total > 0:
         # rerun E-step in case of non-convergence so that predicted labels
         # match cluster centers
-        best_labels, best_inertia = _labels_inertia(X, sample_weight, best_centers)
+        best_labels, best_inertia = _labels_inertia(
+            X, sample_weight, best_centers
+        )
 
     return best_labels, best_inertia, best_centers, i + 1
 
@@ -123,8 +134,7 @@ def spherical_k_means(
     algorithm="auto",
     return_n_iter=False,
 ):
-    """Modified from sklearn.cluster.k_means_.k_means.
-    """
+    """Modified from sklearn.cluster.k_means_.k_means."""
     if n_init <= 0:
         raise ValueError(
             "Invalid number of initializations."
@@ -147,7 +157,8 @@ def spherical_k_means(
     # verify that the number of samples given is larger than k
     if _num_samples(X) < n_clusters:
         raise ValueError(
-            "n_samples=%d should be >= n_clusters=%d" % (_num_samples(X), n_clusters)
+            "n_samples=%d should be >= n_clusters=%d"
+            % (_num_samples(X), n_clusters)
         )
     tol = _tolerance(X, tol)
 
@@ -163,7 +174,8 @@ def spherical_k_means(
         if n_init != 1:
             warnings.warn(
                 "Explicit initial center position passed: "
-                "performing only one init in k-means instead of n_init=%d" % n_init,
+                "performing only one init in k-means instead of n_init=%d"
+                % n_init,
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -231,7 +243,7 @@ def spherical_k_means(
 class SphericalKMeans(KMeans):
     """Spherical K-Means clustering
 
-    Modfication of sklearn.cluster.KMeans where cluster centers are normalized
+    Modification of sklearn.cluster.KMeans where cluster centers are normalized
     (projected onto the sphere) in each iteration.
 
     Parameters
@@ -348,19 +360,21 @@ class SphericalKMeans(KMeans):
 
         # TODO: add check that all data is unit-normalized
 
-        self.cluster_centers_, self.labels_, self.inertia_, self.n_iter_ = spherical_k_means(
-            X,
-            n_clusters=self.n_clusters,
-            sample_weight=sample_weight,
-            init=self.init,
-            n_init=self.n_init,
-            max_iter=self.max_iter,
-            verbose=self.verbose,
-            tol=self.tol,
-            random_state=random_state,
-            copy_x=self.copy_x,
-            n_jobs=self.n_jobs,
-            return_n_iter=True,
+        self.cluster_centers_, self.labels_, self.inertia_, self.n_iter_ = (
+            spherical_k_means(
+                X,
+                n_clusters=self.n_clusters,
+                sample_weight=sample_weight,
+                init=self.init,
+                n_init=self.n_init,
+                max_iter=self.max_iter,
+                verbose=self.verbose,
+                tol=self.tol,
+                random_state=random_state,
+                copy_x=self.copy_x,
+                n_jobs=self.n_jobs,
+                return_n_iter=True,
+            )
         )
 
         return self

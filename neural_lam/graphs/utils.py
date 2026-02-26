@@ -58,22 +58,24 @@ def filter_global_edges_land(
     mesh_edge_index: np.ndarray,
     sea_xy: np.ndarray,
     land_xy: np.ndarray,
+    max_chord_len: float = 0.1,
     edges_only: bool = False,
 ) -> tuple:
     """Keep only mesh nodes over sea and/or edges whose midpoint is over sea.
 
     Uses 3D Cartesian. When edges_only=False (default): node kept if dist to
     nearest sea <= dist to nearest land; edge kept if both endpoints kept AND
-    edge midpoint (normalized to unit sphere) is over sea; returns reindexed
-    mesh and edge index. When edges_only=True: no node filter, no reindexing;
-    keep only edges whose midpoint is over sea (e.g. for m2g with pos_3d =
-    mesh|grid). Returns (pos_3d, edge_index_filtered).
+    edge midpoint (normalized to unit sphere) is over sea (and chord length <=
+    max_chord_len if set). When edges_only=True: no node filter, no reindexing;
+    keep only edges whose midpoint is over sea (e.g. for m2g). Chord length
+    is in [0, 2]; ~0.1 corresponds to ~5.7° great-circle arc.
 
     Parameters
     ----------
     mesh_cart : (N, 3) pos on unit sphere (mesh only or mesh|grid if edges_only)
     mesh_edge_index : (2, E) edge index [src, dst]
     sea_xy, land_xy : (n_sea, 2), (n_land, 2) [longitude, latitude] in degrees
+    max_chord_len : if set, drop edges with chord length > this (unit sphere)
     edges_only : if True, only filter by edge midpoint, no node filter
 
     Returns
@@ -86,6 +88,12 @@ def filter_global_edges_land(
     kdt_sea = scipy.spatial.KDTree(sea_cart)
     kdt_land = scipy.spatial.KDTree(land_cart)
     src, dst = mesh_edge_index[0], mesh_edge_index[1]
+    chord = np.linalg.norm(mesh_cart[dst] - mesh_cart[src], axis=1)
+    length_ok = (
+        chord <= max_chord_len
+        if max_chord_len is not None
+        else np.ones(chord.shape[0], dtype=bool)
+    )
     mid = (mesh_cart[src] + mesh_cart[dst]) / 2.0
     norm = np.linalg.norm(mid, axis=1, keepdims=True)
     norm = np.where(norm > 1e-12, norm, 1.0)
@@ -93,9 +101,10 @@ def filter_global_edges_land(
     d_sea_mid, _ = kdt_sea.query(mid_unit, k=1)
     d_land_mid, _ = kdt_land.query(mid_unit, k=1)
     mid_over_sea = (d_sea_mid <= d_land_mid).ravel()
+    keep_edge_base = length_ok & mid_over_sea
 
     if edges_only:
-        return mesh_cart, mesh_edge_index[:, mid_over_sea]
+        return mesh_cart, mesh_edge_index[:, keep_edge_base]
 
     num_mesh = mesh_cart.shape[0]
     d_sea, _ = kdt_sea.query(mesh_cart, k=1)
@@ -109,7 +118,7 @@ def filter_global_edges_land(
             new_idx += 1
     mesh_cart_filtered = mesh_cart[keep_node]
     both_kept = keep_node[src] & keep_node[dst]
-    keep_edge = both_kept & mid_over_sea
+    keep_edge = both_kept & keep_edge_base
     new_src = old_to_new[src[keep_edge]]
     new_dst = old_to_new[dst[keep_edge]]
     edge_index_filtered = np.stack([new_src, new_dst], axis=0)
@@ -178,38 +187,64 @@ def filter_edges_land(
     sea_xy: np.ndarray,
     land_xy: np.ndarray,
     max_edge_len: float = 20000,  # in m
+    edges_only: bool = False,
 ):
     """
     Filter edge set to only keep edges not crossing land.
-    `graph` is pyg Data object with `edge_index` and `pos` attributes
+
+    Uses projected xy: node kept if dist to nearest sea <= dist
+    to nearest land; edge kept if both endpoints kept and edge midpoint is over
+    sea (and edge length < max_edge_len). When edges_only=True (e.g. m2g): no
+    node filter, no reindexing; keep only edges whose midpoint is over sea.
+
+    `graph` is pyg Data with `edge_index` and `pos` (N, 2) in same coords as
+    sea_xy, land_xy.
     """
-    # Compute (in pytorch) midpoint of each edge
+    pos_np = (
+        graph.pos.cpu().numpy()
+        if graph.pos.is_cuda
+        else graph.pos.detach().numpy()
+    )
     send_pos = graph.pos[graph.edge_index[0]]
     rec_pos = graph.pos[graph.edge_index[1]]
     midpoint_pos = (send_pos + rec_pos) / 2
     edge_len = torch.norm(rec_pos - send_pos, dim=1)
-
-    # First filter, absolute edge length
-    # NOTE: This is directly in meters
     edge_len_filter = edge_len < max_edge_len
 
-    # Second filter, middle of edge
-    # Look up (using numpy and scipy) closest gridpoint
+    kdt_sea = scipy.spatial.KDTree(sea_xy)
+    kdt_land = scipy.spatial.KDTree(land_xy)
     midpoint_pos_np = midpoint_pos.numpy()
-    grid_point_kdt = scipy.spatial.KDTree(
-        np.concatenate((sea_xy, land_xy), axis=0)
-    )
-    closest_grid_index = grid_point_kdt.query(midpoint_pos_np)[1]
-    # As sea points come first, can only check magnitude
-    # of index of closest point
-    midpoint_over_sea = closest_grid_index < sea_xy.shape[0]  # bool np array
+    d_sea_mid, _ = kdt_sea.query(midpoint_pos_np, k=1)
+    d_land_mid, _ = kdt_land.query(midpoint_pos_np, k=1)
+    midpoint_over_sea = (d_sea_mid <= d_land_mid).ravel()
     midpoint_filter = torch.tensor(midpoint_over_sea, dtype=bool)
 
-    edge_filter = edge_len_filter & midpoint_filter
-    new_edge_index = graph.edge_index[:, edge_filter]
+    if edges_only:
+        edge_filter = edge_len_filter & midpoint_filter
+        graph.edge_index = graph.edge_index[:, edge_filter]
+        return
 
-    # Change graph in-place
-    graph.edge_index = new_edge_index
+    # Node filter: keep node iff nearest sea <= nearest land
+    d_sea_node, _ = kdt_sea.query(pos_np, k=1)
+    d_land_node, _ = kdt_land.query(pos_np, k=1)
+    keep_node = (d_sea_node <= d_land_node).ravel()
+    num_nodes = pos_np.shape[0]
+    old_to_new = np.full(num_nodes, -1, dtype=np.int64)
+    new_idx = 0
+    for old_idx in range(num_nodes):
+        if keep_node[old_idx]:
+            old_to_new[old_idx] = new_idx
+            new_idx += 1
+    pos_filtered = pos_np[keep_node]
+    src, dst = graph.edge_index[0].numpy(), graph.edge_index[1].numpy()
+    both_kept = keep_node[src] & keep_node[dst]
+    keep_edge = both_kept & midpoint_filter.numpy() & edge_len_filter.numpy()
+    new_src = old_to_new[src[keep_edge]]
+    new_dst = old_to_new[dst[keep_edge]]
+    graph.pos = torch.from_numpy(pos_filtered.astype(np.float32))
+    graph.edge_index = torch.from_numpy(
+        np.stack([new_src, new_dst], axis=0).astype(np.int64)
+    )
 
 
 def _check_g2m_disconnected(

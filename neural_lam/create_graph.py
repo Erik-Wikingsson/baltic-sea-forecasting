@@ -441,8 +441,8 @@ def create_graph(
 
     pyg_m2g = from_networkx(G_m2g)
 
-    # Remove m2g edges over land
-    gutils.filter_edges_land(pyg_m2g, xy, xy_land)
+    # Remove m2g edges over land (edges_only: no node filter, no reindex)
+    gutils.filter_edges_land(pyg_m2g, xy, xy_land, edges_only=True)
 
     # Check for disconnected nodes in m2g
     m2g_node_list = list(G_m2g.nodes)
@@ -627,13 +627,13 @@ def cli(input_args=None):
     parser.add_argument(
         "--mesh_refinement_factor",
         type=float,
-        default=4,
+        default=9,
         help="Factor between number of mesh nodes at each cluster mesh level.",
     )
     parser.add_argument(
         "--grid_to_first_mesh_refinement",
         type=float,
-        default=6,
+        default=9,
         help="Factor between number of grid nodes and mesh nodes at bottom "
         "level.",
     )

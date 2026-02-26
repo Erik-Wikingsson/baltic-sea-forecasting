@@ -1,5 +1,6 @@
 # Third-party
 import numpy as np
+import scipy.spatial
 import torch
 import torch_geometric as pyg
 import torch_geometric.transforms as pygt
@@ -67,9 +68,7 @@ def build_cluster_mesh_graph(
             random_state=random_state,
         )
 
-        closest_cluster_index = mesh_ref_model.fit_predict(
-            prev_level_pos,
-        )
+        mesh_ref_model.fit(prev_level_pos)
 
         # m2m
         level_graph = build_graph_from_node_pos(mesh_ref_model.cluster_centers_)
@@ -87,12 +86,17 @@ def build_cluster_mesh_graph(
             mesh_plot_function(level_graph, f"Mesh graph, level {level_i}")
 
         if level_i > 0:
-            # up
+            # Build up/down after filtering: coarse -> nearest fine (xy)
+            coarse_pos = mesh_level_graphs[level_i - 1].pos.numpy()
+            fine_pos = level_graph.pos.numpy()
+            n_prev = coarse_pos.shape[0]
+            kdt_fine = scipy.spatial.cKDTree(fine_pos)
+            _, coarse_to_fine = kdt_fine.query(coarse_pos, k=1)
+            coarse_to_fine = np.asarray(coarse_to_fine, dtype=np.int64).ravel()
             up_edge_index = torch.stack(
                 (
-                    torch.arange(prev_level_pos.shape[0], dtype=torch.long),
-                    prev_level_pos.shape[0]
-                    + torch.tensor(closest_cluster_index, dtype=torch.long),
+                    torch.arange(n_prev, dtype=torch.long),
+                    torch.from_numpy(coarse_to_fine) + n_prev,
                 ),
                 dim=0,
             )
@@ -109,17 +113,12 @@ def build_cluster_mesh_graph(
             gutils.add_edge_features_pyg(up_graph)
             mesh_up_graphs.append(up_graph)
 
-            # down, reverse up edges
-            reversed_up_edge_index = torch.stack(
-                (
-                    up_edge_index[1],
-                    up_edge_index[0],
-                ),
-                dim=0,
+            down_edge_index = torch.stack(
+                (up_edge_index[1], up_edge_index[0]), dim=0
             )
             down_graph = pyg.data.Data(
-                edge_index=reversed_up_edge_index,
-                pos=up_graph.pos,  # same node indices, keep pos as is
+                edge_index=down_edge_index,
+                pos=up_graph.pos,
             )
             gutils.add_edge_features_pyg(down_graph)
             mesh_down_graphs.append(down_graph)

@@ -6,7 +6,7 @@ import numpy as np
 import scipy.spatial
 import torch
 import torch_geometric as pyg
-from sklearn.cluster import KMeans
+from spherecluster import SphericalKMeans
 
 # Local
 from . import utils as gutils
@@ -115,6 +115,7 @@ def build_cluster_mesh_graph_global(
         num_mesh_levels = min(possible_mesh_levels, limit_mesh_levels)
     num_mesh_levels = max(1, num_mesh_levels)
 
+    lat_weights = np.cos(np.deg2rad(sea_xy[:, 1]))
     sea_3d = gutils.node_lon_lat_to_cart(sea_xy)
 
     mesh_level_graphs = []
@@ -125,22 +126,24 @@ def build_cluster_mesh_graph_global(
         print(f"Running KMeans for global cluster level {level_i}...")
         if level_i == 0:
             prev_level_pos = sea_3d
+            prev_level_weights = lat_weights
             num_clusters = int(np.round(n_sea / grid_to_first_mesh_refinement))
             num_clusters = max(4, num_clusters)  # ConvexHull needs >= 4 in 3D
         else:
             prev_level_pos = mesh_level_graphs[-1].pos.numpy()  # (N, 3)
+            prev_level_weights = None
             num_clusters = int(
                 np.round(prev_level_pos.shape[0] / mesh_refinement_factor)
             )
             num_clusters = max(2, num_clusters)
 
-        kmeans = KMeans(
+        kmeans = SphericalKMeans(
             n_clusters=num_clusters,
             init="k-means++",
             n_init=1,
             random_state=random_state,
         )
-        kmeans.fit(prev_level_pos)
+        kmeans.fit(prev_level_pos, sample_weight=prev_level_weights)
         centers_3d = kmeans.cluster_centers_
         r = np.linalg.norm(centers_3d, axis=1, keepdims=True)
         centers_3d = centers_3d / (r + 1e-12)

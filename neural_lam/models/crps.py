@@ -142,7 +142,7 @@ class CRPS(ARProbModel):
         # loss_batch: (B, pred_steps)
         loss_batch = metrics.mask_and_reduce_metric(
             crps_batch / self.per_var_std,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             average_grid=True,
             sum_vars=True,
         )
@@ -179,7 +179,7 @@ class CRPS(ARProbModel):
             trajectories,
             target_states,
             None,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             average_grid=True,
             sum_vars=False,
         )

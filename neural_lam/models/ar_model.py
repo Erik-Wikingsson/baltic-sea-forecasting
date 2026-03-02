@@ -52,6 +52,25 @@ class ARModel(pl.LightningModule):
         )[
             self.surface_mask
         ]  # (num_grid_nodes, d_features), 1 for non-land
+
+        # Optionally build latitude-weighted grid loss mask (approx. equal-area)
+        # using cos(latitude), normalized to unit mean over interior grid.
+        xy = datastore.get_xy("state", stacked=True)  # (N_full, 2) [lon, lat]
+        xy_surface = xy[self.surface_mask]  # (num_grid_nodes, 2)
+        lat_rad = np.deg2rad(xy_surface[:, 1].astype(np.float64))
+        cos_lat = np.cos(lat_rad).astype(np.float32)
+        interior_mask_arr = self.interior_mask.astype(np.float32)
+        if getattr(config.training, "lat_weighted_loss", False):
+            # Broadcast cos(lat) over state features and zero out land points
+            loss_mask_np = interior_mask_arr * cos_lat[:, np.newaxis]
+            total_weight = loss_mask_np.sum()
+            num_active = interior_mask_arr.sum()
+            # Normalize so mean weight over active grid points is 1
+            loss_mask_np *= num_active / total_weight
+        else:
+            # Uniform weighting over interior grid points
+            loss_mask_np = interior_mask_arr
+
         # Load static features standardized
         da_static_features = datastore.get_dataarray(
             category="static", split=None, standardize=True
@@ -223,6 +242,14 @@ class ARModel(pl.LightningModule):
 
         # Instantiate loss function
         self.loss = metrics.get_metric(args.loss)
+
+        # Grid loss/metric mask (float, can encode both mask and latitude
+        # weighting). Shape (num_grid_nodes, d_features).
+        self.register_buffer(
+            "loss_mask",
+            torch.tensor(loss_mask_np, dtype=torch.float32),
+            persistent=False,
+        )
 
         self.register_buffer(
             "interior_mask_bool",
@@ -438,9 +465,7 @@ class ARModel(pl.LightningModule):
 
         # Compute loss
         batch_loss = torch.mean(
-            self.loss(
-                prediction, target, pred_std, mask=self.interior_mask_bool
-            )
+            self.loss(prediction, target, pred_std, mask=self.loss_mask)
         )  # mean over unrolled times and batch
 
         log_dict = {"train_loss": batch_loss}
@@ -474,9 +499,7 @@ class ARModel(pl.LightningModule):
         prediction, target, pred_std, _ = self.common_step(batch)
 
         time_step_loss = torch.mean(
-            self.loss(
-                prediction, target, pred_std, mask=self.interior_mask_bool
-            ),
+            self.loss(prediction, target, pred_std, mask=self.loss_mask),
             dim=0,
         )  # (time_steps-1)
         mean_loss = torch.mean(time_step_loss)
@@ -501,7 +524,7 @@ class ARModel(pl.LightningModule):
             prediction,
             target,
             pred_std,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             sum_vars=False,
         )  # (B, pred_steps, d_f)
         self.val_metrics["mse"].append(entry_mses)
@@ -528,9 +551,7 @@ class ARModel(pl.LightningModule):
         # pred_steps, num_grid_nodes, d_f) or (d_f,)
 
         time_step_loss = torch.mean(
-            self.loss(
-                prediction, target, pred_std, mask=self.interior_mask_bool
-            ),
+            self.loss(prediction, target, pred_std, mask=self.loss_mask),
             dim=0,
         )  # (time_steps-1,)
         mean_loss = torch.mean(time_step_loss)
@@ -559,7 +580,7 @@ class ARModel(pl.LightningModule):
                 prediction,
                 target,
                 pred_std,
-                mask=self.interior_mask_bool,
+                mask=self.loss_mask,
                 sum_vars=False,
             )  # (B, pred_steps, d_f)
             self.test_metrics[metric_name].append(batch_metric_vals)
@@ -576,7 +597,7 @@ class ARModel(pl.LightningModule):
             prediction,
             target,
             pred_std,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             average_grid=False,
         )  # (B, pred_steps, num_grid_nodes)
         log_spatial_losses = spatial_loss[

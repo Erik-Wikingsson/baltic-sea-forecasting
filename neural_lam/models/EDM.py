@@ -190,7 +190,7 @@ class EDM(ARProbModel):
             ens_mean,
             target_states,
             ens_std,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             sum_vars=False,
         )  # (B, pred_steps, d_f)
         self.test_metrics["ens_mae"].append(ens_maes)
@@ -198,7 +198,7 @@ class EDM(ARProbModel):
             trajectories,
             target_states,
             None,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             sum_vars=False,
         )  # (B, pred_steps, d_f)
         self.test_metrics["crps_ens"].append(crps_batch)
@@ -359,7 +359,7 @@ class EDM(ARProbModel):
 
         loss = metrics.mask_and_reduce_metric(
             entry_mse_weighted,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             average_grid=True,
             sum_vars=True,
         )
@@ -474,7 +474,7 @@ class EDM(ARProbModel):
             metrics.mse(
                 prediction,
                 target,
-                mask=self.interior_mask_bool,
+                mask=self.loss_mask,
             )
         )  # mean over unrolled times and batch
 

@@ -653,7 +653,7 @@ class GraphEFM(ARProbModel):
             pred_mean,
             current_state,
             pred_std,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             average_grid=False,
             sum_vars=False,
         )  # (B, num_grid_nodes', d_state)
@@ -761,7 +761,7 @@ class GraphEFM(ARProbModel):
                 pred_traj_means,
                 target_states,
                 pred_traj_stds,
-                mask=self.interior_mask_bool,
+                mask=self.loss_mask,
             )  # (B, pred_steps)
             crps_loss = torch.mean(crps_estimate)
 
@@ -1008,7 +1008,7 @@ class GraphEFM(ARProbModel):
             trajectories,
             target_states,
             None,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             sum_vars=False,
         )
         ens_mean = torch.mean(trajectories, dim=1)
@@ -1016,7 +1016,7 @@ class GraphEFM(ARProbModel):
             ens_mean,
             target_states,
             None,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             sum_vars=False,
         )
 

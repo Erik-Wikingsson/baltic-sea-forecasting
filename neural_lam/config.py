@@ -105,6 +105,12 @@ class TrainingConfig:
         default_factory=OutputClamping
     )
 
+    # If True, weigh grid-point contributions in loss/metrics by cos(latitude)
+    # (normalized to unit mean over the interior grid), approximating equal-area
+    # weighting on the sphere. If False (default), all interior grid points are
+    # weighted uniformly in the loss.
+    lat_weighted_loss: bool = False
+
 
 @dataclasses.dataclass
 class NeuralLAMConfig(dataclass_wizard.JSONWizard, dataclass_wizard.YAMLWizard):

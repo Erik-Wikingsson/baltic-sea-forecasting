@@ -136,7 +136,7 @@ class FM(EDM):
             pred_drift,
             drift,
             pred_std,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
         )  # (B)
 
         # This is the predicted E[z1 | zt]

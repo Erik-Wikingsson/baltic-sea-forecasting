@@ -13,13 +13,23 @@ from sklearn.cluster import KMeans
 from sklearn.cluster._kmeans import (
     _check_sample_weight,
     _kmeans_plusplus,
-    _labels_inertia,
     _tolerance,
 )
 from sklearn.preprocessing import normalize
 from sklearn.utils import check_array, check_random_state
 from sklearn.utils.extmath import row_norms, squared_norm
 from sklearn.utils.validation import _num_samples
+
+
+def _spherical_labels_inertia(X, sample_weight, centers):
+    """Assignment and inertia using dot products (unit-norm X and centers).
+    Squared chord dist = 2(1 - cos_sim), so argmin distance = argmax cos_sim.
+    """
+    sim = np.asarray(X @ centers.T)  # (n, k); works for sparse X
+    labels = np.argmax(sim, axis=1)
+    sim_best = sim[np.arange(X.shape[0]), labels]
+    inertia = float(np.sum(sample_weight * 2.0 * (1.0 - sim_best)))
+    return labels, inertia
 
 
 def _spherical_kmeans_single_lloyd(
@@ -38,7 +48,7 @@ def _spherical_kmeans_single_lloyd(
     """
     random_state = check_random_state(random_state)
 
-    sample_weight = _check_sample_weight(sample_weight, X, dtype=np.float64)
+    sample_weight = _check_sample_weight(sample_weight, X, dtype=np.float32)
 
     best_labels, best_inertia, best_centers = None, None, None
 
@@ -52,41 +62,34 @@ def _spherical_kmeans_single_lloyd(
         centers = X[seeds]
     else:
         centers = init.copy()
-    centers = centers.astype(np.float64)
+    centers = centers.astype(np.float32)
     if verbose:
         print("Initialization complete")
+
+    n_samples = X.shape[0]
 
     # iterations
     for i in range(max_iter):
         centers_old = centers.copy()
 
-        # labels assignment
-        # TODO: _labels_inertia should be done with cosine distance
-        #       since ||a - b|| = 2(1 - cos(a,b)) when a,b are unit normalized
-        #       this doesn't really matter.
-        labels, inertia = _labels_inertia(X, sample_weight, centers)
+        # argmin chord² = argmax cos_sim (dot product for unit vectors)
+        labels, inertia = _spherical_labels_inertia(X, sample_weight, centers)
 
-        # computation of the means
-        centers = np.zeros((n_clusters, X.shape[1]), dtype=X.dtype)
-        if sp.issparse(X):
-            for k in range(n_clusters):
-                mask = labels == k
-                if mask.any():
-                    centers[k] = (
-                        np.asarray(
-                            X[mask]
-                            .multiply(sample_weight[mask, None])
-                            .sum(axis=0)
-                        )
-                        / sample_weight[mask].sum()
-                    )
-        else:
-            for k in range(n_clusters):
-                mask = labels == k
-                if mask.any():
-                    centers[k] = np.average(
-                        X[mask], weights=sample_weight[mask], axis=0
-                    )
+        # center update: weighted sum per cluster via sparse (n, k) matrix
+        W = sp.csr_matrix(
+            (sample_weight, (np.arange(n_samples), labels)),
+            shape=(n_samples, n_clusters),
+        )
+        cluster_weights = np.asarray(W.sum(axis=0)).ravel()
+        result = X.T @ W
+        weighted_centers = (
+            result.A if sp.issparse(result) else np.asarray(result)
+        )
+        # (d, k) -> (k, d); avoid div by zero for empty clusters
+        denom = np.where(cluster_weights > 0, cluster_weights, 1.0)
+        centers = (weighted_centers / denom).T
+        empty = cluster_weights == 0
+        centers[empty] = centers_old[empty]
 
         # l2-normalize centers (this is the main contribution here)
         centers = normalize(centers)
@@ -112,7 +115,7 @@ def _spherical_kmeans_single_lloyd(
     if center_shift_total > 0:
         # rerun E-step in case of non-convergence so that predicted labels
         # match cluster centers
-        best_labels, best_inertia = _labels_inertia(
+        best_labels, best_inertia = _spherical_labels_inertia(
             X, sample_weight, best_centers
         )
 
@@ -152,7 +155,7 @@ def spherical_k_means(
     # avoid forcing order when copy_x=False
     order = "C" if copy_x else None
     X = check_array(
-        X, accept_sparse="csr", dtype=np.float64, order=order, copy=copy_x
+        X, accept_sparse="csr", dtype=np.float32, order=order, copy=copy_x
     )
     # verify that the number of samples given is larger than k
     if _num_samples(X) < n_clusters:

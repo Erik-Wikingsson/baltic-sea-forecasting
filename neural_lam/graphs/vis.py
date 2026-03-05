@@ -13,7 +13,9 @@ from PIL import Image
 from . import utils as gutils
 
 # https://community.plotly.com/t/whats-the-efficient-way-to-create-3d-scatter-plot-for-millions-of-points/60965/4
-NODE_PLOT_LIMIT = 100000  # Limit on number of points to plot before subsampling
+NODE_PLOT_LIMIT = (
+    100_000  # Limit on number of points to plot before subsampling
+)
 
 
 def plot_graph(
@@ -47,11 +49,10 @@ def plot_graph(
     from_pos = pos[edge_index[0]]  # (M/2, 2)
     to_pos = pos[edge_index[1]]  # (M/2, 2)
     edge_lines = np.stack((from_pos, to_pos), axis=1)
-    axis.add_collection(
-        matplotlib.collections.LineCollection(
-            edge_lines, lw=0.4, colors="black", zorder=1
-        )
+    lc = matplotlib.collections.LineCollection(
+        edge_lines, lw=0.3, colors="black", zorder=1, rasterized=True
     )
+    axis.add_collection(lc)
 
     # Plot nodes
     if order_by_degree:
@@ -62,11 +63,12 @@ def plot_graph(
         pos[:, 0],
         pos[:, 1],
         c=degrees,
-        s=3,
+        s=2,
         marker="o",
         zorder=2,
         cmap="viridis",
         clim=None,
+        rasterized=True,
     )
 
     plt.colorbar(node_scatter, aspect=50)
@@ -294,7 +296,7 @@ def plot_disconnected_nodes(
             color="darkred",
         )
 
-    axis.legend()
+    axis.legend(loc="upper left")
     axis.set_title(title)
 
     plt.savefig(os.path.join(graph_dir_path, f"{title}.png"))

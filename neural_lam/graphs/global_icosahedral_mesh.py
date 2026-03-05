@@ -251,6 +251,7 @@ def m2g_knn(
     m2g_len : (M,) chord lengths
     m2g_vdiff : (M, 2) lon-lat diff in degrees (grid - mesh), (dlat, dlon)
     """
+    n_grid = grid_xy.shape[0]
     grid_cart = gutils.node_lon_lat_to_cart(grid_xy)
     kdt = scipy.spatial.cKDTree(mesh_vertices_cart)
     dists, mesh_idx = kdt.query(grid_cart, k=k)
@@ -258,31 +259,27 @@ def m2g_knn(
         dists = dists.reshape(-1, 1)
         mesh_idx = mesh_idx.reshape(-1, 1)
 
-    m2g_src = []
-    m2g_dst = []
-    m2g_len = []
-    m2g_vdiff = []
-    for gi in range(grid_xy.shape[0]):
-        for j in range(mesh_idx.shape[1]):
-            mi = mesh_idx[gi, j]
-            d = dists[gi, j]
-            g_lon, g_lat = np.deg2rad(grid_xy[gi, 0]), np.deg2rad(
-                grid_xy[gi, 1]
-            )
-            m_lon_lat = _cartesian_to_lon_lat(
-                mesh_vertices_cart[mi].reshape(1, 3)
-            )[0]
-            m_lon, m_lat = np.deg2rad(m_lon_lat[0]), np.deg2rad(m_lon_lat[1])
-            dlat = np.rad2deg(g_lat - m_lat)
-            dlon = np.rad2deg(g_lon - m_lon)
-            m2g_src.append(mi)
-            m2g_dst.append(gi)
-            m2g_len.append(float(d))
-            m2g_vdiff.append([dlat, dlon])
+    # Vectorized all mesh positions for (grid_i, neigh_j) and convert to lon/lat
+    mesh_idx_flat = np.asarray(mesh_idx, dtype=np.intp)
+    mesh_cart_flat = mesh_vertices_cart[mesh_idx_flat]  # (n_grid, k, 3)
+    mesh_lon_lat = _cartesian_to_lon_lat(mesh_cart_flat.reshape(-1, 3)).reshape(
+        n_grid, -1, 2
+    )  # (n_grid, k, 2) [lon, lat] degrees
 
-    m2g_edge_index = np.stack([np.array(m2g_src), np.array(m2g_dst)], axis=0)
-    m2g_len = np.array(m2g_len, dtype=np.float32)
-    m2g_vdiff = np.array(m2g_vdiff, dtype=np.float32)
+    # Edge lists: src = mesh idx, dst = grid idx (one per (grid, neighbor))
+    m2g_src = mesh_idx_flat.ravel()
+    m2g_dst = np.repeat(
+        np.arange(n_grid, dtype=np.intp), mesh_idx_flat.shape[1]
+    )
+    m2g_len = np.asarray(dists.ravel(), dtype=np.float32)
+
+    # vdiff (dlat, dlon) in degrees: grid - mesh
+    grid_xy_expanded = grid_xy[:, None, :]  # (n_grid, 1, 2)
+    dlat = (grid_xy_expanded[:, :, 1] - mesh_lon_lat[:, :, 1]).ravel()
+    dlon = (grid_xy_expanded[:, :, 0] - mesh_lon_lat[:, :, 0]).ravel()
+    m2g_vdiff = np.stack([dlat, dlon], axis=1).astype(np.float32)
+
+    m2g_edge_index = np.stack([m2g_src, m2g_dst], axis=0)
     return m2g_edge_index, m2g_len, m2g_vdiff
 
 

@@ -63,20 +63,19 @@ def _lon_lat_to_node_features(lon_lat_deg: np.ndarray) -> np.ndarray:
 
 def load_grid_from_datastore(
     datastore: BaseRegularGridDatastore,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Load interior (sea) grid and land grid for global graph.
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Load interior and land grid for global graph.
 
     Returns
     -------
-    grid_xy : (n_interior, 2) interior (sea) points, [longitude, latitude]
-    sea_xy : (n_interior, 2) same as grid_xy (for filter_edges_land)
+    sea_xy : (n_sea, 2) interior points, [longitude, latitude]
     land_xy : (n_land, 2) land points, [longitude, latitude]
     """
     interior_mask = datastore.get_mask(surface=True, stacked=True, invert=False)
     xy = datastore.get_xy("state", stacked=True)  # (lon, lat) = (x, y)
     sea_xy = xy[interior_mask].astype(np.float32)
     land_xy = xy[~interior_mask].astype(np.float32)
-    return sea_xy, sea_xy, land_xy
+    return sea_xy, land_xy
 
 
 def _cart_to_node_features(mesh_cart: np.ndarray) -> np.ndarray:
@@ -511,11 +510,13 @@ def create_global_graph(
     )
 
     if create_plot:
+        print("Plotting global graph...")
         # grid_xy and mesh_xy are (lon, lat) throughout; plot x=lon, y=lat
         mesh_plot_xy = mesh_xy
         grid_plot_xy = grid_xy
 
         # Overview: x=lon, y=lat
+        print("  Overview (mesh + grid)")
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.scatter(
             mesh_plot_xy[:, 0],
@@ -549,6 +550,7 @@ def create_global_graph(
 
         # Mesh level(s)
         if graph_type == "cluster" and save_graphs_cluster is not None:
+            print("  Mesh levels (cluster)")
             m2m_graphs = save_graphs_cluster["m2m"]
             for level_i, g in enumerate(m2m_graphs):
                 # Cluster mesh pos is 3D; convert to lon/lat for 2D plot
@@ -588,6 +590,7 @@ def create_global_graph(
                 )
         elif graph_type == "hierarchical":
             # Icosahedral hierarchy: plot m2m graph for each level (0=bottom)
+            print("  Mesh levels (icosahedral)")
             for level_i, (lvl_cart, lvl_ei) in enumerate(mesh_levels):
                 lvl_xy = gutils.node_cart_to_lon_lat(lvl_cart)
                 level_graph = pyg.data.Data(
@@ -635,6 +638,7 @@ def create_global_graph(
                     graph_dir_path,
                 )
         else:
+            print("  Mesh level (multiscale)")
             mesh_level_graph = pyg.data.Data(
                 pos=torch.from_numpy(mesh_plot_xy).float(),
                 edge_index=mesh_edge_index_t,
@@ -646,6 +650,7 @@ def create_global_graph(
             )
 
         # G2M: build pyg with pos (lon, lat), compute disconnected
+        print("  G2M (grid-to-mesh)")
         pyg_g2m = pyg.data.Data(
             pos=torch.from_numpy(pos_combined).float(),
             edge_index=g2m_graph.edge_index.clone(),
@@ -679,6 +684,7 @@ def create_global_graph(
         vis.plot_graph(pyg_g2m_r, "Grid-to-mesh-r", graph_dir_path)
 
         # M2G
+        print("  M2G (mesh-to-grid)")
         pyg_m2g = pyg.data.Data(
             pos=torch.from_numpy(pos_combined).float(),
             edge_index=m2g_graph.edge_index.clone(),
@@ -797,12 +803,12 @@ def cli(input_args=None):
     _, datastore, _, _ = load_config_and_datastores(
         config_path=args.config_path
     )
-    grid_xy, sea_xy, land_xy = load_grid_from_datastore(datastore)
+    sea_xy, land_xy = load_grid_from_datastore(datastore)
     graph_dir_path = os.path.join(datastore.root_path, "graphs", args.name)
 
     create_global_graph(
         graph_dir_path=graph_dir_path,
-        grid_xy=grid_xy,
+        grid_xy=sea_xy,
         splits=args.splits,
         levels=args.levels,
         graph_type=args.type,

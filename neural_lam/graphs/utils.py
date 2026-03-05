@@ -550,12 +550,14 @@ def connect_disconnected_g2m(
         new_edges.append([grid_idx, mesh_graph_idx])
 
     # Connect disconnected mesh nodes to nearest grid node
+    if len(disc_mesh) > 0:
+        grid_kdt = scipy.spatial.KDTree(pos[is_any_grid])
+        grid_indices = np.where(is_any_grid)[0]
     for mesh_graph_idx in disc_mesh:
         mesh_pos = pos[mesh_graph_idx]
-        # Find nearest grid node (any type)
-        grid_kdt = scipy.spatial.KDTree(pos[is_any_grid])
-        dist, grid_idx_in_subset = grid_kdt.query(mesh_pos, k=1)
-        grid_idx = np.where(is_any_grid)[0][grid_idx_in_subset]
+        _, grid_idx_in_subset = grid_kdt.query(mesh_pos, k=1)
+        grid_idx = int(np.asarray(grid_idx_in_subset).flat[0])
+        grid_idx = grid_indices[grid_idx]
         new_edges.append([grid_idx, mesh_graph_idx])
 
     if len(new_edges) > 0:

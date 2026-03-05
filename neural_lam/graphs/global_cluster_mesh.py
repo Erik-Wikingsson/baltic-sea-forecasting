@@ -115,7 +115,11 @@ def build_cluster_mesh_graph_global(
         num_mesh_levels = min(possible_mesh_levels, limit_mesh_levels)
     num_mesh_levels = max(1, num_mesh_levels)
 
-    lat_weights = np.cos(np.deg2rad(sea_xy[:, 1]))
+    # Equal-area weights; must be strictly positive for k-means++ (cos(90°)
+    # can be tiny negative in float, and zeros make probabilities invalid)
+    lat_weights = np.cos(np.deg2rad(sea_xy[:, 1].astype(np.float32)))
+    lat_weights = np.maximum(lat_weights, 1e-10)
+    lat_weights = np.where(np.isfinite(lat_weights), lat_weights, 1.0)
     sea_3d = gutils.node_lon_lat_to_cart(sea_xy)
 
     mesh_level_graphs = []

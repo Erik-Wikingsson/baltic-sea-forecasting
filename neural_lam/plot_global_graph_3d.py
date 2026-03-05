@@ -13,6 +13,7 @@ from .config import load_config_and_datastores
 from .graphs import vis
 
 GRID_RADIUS = 1
+MAX_EDGES_PLOT = 100_000
 
 
 def main():
@@ -174,6 +175,20 @@ def main():
     # Edge indices (reindexed by load_graph: grid 0..N_grid-1, mesh 0..N_mesh-1)
     g2m_edge_index = graph_ldict["g2m_edge_index"].numpy()
     m2g_edge_index = graph_ldict["m2g_edge_index"].numpy()
+
+    def subsample_edges(edge_index: np.ndarray, max_edges: int, label: str):
+        """Subsample to max_edges for plotting; return edge_index."""
+        n_edges = edge_index.shape[1]
+        if n_edges <= max_edges:
+            return edge_index
+        rng = np.random.default_rng(42)
+        idx = rng.choice(n_edges, size=max_edges, replace=False)
+        sub = edge_index[:, idx]
+        print(f"Subsampled {label}: {n_edges} -> {max_edges} edges")
+        return sub
+
+    g2m_edge_index = subsample_edges(g2m_edge_index, MAX_EDGES_PLOT, "g2m")
+    m2g_edge_index = subsample_edges(m2g_edge_index, MAX_EDGES_PLOT, "m2g")
 
     mesh_edge_width = (
         args.edge_width

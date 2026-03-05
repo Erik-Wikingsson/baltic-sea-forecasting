@@ -150,7 +150,7 @@ def create_global_graph(
     splits: int = 3,
     levels: Optional[int] = None,
     graph_type: str = "multiscale",
-    g2m_radius: float = 0.6,
+    g2m_radius: float = 0.67,
     m2g_k: int = 3,
     create_plot: bool = False,
     connect_disconnected: bool = False,
@@ -158,7 +158,7 @@ def create_global_graph(
     land_xy: Optional[np.ndarray] = None,
     max_edge_len_deg: float = 2.0,
     mesh_refinement_factor: float = 9,
-    grid_to_first_mesh_refinement: float = 25,
+    grid_to_first_mesh_refinement: float = 9,
 ):
     """Create global graph: icosahedral mesh + g2m + m2g.
 
@@ -716,10 +716,40 @@ def create_global_graph(
             order_by_degree=True,
         )
 
-    print(f"Created global graph: {num_grid} grid nodes, {num_mesh} mesh nodes")
-    print(f"  g2m edges: {g2m_graph.edge_index.shape[1]}")
-    print(f"  m2g edges: {m2g_graph.edge_index.shape[1]}")
-    print(f"  m2m edges: {mesh_edge_index.shape[1]}")
+    # Print graph statistics
+    if save_graphs_cluster is not None:
+        save_graphs = save_graphs_cluster
+    else:
+        # Multiscale mesh is combined into one level
+        if graph_type == "multiscale":
+            m2m_list = [
+                pyg.data.Data(
+                    pos=torch.from_numpy(mesh_cart.astype(np.float32)),
+                    edge_index=torch.from_numpy(
+                        mesh_edge_index.astype(np.int64)
+                    ),
+                )
+            ]
+        else:
+            # Hierarchical use per-level
+            m2m_list = [
+                pyg.data.Data(
+                    pos=torch.from_numpy(cart.astype(np.float32)),
+                    edge_index=torch.from_numpy(ei.astype(np.int64)),
+                )
+                for cart, ei in mesh_levels
+            ]
+        save_graphs = {"m2m": m2m_list, "mesh_up": [], "mesh_down": []}
+    n_combined = num_mesh + num_grid
+    pyg_g2m = pyg.data.Data(
+        pos=torch.zeros(n_combined, 2),
+        edge_index=g2m_graph.edge_index,
+    )
+    pyg_m2g = pyg.data.Data(
+        pos=torch.zeros(n_combined, 2),
+        edge_index=m2g_graph.edge_index,
+    )
+    gutils.print_graph_stats(save_graphs, pyg_g2m, pyg_m2g)
 
 
 def cli(input_args=None):
@@ -790,7 +820,7 @@ def cli(input_args=None):
     parser.add_argument(
         "--grid_to_first_mesh_refinement",
         type=float,
-        default=5,
+        default=20,
         help="(Cluster) ratio grid nodes / first-level mesh nodes.",
     )
     parser.add_argument(

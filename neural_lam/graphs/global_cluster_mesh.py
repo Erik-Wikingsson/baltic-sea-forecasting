@@ -72,7 +72,7 @@ def build_cluster_mesh_graph_global(
     sea_xy: np.ndarray,
     land_xy: np.ndarray,
     mesh_refinement_factor: float = 9,
-    grid_to_first_mesh_refinement: float = 25,
+    grid_to_first_mesh_refinement: float = 9,
     limit_mesh_levels: Optional[int] = None,
     mesh_plot_function=None,
     random_state: int = 42,
@@ -163,6 +163,21 @@ def build_cluster_mesh_graph_global(
         level_graph.edge_index = torch.from_numpy(edge_index_f.astype(np.int64))
         gutils.add_edge_features_pyg(level_graph)
         mesh_level_graphs.append(level_graph)
+
+        n_nodes = mesh_cart_f.shape[0]
+        n_edges = edge_index_f.shape[1]
+        if n_edges == 0:
+            print(f"Mesh level {level_i}: {n_nodes} nodes, 0 edges")
+        else:
+            chord = np.linalg.norm(
+                mesh_cart_f[edge_index_f[1]] - mesh_cart_f[edge_index_f[0]],
+                axis=1,
+            )
+            dm_lvl = float(np.mean(chord))
+            print(
+                f"Mesh level {level_i}: {n_nodes} nodes, "
+                f"mean edge length (chord) = {dm_lvl:.6f}"
+            )
 
         if mesh_plot_function is not None:
             mesh_plot_function(level_graph, f"Mesh graph, level {level_i}")

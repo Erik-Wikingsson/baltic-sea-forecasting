@@ -104,8 +104,8 @@ def create_graph(
     g2m_radius_atm : float
         Radius to connect atmospheric nodes within for g2m.
     mesh_node_distance: float,
-        (For hierarchical/multiscale graphs) Distance between mesh nodes,
-        in meters.
+        (For hierarchical/multiscale graphs) Distance between mesh nodes
+        in meters at the bottom mesh level.
     mesh_refinement_factor: float,
         Factor between number of mesh nodes at each level in cluster graphs.
     grid_to_first_mesh_refinement: float,
@@ -622,7 +622,7 @@ def cli(input_args=None):
         type=float,
         default=5000.0,
         help="(For hierarchical/multiscale graphs) "
-        "Distance between mesh nodes, in meters",
+        "Distance between mesh nodes in meters at the bottom mesh level.",
     )
     parser.add_argument(
         "--mesh_refinement_factor",

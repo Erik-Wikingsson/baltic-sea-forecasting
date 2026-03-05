@@ -40,6 +40,14 @@ class WeatherDataset(torch.utils.data.Dataset):
         forcing from times t, t+1, ..., t+j-1, t+j (and potentially times before
         t, given num_past_forcing_steps) are included as forcing inputs at time
         t. Default is 1.
+    current_forcing_step: bool, optional
+        If True, the forcing window includes time t (current step).
+        If False, only past (t-i..t-1) and future (t+1..t+j) are included, so
+        you can use e.g. only future step(s) with num_past_forcing_steps=0.
+    current_boundary_step: bool, optional
+        If True, boundary window includes time t. Default False.
+    current_atmosphere_step: bool, optional
+        If True, atmosphere window includes time t. Default False.
     num_past_boundary_steps: int, optional
         Number of past time steps to include in boundary input. If set to i,
         boundary from times t-i, t-i+1, ..., t-1, t (and potentially beyond,
@@ -63,6 +71,9 @@ class WeatherDataset(torch.utils.data.Dataset):
         ar_steps=1,
         num_past_forcing_steps=1,
         num_future_forcing_steps=1,
+        current_forcing_step=False,
+        current_boundary_step=False,
+        current_atmosphere_step=False,
         num_past_boundary_steps=1,
         num_future_boundary_steps=1,
         num_past_atmosphere_steps=1,
@@ -79,6 +90,9 @@ class WeatherDataset(torch.utils.data.Dataset):
         self.datastore_atmosphere = datastore_atmosphere
         self.num_past_forcing_steps = num_past_forcing_steps
         self.num_future_forcing_steps = num_future_forcing_steps
+        self.current_forcing_step = current_forcing_step
+        self.current_boundary_step = current_boundary_step
+        self.current_atmosphere_step = current_atmosphere_step
         self.num_past_boundary_steps = num_past_boundary_steps
         self.num_future_boundary_steps = num_future_boundary_steps
         self.num_past_atmosphere_steps = num_past_atmosphere_steps
@@ -325,6 +339,7 @@ class WeatherDataset(torch.utils.data.Dataset):
         n_steps: int,
         num_past_steps=None,
         num_future_steps=None,
+        include_current=None,
     ):
         """
         Produce a time slice of the given dataarray `da_forcing` (forcing)
@@ -352,6 +367,9 @@ class WeatherDataset(torch.utils.data.Dataset):
         num_future_steps : int, optional
             Number of future time steps to include in the window. If None, uses
             `self.num_future_forcing_steps`.
+        include_current : bool, optional
+            If None, uses self.current_forcing_step (grid). If given,
+            use for boundary/atmosphere slices.
 
         Returns
         -------
@@ -364,6 +382,8 @@ class WeatherDataset(torch.utils.data.Dataset):
             num_past_steps = self.num_past_forcing_steps
         if num_future_steps is None:
             num_future_steps = self.num_future_forcing_steps
+        if include_current is None:
+            include_current = getattr(self, "current_forcing_step", False)
 
         # The current implementation requires at least 2 time steps for the
         # initial state (see GraphCast). The forcing data is windowed around the
@@ -383,16 +403,41 @@ class WeatherDataset(torch.utils.data.Dataset):
             for step in range(n_steps):
                 start_idx = offset + step - num_past_steps
                 end_idx = offset + step + num_future_steps
+                current_idx = offset + step
 
                 current_time = (
                     da_forcing.analysis_time[idx]
-                    + da_forcing.elapsed_forecast_duration[offset + step]
+                    + da_forcing.elapsed_forecast_duration[current_idx]
                 )
 
-                da_sliced = da_forcing.isel(
-                    analysis_time=idx,
-                    elapsed_forecast_duration=slice(start_idx, end_idx + 1),
-                )
+                if include_current:
+                    da_sliced = da_forcing.isel(
+                        analysis_time=idx,
+                        elapsed_forecast_duration=slice(start_idx, end_idx + 1),
+                    )
+                else:
+                    parts = []
+                    if num_past_steps > 0:
+                        da_past = da_forcing.isel(
+                            analysis_time=idx,
+                            elapsed_forecast_duration=slice(
+                                start_idx, current_idx
+                            ),
+                        )
+                        parts.append(da_past)
+                    if num_future_steps > 0:
+                        da_future = da_forcing.isel(
+                            analysis_time=idx,
+                            elapsed_forecast_duration=slice(
+                                current_idx + 1, end_idx + 1
+                            ),
+                        )
+                        parts.append(da_future)
+                    da_sliced = (
+                        xr.concat(parts, dim="elapsed_forecast_duration")
+                        if len(parts) > 1
+                        else parts[0]
+                    )
 
                 da_sliced = da_sliced.rename(
                     {"elapsed_forecast_duration": "window"}
@@ -420,9 +465,29 @@ class WeatherDataset(torch.utils.data.Dataset):
             for step in range(n_steps):
                 start_idx = offset + step - num_past_steps
                 end_idx = offset + step + num_future_steps
+                current_idx = offset + step
 
-                # Slice the data over the desired time window
-                da_sliced = da_forcing.isel(time=slice(start_idx, end_idx + 1))
+                if include_current:
+                    da_sliced = da_forcing.isel(
+                        time=slice(start_idx, end_idx + 1)
+                    )
+                else:
+                    parts = []
+                    if num_past_steps > 0:
+                        da_past = da_forcing.isel(
+                            time=slice(start_idx, current_idx)
+                        )
+                        parts.append(da_past)
+                    if num_future_steps > 0:
+                        da_future = da_forcing.isel(
+                            time=slice(current_idx + 1, end_idx + 1)
+                        )
+                        parts.append(da_future)
+                    da_sliced = (
+                        xr.concat(parts, dim="time")
+                        if len(parts) > 1
+                        else parts[0]
+                    )
 
                 da_sliced = da_sliced.rename({"time": "window"})
 
@@ -433,7 +498,7 @@ class WeatherDataset(torch.utils.data.Dataset):
 
                 # Add a 'time' dimension to keep track of steps using actual
                 # time coordinates
-                current_time = da_forcing.time[offset + step]
+                current_time = da_forcing.time[current_idx]
                 da_sliced = da_sliced.expand_dims(
                     dim={"time": [current_time.values]}
                 )
@@ -568,6 +633,7 @@ class WeatherDataset(torch.utils.data.Dataset):
                 n_steps=self.ar_steps,
                 num_past_steps=self.num_past_boundary_steps,
                 num_future_steps=self.num_future_boundary_steps,
+                include_current=self.current_boundary_step,
             )
         else:
             da_boundary_windowed = None
@@ -578,6 +644,7 @@ class WeatherDataset(torch.utils.data.Dataset):
                 n_steps=self.ar_steps,
                 num_past_steps=self.num_past_atmosphere_steps,
                 num_future_steps=self.num_future_atmosphere_steps,
+                include_current=self.current_atmosphere_step,
             )
         else:
             da_atmosphere_windowed = None
@@ -731,19 +798,19 @@ class WeatherDataset(torch.utils.data.Dataset):
             land_mask_bool_boundary_tensor = torch.tensor(
                 self.land_mask_bool_boundary, dtype=torch.bool
             )  # (1, N_boundary_grid, d_features)
-            # repeat mask num_windows (num_past + num_future + 1) times
-            # -> (1, N_boundary_grid, d_features * num_windows)
-            num_windows = (
+            # repeat mask num_windows times to match boundary window size
+            # (same as _slice_forcing_time: past + future + current if included)
+            num_boundary_windows = (
                 self.num_past_boundary_steps
                 + self.num_future_boundary_steps
-                + 1
+                + (1 if self.current_boundary_step else 0)
             )
             # intereleaved repeat along feature dimension to match windowing
             # stacked as: (feature_0, window_0), (feature_0, window_1), ...,
             # (feature_1, window_0), (feature_1, window_1), ...
             land_mask_bool_boundary_tensor = (
                 land_mask_bool_boundary_tensor.repeat_interleave(
-                    num_windows, dim=2
+                    num_boundary_windows, dim=2
                 )
             )
             boundary = torch.where(
@@ -901,6 +968,9 @@ class WeatherDataModule(pl.LightningDataModule):
         standardize=True,
         num_past_forcing_steps=1,
         num_future_forcing_steps=1,
+        current_forcing_step=False,
+        current_boundary_step=False,
+        current_atmosphere_step=False,
         num_past_boundary_steps=1,
         num_future_boundary_steps=1,
         num_past_atmosphere_steps=1,
@@ -916,6 +986,9 @@ class WeatherDataModule(pl.LightningDataModule):
         self.use_atmosphere_g2m = use_atmosphere_g2m
         self.num_past_forcing_steps = num_past_forcing_steps
         self.num_future_forcing_steps = num_future_forcing_steps
+        self.current_forcing_step = current_forcing_step
+        self.current_boundary_step = current_boundary_step
+        self.current_atmosphere_step = current_atmosphere_step
         self.num_past_boundary_steps = num_past_boundary_steps
         self.num_future_boundary_steps = num_future_boundary_steps
         self.num_past_atmosphere_steps = num_past_atmosphere_steps
@@ -946,6 +1019,9 @@ class WeatherDataModule(pl.LightningDataModule):
                 standardize=self.standardize,
                 num_past_forcing_steps=self.num_past_forcing_steps,
                 num_future_forcing_steps=self.num_future_forcing_steps,
+                current_forcing_step=self.current_forcing_step,
+                current_boundary_step=self.current_boundary_step,
+                current_atmosphere_step=self.current_atmosphere_step,
                 num_past_boundary_steps=self.num_past_boundary_steps,
                 num_future_boundary_steps=self.num_future_boundary_steps,
                 num_past_atmosphere_steps=self.num_past_atmosphere_steps,
@@ -961,6 +1037,9 @@ class WeatherDataModule(pl.LightningDataModule):
                 standardize=self.standardize,
                 num_past_forcing_steps=self.num_past_forcing_steps,
                 num_future_forcing_steps=self.num_future_forcing_steps,
+                current_forcing_step=self.current_forcing_step,
+                current_boundary_step=self.current_boundary_step,
+                current_atmosphere_step=self.current_atmosphere_step,
                 num_past_boundary_steps=self.num_past_boundary_steps,
                 num_future_boundary_steps=self.num_future_boundary_steps,
                 num_past_atmosphere_steps=self.num_past_atmosphere_steps,
@@ -978,6 +1057,9 @@ class WeatherDataModule(pl.LightningDataModule):
                 standardize=self.standardize,
                 num_past_forcing_steps=self.num_past_forcing_steps,
                 num_future_forcing_steps=self.num_future_forcing_steps,
+                current_forcing_step=self.current_forcing_step,
+                current_boundary_step=self.current_boundary_step,
+                current_atmosphere_step=self.current_atmosphere_step,
                 num_past_boundary_steps=self.num_past_boundary_steps,
                 num_future_boundary_steps=self.num_future_boundary_steps,
                 num_past_atmosphere_steps=self.num_past_atmosphere_steps,

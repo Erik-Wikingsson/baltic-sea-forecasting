@@ -389,9 +389,14 @@ def main(input_args=None):
             validation step (e.g. '{"1": [1, 2], "3": [3, 4]}')""",
     )
     parser.add_argument(
+        "--current_forcing_step",
+        action="store_true",
+        help="Include current time t in forcing window (default: False).",
+    )
+    parser.add_argument(
         "--num_past_forcing_steps",
         type=int,
-        default=1,
+        default=0,
         help="Number of past time steps to use as input for forcing data",
     )
     parser.add_argument(
@@ -401,9 +406,14 @@ def main(input_args=None):
         help="Number of future time steps to use as input for forcing data",
     )
     parser.add_argument(
+        "--current_boundary_step",
+        action="store_true",
+        help="Include current time t in boundary window (default: False).",
+    )
+    parser.add_argument(
         "--num_past_boundary_steps",
         type=int,
-        default=1,
+        default=0,
         help="Number of past time steps to use as boundary input (default: 1)",
     )
     parser.add_argument(
@@ -414,9 +424,14 @@ def main(input_args=None):
         "(default: 1)",
     )
     parser.add_argument(
+        "--current_atmosphere_step",
+        action="store_true",
+        help="Include current time t in atmosphere window (default: False).",
+    )
+    parser.add_argument(
         "--num_past_atmosphere_steps",
         type=int,
-        default=1,
+        default=0,
         help="Number of past time steps to use as atmosphere input "
         "(default: 1)",
     )
@@ -480,6 +495,9 @@ def main(input_args=None):
         standardize=True,
         num_past_forcing_steps=args.num_past_forcing_steps,
         num_future_forcing_steps=args.num_future_forcing_steps,
+        current_forcing_step=args.current_forcing_step,
+        current_boundary_step=args.current_boundary_step,
+        current_atmosphere_step=args.current_atmosphere_step,
         num_past_boundary_steps=args.num_past_boundary_steps,
         num_future_boundary_steps=args.num_future_boundary_steps,
         num_past_atmosphere_steps=args.num_past_atmosphere_steps,

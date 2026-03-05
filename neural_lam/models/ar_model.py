@@ -80,6 +80,14 @@ class ARModel(pl.LightningModule):
         )
         num_past_forcing_steps = args.num_past_forcing_steps
         num_future_forcing_steps = args.num_future_forcing_steps
+        include_current_forcing_step = getattr(
+            args, "current_forcing_step", False
+        )
+        num_forcing_steps = (
+            num_past_forcing_steps
+            + num_future_forcing_steps
+            + (1 if include_current_forcing_step else 0)
+        )
 
         # Load static features for grid/data,
         self.register_buffer(
@@ -144,8 +152,7 @@ class ARModel(pl.LightningModule):
         self.interior_input_dim = (
             2 * self.num_state_vars
             + grid_static_dim
-            + num_forcing_vars
-            * (num_past_forcing_steps + num_future_forcing_steps + 1)
+            + num_forcing_vars * num_forcing_steps
         )
 
         # If datastore_boundary is given, the model is forced from boundary
@@ -182,10 +189,17 @@ class ARModel(pl.LightningModule):
 
             num_past_boundary_steps = args.num_past_boundary_steps
             num_future_boundary_steps = args.num_future_boundary_steps
+            include_current_boundary_step = getattr(
+                args, "current_boundary_step", False
+            )
+            num_boundary_steps = (
+                num_past_boundary_steps
+                + num_future_boundary_steps
+                + (1 if include_current_boundary_step else 0)
+            )
             self.boundary_dim = (
                 boundary_static_dim
-                + num_boundary_forcing_vars
-                * (num_past_boundary_steps + num_future_boundary_steps + 1)
+                + num_boundary_forcing_vars * num_boundary_steps
             )
             self.num_total_grid_nodes += self.num_boundary_nodes
 
@@ -204,8 +218,16 @@ class ARModel(pl.LightningModule):
             )
             num_past_atmosphere_steps = args.num_past_atmosphere_steps
             num_future_atmosphere_steps = args.num_future_atmosphere_steps
-            atmosphere_windowed_dim = num_atmosphere_forcing_vars * (
-                num_past_atmosphere_steps + num_future_atmosphere_steps + 1
+            include_current_atmosphere_step = getattr(
+                args, "current_atmosphere_step", False
+            )
+            num_atmosphere_steps = (
+                num_past_atmosphere_steps
+                + num_future_atmosphere_steps
+                + (1 if include_current_atmosphere_step else 0)
+            )
+            atmosphere_windowed_dim = (
+                num_atmosphere_forcing_vars * num_atmosphere_steps
             )
 
             if self.use_atmosphere_g2m:

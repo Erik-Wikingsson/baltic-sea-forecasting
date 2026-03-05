@@ -39,7 +39,7 @@ class GraphDiff(ARModel):
         )
         print("Initializing GraphDiff")
 
-        self.channel_mult_emb = 1
+        self.channel_mult_emb = 2
         self.channel_mult_noise = 2
         self.remove_cond = True if args.model == "SI" else False
 

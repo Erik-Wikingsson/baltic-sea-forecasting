@@ -329,6 +329,12 @@ def main(input_args=None):
         help="Whether to perform gradient checkpointing at each unroll step "
         "(default: False)",
     )
+    parser.add_argument(
+        "--prior_checkpoint",
+        action="store_true",
+        default=False,
+        help="Gradient checkpointing on prior in Graph-EFM (default: False)",
+    )
 
     # Evaluation options
     parser.add_argument(

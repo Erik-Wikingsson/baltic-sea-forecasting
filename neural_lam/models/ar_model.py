@@ -38,6 +38,7 @@ class ARModel(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters(ignore=["datastore"])
         self.args = args
+        self.input_steps = args.input_steps
         self._datastore = datastore
         self._datastore_boundary = datastore_boundary
         self._datastore_atmosphere = datastore_atmosphere
@@ -150,7 +151,7 @@ class ARModel(pl.LightningModule):
         self.num_total_grid_nodes = self.num_grid_nodes
 
         self.interior_input_dim = (
-            2 * self.num_state_vars
+            self.input_steps * self.num_state_vars
             + grid_static_dim
             + num_forcing_vars * num_forcing_steps
         )
@@ -395,13 +396,17 @@ class ARModel(pl.LightningModule):
     ):
         """
         Roll out prediction taking multiple autoregressive steps with model
-        init_states: (B, 2, num_grid_nodes, d_f)
+        init_states: (B, input_steps, num_grid_nodes, d_f)
         forcing: (B, pred_steps, num_grid_nodes, d_static_f)
         boundary_forcing: (B, pred_steps, num_boundary_nodes, d_boundary_f)
         atmosphere_forcing:(B, pred_steps, num_atmosphere_nodes, d_atmosphere_f)
         """
-        prev_prev_state = init_states[:, 0]
-        prev_state = init_states[:, 1]
+        if self.input_steps == 1:
+            prev_state = init_states[:, 0]
+            prev_prev_state = None
+        else:
+            prev_prev_state = init_states[:, 0]
+            prev_state = init_states[:, 1]
         prediction_list = []
         pred_std_list = []
         pred_steps = forcing.shape[1]
@@ -435,7 +440,8 @@ class ARModel(pl.LightningModule):
                 pred_std_list.append(pred_std)
 
             # Update conditioning states
-            prev_prev_state = prev_state
+            if self.input_steps >= 2:
+                prev_prev_state = prev_state
             prev_state = pred_state
 
         prediction = torch.stack(
@@ -453,7 +459,7 @@ class ARModel(pl.LightningModule):
     def common_step(self, batch):
         """
         Predict on single batch batch consists of:
-        init_states: (B, 2, num_grid_nodes, d_features)
+        init_states: (B, input_steps, num_grid_nodes, d_features)
         target_states: (B, pred_steps, num_grid_nodes, d_features)
         forcing_features: (B, pred_steps, num_grid_nodes, d_forcing),
         boundary_forcing:

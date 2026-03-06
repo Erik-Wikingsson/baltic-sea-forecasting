@@ -30,6 +30,8 @@ class WeatherDataset(torch.utils.data.Dataset):
         The data split to use ("train", "val" or "test"). Default is "train".
     ar_steps : int, optional
         The number of autoregressive steps. Default is 3.
+    input_steps : int, optional
+        Number of initial state steps (1 or 2). Default is 1.
     num_past_forcing_steps: int, optional
         Number of past time steps to include in forcing input. If set to i,
         forcing from times t-i, t-i+1, ..., t-1, t (and potentially beyond,
@@ -69,6 +71,7 @@ class WeatherDataset(torch.utils.data.Dataset):
         datastore_atmosphere: BaseDatastore,
         split="train",
         ar_steps=1,
+        input_steps=1,
         num_past_forcing_steps=1,
         num_future_forcing_steps=1,
         current_forcing_step=False,
@@ -85,6 +88,7 @@ class WeatherDataset(torch.utils.data.Dataset):
 
         self.split = split
         self.ar_steps = ar_steps
+        self.input_steps = input_steps
         self.datastore = datastore
         self.datastore_boundary = datastore_boundary
         self.datastore_atmosphere = datastore_atmosphere
@@ -243,11 +247,12 @@ class WeatherDataset(torch.utils.data.Dataset):
             # check that there are enough forecast steps available to create
             # samples given the number of autoregressive steps requested
             n_forecast_steps = self.da_state.elapsed_forecast_duration.size
-            if n_forecast_steps < 2 + self.ar_steps:
+            if n_forecast_steps < self.input_steps + self.ar_steps:
                 raise ValueError(
                     "The number of forecast steps available "
                     f"({n_forecast_steps}) is less than the required "
-                    f"2+ar_steps (2+{self.ar_steps}={2 + self.ar_steps}) for "
+                    f"input_steps+ar_steps "
+                    f"({self.input_steps}+{self.ar_steps}) for "
                     "creating a sample with initial and target states."
                 )
 
@@ -260,13 +265,12 @@ class WeatherDataset(torch.utils.data.Dataset):
             # Where:
             #   - total time steps: len(self.da_state.time)
             #   - autoregressive steps: self.ar_steps
-            #   - past forcing: max(2, self.num_past_forcing_steps) (at least 2
-            #     time steps are required for the initial state)
+            #   - past forcing: max(input_steps, self.num_past_forcing_steps)
             #   - future forcing: self.num_future_forcing_steps
             return (
                 len(self.da_state.time)
                 - self.ar_steps
-                - max(2, self.num_past_forcing_steps)
+                - max(self.input_steps, self.num_past_forcing_steps)
                 - self.num_future_forcing_steps
             )
 
@@ -297,9 +301,7 @@ class WeatherDataset(torch.utils.data.Dataset):
             The sliced dataarray with dims ('time', 'grid_index',
             'state_feature').
         """
-        # The current implementation requires at least 2 time steps for the
-        # initial state (see GraphCast).
-        init_steps = 2
+        init_steps = self.input_steps
         # slice the dataarray to include the required number of time steps
         if self.datastore.is_forecast:
             start_idx = max(0, self.num_past_forcing_steps - init_steps)
@@ -658,8 +660,8 @@ class WeatherDataset(torch.utils.data.Dataset):
         if da_atmosphere is not None:
             da_atmosphere_windowed.load()
 
-        da_init_states = da_state.isel(time=slice(0, 2))
-        da_target_states = da_state.isel(time=slice(2, None))
+        da_init_states = da_state.isel(time=slice(0, self.input_steps))
+        da_target_states = da_state.isel(time=slice(self.input_steps, None))
         da_target_times = da_target_states.time
 
         if self.standardize:
@@ -965,6 +967,7 @@ class WeatherDataModule(pl.LightningDataModule):
         datastore_atmosphere: BaseDatastore,
         ar_steps_train=3,
         ar_steps_eval=25,
+        input_steps=1,
         standardize=True,
         num_past_forcing_steps=1,
         num_future_forcing_steps=1,
@@ -995,6 +998,7 @@ class WeatherDataModule(pl.LightningDataModule):
         self.num_future_atmosphere_steps = num_future_atmosphere_steps
         self.ar_steps_train = ar_steps_train
         self.ar_steps_eval = ar_steps_eval
+        self.input_steps = input_steps
         self.standardize = standardize
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -1016,6 +1020,7 @@ class WeatherDataModule(pl.LightningDataModule):
                 datastore_atmosphere=self._datastore_atmosphere,
                 split="train",
                 ar_steps=self.ar_steps_train,
+                input_steps=self.input_steps,
                 standardize=self.standardize,
                 num_past_forcing_steps=self.num_past_forcing_steps,
                 num_future_forcing_steps=self.num_future_forcing_steps,
@@ -1034,6 +1039,7 @@ class WeatherDataModule(pl.LightningDataModule):
                 datastore_atmosphere=self._datastore_atmosphere,
                 split="val",
                 ar_steps=self.ar_steps_eval,
+                input_steps=self.input_steps,
                 standardize=self.standardize,
                 num_past_forcing_steps=self.num_past_forcing_steps,
                 num_future_forcing_steps=self.num_future_forcing_steps,
@@ -1054,6 +1060,7 @@ class WeatherDataModule(pl.LightningDataModule):
                 datastore_atmosphere=self._datastore_atmosphere,
                 split="test",
                 ar_steps=self.ar_steps_eval,
+                input_steps=self.input_steps,
                 standardize=self.standardize,
                 num_past_forcing_steps=self.num_past_forcing_steps,
                 num_future_forcing_steps=self.num_future_forcing_steps,

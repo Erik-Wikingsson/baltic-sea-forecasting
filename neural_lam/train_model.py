@@ -351,6 +351,13 @@ def main(input_args=None):
         "(default: 10)",
     )
     parser.add_argument(
+        "--input_steps",
+        type=int,
+        default=1,
+        choices=[1, 2],
+        help="Number of state steps as input (default: 1)",
+    )
+    parser.add_argument(
         "--n_example_pred",
         type=int,
         default=1,
@@ -510,6 +517,7 @@ def main(input_args=None):
         datastore_atmosphere=datastore_atmosphere,
         ar_steps_train=args.ar_steps_train,
         ar_steps_eval=args.ar_steps_eval,
+        input_steps=args.input_steps,
         standardize=True,
         num_past_forcing_steps=args.num_past_forcing_steps,
         num_future_forcing_steps=args.num_future_forcing_steps,

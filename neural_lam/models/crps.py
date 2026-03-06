@@ -73,9 +73,13 @@ class CRPS(ARProbModel):
         next_state: (B, N_grid, d_state),
             predicted weather state X_{t+1} at time t+1
         """
-        input_grid = torch.cat(
-            (prev_state, prev_prev_state, forcing), dim=-1
-        )  # (B, N_grid, d_input)
+        if prev_prev_state is not None:
+            input_grid = torch.cat(
+                (prev_state, prev_prev_state, forcing), dim=-1
+            )
+        else:
+            input_grid = torch.cat((prev_state, forcing), dim=-1)
+        # (B, N_grid, d_input)
 
         z = torch.randn(
             prev_state.shape[0],

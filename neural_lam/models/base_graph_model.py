@@ -363,22 +363,23 @@ class BaseGraphModel(ARModel):
         """
         Step state one step ahead using prediction model, X_{t-1}, X_t -> X_t+1
         prev_state: (B, num_grid_nodes, feature_dim), X_t
-        prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1}
+        prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1} (None if
+            input_steps==1)
         forcing: (B, num_grid_nodes, forcing_dim)
         boundary_forcing: (B, num_boundary_nodes, boundary_forcing_dim)
         atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
         """
         batch_size = prev_state.shape[0]
-
-        # Create full interior grid input features
-        interior_input_list = [
-            prev_state,
-            prev_prev_state,
-            forcing,
-            self.expand_to_batch(self.grid_static_features, batch_size),
-        ]
+        interior_input_list = [prev_state]
+        if prev_prev_state is not None:
+            interior_input_list.append(prev_prev_state)
+        interior_input_list.extend(
+            [
+                forcing,
+                self.expand_to_batch(self.grid_static_features, batch_size),
+            ]
+        )
         if self.concat_atmosphere:
-            # Atmosphere forcing on same grid as interior (past/future steps)
             interior_input_list.append(atmosphere_forcing)
         interior_features = torch.cat(interior_input_list, dim=-1)
         # (B, num_interior_nodes, interior_input_dim)

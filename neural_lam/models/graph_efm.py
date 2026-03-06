@@ -427,7 +427,8 @@ class GraphEFM(ARProbModel):
         input to the encoder, which is conditioned also on the target.
 
         prev_state: (B, num_grid_nodes, feature_dim), X_t
-        prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1}
+        prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1} (None if
+            input_steps==1)
         forcing: (B, num_grid_nodes, forcing_dim)
         boundary_forcing: (B, num_boundary_nodes, boundary_dim)
         atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_dim)
@@ -437,16 +438,16 @@ class GraphEFM(ARProbModel):
         current_emb: (B, num_grid_nodes, d_h)
         """
         batch_size = prev_state.shape[0]
-
-        # Create full interior node features of shape
-        # (B, num_interior_nodes, interior_dim)
-        interior_input_list = [
-            prev_state,
-            prev_prev_state,
-            forcing,
-            self.expand_to_batch(self.grid_static_features, batch_size),
-            current_state,
-        ]
+        interior_input_list = [prev_state]
+        if prev_prev_state is not None:
+            interior_input_list.append(prev_prev_state)
+        interior_input_list.extend(
+            [
+                forcing,
+                self.expand_to_batch(self.grid_static_features, batch_size),
+                current_state,
+            ]
+        )
         if self.concat_atmosphere:
             interior_input_list.append(atmosphere_forcing)
         interior_features = torch.cat(interior_input_list, dim=-1)
@@ -472,7 +473,8 @@ class GraphEFM(ARProbModel):
         embed all node and edge representations
 
         prev_state: (B, num_grid_nodes, feature_dim), X_t
-        prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1}
+        prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1} (None if
+            input_steps==1)
         forcing: (B, num_grid_nodes, forcing_dim)
         boundary_forcing: (B, num_boundary_nodes, boundary_dim)
         atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_dim)
@@ -483,15 +485,15 @@ class GraphEFM(ARProbModel):
         graph_embedding: dict with entries of shape (B, *, d_h)
         """
         batch_size = prev_state.shape[0]
-
-        # Create full interior node features of shape
-        # (B, num_interior_nodes, interior_dim)
-        interior_input_list = [
-            prev_state,
-            prev_prev_state,
-            forcing,
-            self.expand_to_batch(self.grid_static_features, batch_size),
-        ]
+        interior_input_list = [prev_state]
+        if prev_prev_state is not None:
+            interior_input_list.append(prev_prev_state)
+        interior_input_list.extend(
+            [
+                forcing,
+                self.expand_to_batch(self.grid_static_features, batch_size),
+            ]
+        )
         if self.concat_atmosphere:
             interior_input_list.append(atmosphere_forcing)
         interior_features = torch.cat(interior_input_list, dim=-1)
@@ -568,25 +570,28 @@ class GraphEFM(ARProbModel):
         """
         Perform forward pass and compute loss for one time step
 
-        prev_states: (B, 2, num_grid_nodes, d_features), X^{t-p}, ..., X^{t-1}
+        prev_states: (B, input_steps, num_grid_nodes, d_features)
         current_state: (B, num_grid_nodes, d_features) X^t
-        forcing_features: (B, num_grid_nodes, d_forcing) corresponding to
-            index 1 of prev_states
+        forcing_features: (B, num_grid_nodes, d_forcing)
         boundary_forcing: (B, num_boundary_nodes, d_boundary)
         atmosphere_forcing: (B, num_atmosphere_nodes, d_atmosphere)
         """
+        prev_state = prev_states[:, -1]
+        prev_prev_state = (
+            prev_states[:, 0] if prev_states.shape[1] > 1 else None
+        )
         # embed all features
         grid_prev_emb, grid_prev_interior_emb, graph_emb = self.embedd_all(
-            prev_states[:, 1],
-            prev_states[:, 0],
+            prev_state,
+            prev_prev_state,
             forcing_features,
             boundary_forcing,
             atmosphere_forcing,
         )
         # embed also including current grid state, for encoder
         grid_current_emb = self.embedd_current(
-            prev_states[:, 1],
-            prev_states[:, 0],
+            prev_state,
+            prev_prev_state,
             forcing_features,
             boundary_forcing,
             atmosphere_forcing,
@@ -599,7 +604,7 @@ class GraphEFM(ARProbModel):
         )  # Gaussian, (B, num_mesh_nodes, d_latent)
 
         # Compute likelihood
-        last_state = prev_states[:, -1]
+        last_state = prev_state
         likelihood_term, pred_mean, pred_std = self.estimate_likelihood(
             var_dist,
             current_state,
@@ -700,8 +705,12 @@ class GraphEFM(ARProbModel):
             _,
         ) = batch
 
-        prev_prev_state = init_states[:, 0]  # (B, num_grid_nodes, d_state)
-        prev_state = init_states[:, 1]  # (B, num_grid_nodes, d_state)
+        if self.input_steps == 1:
+            prev_state = init_states[:, 0]
+            prev_prev_state = None
+        else:
+            prev_prev_state = init_states[:, 0]
+            prev_state = init_states[:, 1]
         pred_steps = forcing.shape[1]
 
         loss_like_list = []
@@ -710,9 +719,13 @@ class GraphEFM(ARProbModel):
         for i in range(pred_steps):
             target_state = target_states[:, i]  # (B, num_grid_nodes, d_state)
 
-            prev_states_stacked = torch.stack(
-                (prev_prev_state, prev_state), dim=1
-            )  # (B, 2, num_grid_nodes, d_state)
+            if self.input_steps >= 2:
+                prev_states_stacked = torch.stack(
+                    (prev_prev_state, prev_state), dim=1
+                )  # (B, 2, num_grid_nodes, d_state)
+            else:
+                prev_states_stacked = prev_state.unsqueeze(1)
+                # (B, 1, num_grid_nodes, d_state)
 
             (
                 loss_like_term,
@@ -737,7 +750,8 @@ class GraphEFM(ARProbModel):
             predicted_state = self.sample_next_state(pred_mean, pred_std)
 
             # Update conditioning states
-            prev_prev_state = prev_state
+            if self.input_steps >= 2:
+                prev_prev_state = prev_state
             prev_state = predicted_state
 
         # Compute final ELBO and loss, sum over time, mean over batch
@@ -807,7 +821,8 @@ class GraphEFM(ARProbModel):
         """
         Step state one step ahead using prediction model, X_{t-1}, X_t -> X_t+1
         prev_state: (B, num_interior_nodes, feature_dim), X_t
-        prev_prev_state: (B, num_interior_nodes, feature_dim), X_{t-1}
+        prev_prev_state: (B, num_interior_nodes, feature_dim), X_{t-1} (None
+            if input_steps==1)
         forcing: (B, num_interior_nodes, forcing_dim)
         boundary_forcing: (B, num_boundary_nodes, boundary_forcing_dim)
         atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
@@ -917,14 +932,18 @@ class GraphEFM(ARProbModel):
         Roll out prediction, sampling latent var. from variational
         encoder distribution
 
-        init_states: (B, 2, num_grid_nodes, d_f)
+        init_states: (B, input_steps, num_grid_nodes, d_f)
         forcing: (B, pred_steps, num_grid_nodes, d_forcing)
         boundary_forcing: (B, pred_steps, num_boundary_nodes, d_boundary)
         atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
         true_states: (B, pred_steps, num_grid_nodes, d_f)
         """
-        prev_prev_state = init_states[:, 0]
-        prev_state = init_states[:, 1]
+        if self.input_steps == 1:
+            prev_state = init_states[:, 0]
+            prev_prev_state = None
+        else:
+            prev_prev_state = init_states[:, 0]
+            prev_state = init_states[:, 1]
         prediction_list = []
         pred_std_list = []
         pred_steps = forcing.shape[1]
@@ -982,7 +1001,8 @@ class GraphEFM(ARProbModel):
                 pred_std_list.append(pred_std)
 
             # Update conditioning states
-            prev_prev_state = prev_state
+            if self.input_steps >= 2:
+                prev_prev_state = prev_state
             prev_state = new_state
 
         prediction = torch.stack(
@@ -1130,17 +1150,21 @@ class GraphEFM(ARProbModel):
 
             # Sample latent variable and plot
             # embed all features
+            prev_state_0 = init_states[:, -1]
+            prev_prev_state_0 = (
+                init_states[:, 0] if init_states.shape[1] > 1 else None
+            )
             grid_prev_emb, _, graph_emb = self.embedd_all(
-                init_states[:, 1],
-                init_states[:, 0],
+                prev_state_0,
+                prev_prev_state_0,
                 forcing_features[:, 0],
                 boundary_forcing[:, 0],
                 atmosphere_forcing[:, 0],
             )  # (B, num_grid_nodes, d_h)
             # embed also including current grid state, for encoder
             grid_current_emb = self.embedd_current(
-                init_states[:, 1],
-                init_states[:, 0],
+                prev_state_0,
+                prev_prev_state_0,
                 forcing_features[:, 0],
                 boundary_forcing[:, 0],
                 atmosphere_forcing[:, 0],

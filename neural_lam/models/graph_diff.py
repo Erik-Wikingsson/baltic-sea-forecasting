@@ -97,8 +97,11 @@ class GraphDiff(ARModel):
 
         # Define sub-models
         self.mlp_blueprint_end = [args.hidden_dim] * (args.hidden_layers + 1)
+        self.mlp_blueprint_mesh = [args.hidden_dim] * 2
         self.mlp_blueprint_encode = [self.encode_dim] * (args.hidden_layers + 1)
         self.mlp_blueprint_decode = [self.decode_dim] * (args.hidden_layers + 1)
+        self.mlp_blueprint_g2m_edges = [self.encode_dim] * 2
+        self.mlp_blueprint_m2g_edges = [self.decode_dim] * 2
 
         print(f"Using noise embedding: {args.noise_embedding}")
         self.noise_level_dim = (
@@ -135,11 +138,11 @@ class GraphDiff(ARModel):
                 noise_level_dim=self.noise_level_dim,
             )
         self.g2m_embedder = make_mlp(
-            [g2m_dim] + self.mlp_blueprint_encode,
+            [g2m_dim] + self.mlp_blueprint_g2m_edges,
             noise_level_dim=self.noise_level_dim,
         )
         self.m2g_embedder = make_mlp(
-            [m2g_dim] + self.mlp_blueprint_decode,
+            [m2g_dim] + self.mlp_blueprint_m2g_edges,
             noise_level_dim=self.noise_level_dim,
         )
 
@@ -231,7 +234,7 @@ class GraphDiff(ARModel):
         self.mesh_embedders = nn.ModuleList(
             [
                 make_mlp(
-                    [mesh_dim] + self.mlp_blueprint_end,
+                    [mesh_dim] + self.mlp_blueprint_mesh,
                     noise_level_dim=self.noise_level_dim,
                 )
                 for _ in range(self.num_levels)
@@ -240,7 +243,7 @@ class GraphDiff(ARModel):
         self.mesh_same_embedders = nn.ModuleList(
             [
                 make_mlp(
-                    [mesh_same_dim] + self.mlp_blueprint_end,
+                    [mesh_same_dim] + self.mlp_blueprint_mesh,
                     noise_level_dim=self.noise_level_dim,
                 )
                 for _ in range(self.num_levels)
@@ -249,7 +252,7 @@ class GraphDiff(ARModel):
         self.mesh_up_embedders = nn.ModuleList(
             [
                 make_mlp(
-                    [mesh_up_dim] + self.mlp_blueprint_end,
+                    [mesh_up_dim] + self.mlp_blueprint_mesh,
                     noise_level_dim=self.noise_level_dim,
                 )
                 for _ in range(self.num_levels - 1)
@@ -258,7 +261,7 @@ class GraphDiff(ARModel):
         self.mesh_down_embedders = nn.ModuleList(
             [
                 make_mlp(
-                    [mesh_down_dim] + self.mlp_blueprint_end,
+                    [mesh_down_dim] + self.mlp_blueprint_mesh,
                     noise_level_dim=self.noise_level_dim,
                 )
                 for _ in range(self.num_levels - 1)

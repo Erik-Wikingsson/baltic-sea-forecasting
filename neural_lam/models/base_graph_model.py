@@ -60,8 +60,11 @@ class BaseGraphModel(ARModel):
         # Define sub-models
         # Feature embedders for grid, output encode_dim for g2m path
         self.mlp_blueprint_end = [args.hidden_dim] * (args.hidden_layers + 1)
+        self.mlp_blueprint_mesh = [args.hidden_dim] * 2
         self.mlp_blueprint_encode = [self.encode_dim] * (args.hidden_layers + 1)
         self.mlp_blueprint_decode = [self.decode_dim] * (args.hidden_layers + 1)
+        self.mlp_blueprint_g2m_edges = [self.encode_dim] * 2
+        self.mlp_blueprint_m2g_edges = [self.decode_dim] * 2
         self.interior_embedder = utils.make_mlp(
             [self.interior_input_dim] + self.mlp_blueprint_encode
         )
@@ -74,10 +77,10 @@ class BaseGraphModel(ARModel):
                 [self.atmosphere_dim] + self.mlp_blueprint_encode
             )
         self.g2m_embedder = utils.make_mlp(
-            [g2m_dim] + self.mlp_blueprint_encode
+            [g2m_dim] + self.mlp_blueprint_g2m_edges
         )
         self.m2g_embedder = utils.make_mlp(
-            [m2g_dim] + self.mlp_blueprint_decode
+            [m2g_dim] + self.mlp_blueprint_m2g_edges
         )
 
         # embedd_mesh_nodes returns hidden_dim; project to encode_dim

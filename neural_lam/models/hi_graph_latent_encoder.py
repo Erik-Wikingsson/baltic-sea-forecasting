@@ -36,6 +36,10 @@ class HiGraphLatentEncoder(BaseLatentEncoder):
             f"HiGraphLatentEncoder hidden_dim: {hidden_dim}, "
             f"hidden_dim_grid: {hidden_dim_grid}"
         )
+        if hidden_dim != hidden_dim_grid:
+            self.mesh_input_proj = nn.Linear(hidden_dim, hidden_dim_grid)
+        else:
+            self.mesh_input_proj = None
         # GNN from grid to mesh
         self.g2m_gnn = PropagationNet(
             g2m_edge_index,
@@ -95,8 +99,11 @@ class HiGraphLatentEncoder(BaseLatentEncoder):
         Returns:
         parameters: (B, num_mesh_nodes, d_output)
         """
+        mesh_0 = graph_emb["mesh"][0]
+        if self.mesh_input_proj is not None:
+            mesh_0 = self.mesh_input_proj(mesh_0)
         current_mesh_rep = self.g2m_gnn(
-            grid_rep, graph_emb["mesh"][0], graph_emb["g2m"]
+            grid_rep, mesh_0, graph_emb["g2m"]
         )  # (B, N_mesh, d_h)
 
         current_mesh_rep = self.pre_mesh_proj(current_mesh_rep)

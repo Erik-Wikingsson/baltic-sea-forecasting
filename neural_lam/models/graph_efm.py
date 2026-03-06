@@ -94,12 +94,15 @@ class GraphEFM(ARProbModel):
 
         # Define sub-models
         self.mlp_blueprint_end = [args.hidden_dim] * (args.hidden_layers + 1)
+        self.mlp_blueprint_mesh = [args.hidden_dim] * 2
         self.grid_mlp_blueprint_encode = [self.encode_dim] * (
             args.hidden_layers + 1
         )
         self.grid_mlp_blueprint_decode = [self.decode_dim] * (
             args.hidden_layers + 1
         )
+        self.mlp_blueprint_g2m_edges = [self.encode_dim] * 2
+        self.mlp_blueprint_m2g_edges = [self.decode_dim] * 2
 
         print(
             "GraphEFM, "
@@ -128,10 +131,10 @@ class GraphEFM(ARProbModel):
             )
 
         self.g2m_embedder = utils.make_mlp(
-            [g2m_dim] + self.grid_mlp_blueprint_encode
+            [g2m_dim] + self.mlp_blueprint_g2m_edges
         )
         self.m2g_embedder = utils.make_mlp(
-            [m2g_dim] + self.grid_mlp_blueprint_decode
+            [m2g_dim] + self.mlp_blueprint_m2g_edges
         )
 
         # For decoder: residual and original grid in decode_dim
@@ -169,22 +172,20 @@ class GraphEFM(ARProbModel):
 
             # Separate mesh node embedders for each level
             self.mesh_embedders = nn.ModuleList(
-                # Bottom mesh level for g2m in encode_dim
-                [utils.make_mlp([mesh_dim] + self.grid_mlp_blueprint_encode)]
-                + [
-                    utils.make_mlp([mesh_dim] + self.mlp_blueprint_end)
-                    for _ in range(num_levels - 1)
+                [
+                    utils.make_mlp([mesh_dim] + self.mlp_blueprint_mesh)
+                    for _ in range(num_levels)
                 ]
             )
             self.mesh_up_embedders = nn.ModuleList(
                 [
-                    utils.make_mlp([mesh_up_dim] + self.mlp_blueprint_end)
+                    utils.make_mlp([mesh_up_dim] + self.mlp_blueprint_mesh)
                     for _ in range(num_levels - 1)
                 ]
             )
             self.mesh_down_embedders = nn.ModuleList(
                 [
-                    utils.make_mlp([mesh_down_dim] + self.mlp_blueprint_end)
+                    utils.make_mlp([mesh_down_dim] + self.mlp_blueprint_mesh)
                     for _ in range(num_levels - 1)
                 ]
             )
@@ -201,7 +202,7 @@ class GraphEFM(ARProbModel):
             if self.embedd_m2m:
                 self.m2m_embedders = torch.nn.ModuleList(
                     [
-                        utils.make_mlp([m2m_dim] + self.mlp_blueprint_end)
+                        utils.make_mlp([m2m_dim] + self.mlp_blueprint_mesh)
                         for _ in range(num_levels)
                     ]
                 )

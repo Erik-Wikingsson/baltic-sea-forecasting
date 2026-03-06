@@ -48,6 +48,31 @@ def _knn_edges_sphere(mesh_3d: np.ndarray, k: int) -> np.ndarray:
     return edges_both
 
 
+def _spherical_delaunay_edges(mesh_3d: np.ndarray) -> np.ndarray:
+    """Build (2, E) edge index from spherical Delaunay triangulation.
+
+    Uses ConvexHull of points on the unit sphere: its surface facets are
+    the Delaunay triangles on the sphere. mesh_3d: (N, 3) unit-norm points.
+    Returns directed edges (both directions) for each undirected edge.
+    """
+    n = mesh_3d.shape[0]
+    if n < 3:
+        return np.zeros((2, 0), dtype=np.int64)
+    hull = scipy.spatial.ConvexHull(mesh_3d)
+    # In 3D, simplices are the triangular faces of the hull (n_facets, 3)
+    edges = set()
+    for tri in hull.simplices:
+        i, j, k = int(tri[0]), int(tri[1]), int(tri[2])
+        edges.add((min(i, j), max(i, j)))
+        edges.add((min(j, k), max(j, k)))
+        edges.add((min(k, i), max(k, i)))
+    if not edges:
+        return np.zeros((2, 0), dtype=np.int64)
+    edges_arr = np.array(list(edges), dtype=np.int64).T  # (2, E_undir)
+    edges_both = np.concatenate([edges_arr, edges_arr[[1, 0]]], axis=1)
+    return edges_both
+
+
 def build_graph_from_mesh_pos_sphere(
     mesh_xy: np.ndarray,
     k_nn: int = 5,
@@ -60,6 +85,24 @@ def build_graph_from_mesh_pos_sphere(
     """
     mesh_3d = gutils.node_lon_lat_to_cart(mesh_xy)
     edge_index = _knn_edges_sphere(mesh_3d, k=k_nn)
+    pos = torch.tensor(mesh_xy, dtype=torch.float32)
+    graph = pyg.data.Data(
+        pos=pos,
+        edge_index=torch.from_numpy(edge_index).long(),
+    )
+    return graph
+
+
+def build_graph_from_mesh_pos_sphere_delaunay(
+    mesh_xy: np.ndarray,
+) -> pyg.data.Data:
+    """Build mesh graph from node positions on sphere using spherical Delaunay.
+
+    Uses ConvexHull of 3D points on the unit sphere; surface facets are the
+    Delaunay triangles. mesh_xy: (N, 2) [longitude, latitude] in degrees.
+    """
+    mesh_3d = gutils.node_lon_lat_to_cart(mesh_xy)
+    edge_index = _spherical_delaunay_edges(mesh_3d)
     pos = torch.tensor(mesh_xy, dtype=torch.float32)
     graph = pyg.data.Data(
         pos=pos,
@@ -81,8 +124,8 @@ def build_cluster_mesh_graph_global(
     """Build hierarchical cluster mesh over the globe (sea points only).
 
     Uses KMeans in 3D Cartesian (unit sphere) so clusters respect spherical
-    geometry. Same-level mesh edges from k-NN on the sphere (chord distance)
-    so every node has neighbors; edges crossing land are then filtered.
+    geometry. Same-level mesh edges from spherical Delaunay (ConvexHull of
+    points on sphere); Edges crossing land are then filtered.
 
     Parameters
     ----------
@@ -153,7 +196,7 @@ def build_cluster_mesh_graph_global(
         centers_3d = centers_3d / (r + 1e-12)
         level_lon_lat = _cart_to_lon_lat_matching_utils(centers_3d)
 
-        level_graph = build_graph_from_mesh_pos_sphere(level_lon_lat)
+        level_graph = build_graph_from_mesh_pos_sphere_delaunay(level_lon_lat)
         mesh_cart = gutils.node_lon_lat_to_cart(level_graph.pos.numpy())
         edge_index_np = level_graph.edge_index.numpy()
         mesh_cart_f, edge_index_f = gutils.filter_global_edges_land(

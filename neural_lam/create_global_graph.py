@@ -384,6 +384,7 @@ def create_global_graph(
     saving.save_edges(m2g_graph, "m2g", graph_dir_path)
 
     # M2M and mesh features: cluster (single or hierarchical) or icosahedral
+    save_graphs_icosahedral = None
     if graph_type == "cluster" and save_graphs_cluster is not None:
         m2m_graphs = save_graphs_cluster["m2m"]
         saving.save_edges_list(m2m_graphs, "m2m", graph_dir_path)
@@ -483,6 +484,17 @@ def create_global_graph(
             saving.save_edges_list(
                 mesh_down_graphs, "mesh_down", graph_dir_path
             )
+            save_graphs_icosahedral = {
+                "m2m": [
+                    pyg.data.Data(
+                        pos=torch.from_numpy(cart.astype(np.float32)),
+                        edge_index=torch.from_numpy(ei.astype(np.int64)),
+                    )
+                    for cart, ei in mesh_levels
+                ],
+                "mesh_up": mesh_up_graphs,
+                "mesh_down": mesh_down_graphs,
+            }
         else:
             mesh_edge_index_t = torch.from_numpy(
                 mesh_edge_index.astype(np.int64)
@@ -719,8 +731,10 @@ def create_global_graph(
     # Print graph statistics
     if save_graphs_cluster is not None:
         save_graphs = save_graphs_cluster
+    elif save_graphs_icosahedral is not None:
+        save_graphs = save_graphs_icosahedral
     else:
-        # Multiscale mesh is combined into one level
+        # Multiscale or single-level icosahedral
         if graph_type == "multiscale":
             m2m_list = [
                 pyg.data.Data(
@@ -731,7 +745,6 @@ def create_global_graph(
                 )
             ]
         else:
-            # Hierarchical use per-level
             m2m_list = [
                 pyg.data.Data(
                     pos=torch.from_numpy(cart.astype(np.float32)),
@@ -770,7 +783,7 @@ def cli(input_args=None):
     parser.add_argument(
         "--splits",
         type=int,
-        default=3,
+        default=6,
         help="Icosahedral mesh subdivisions (0=base, 3 ~ 2562 nodes).",
     )
     parser.add_argument(
@@ -785,8 +798,8 @@ def cli(input_args=None):
     parser.add_argument(
         "--levels",
         type=int,
-        default=3,
-        help="Number of mesh levels (default: 3).",
+        default=2,
+        help="Number of mesh levels (default: 2).",
     )
     parser.add_argument(
         "--g2m_radius",
@@ -814,13 +827,13 @@ def cli(input_args=None):
     parser.add_argument(
         "--mesh_refinement_factor",
         type=float,
-        default=5,
+        default=4,
         help="(Cluster) factor between mesh nodes at consecutive levels.",
     )
     parser.add_argument(
         "--grid_to_first_mesh_refinement",
         type=float,
-        default=20,
+        default=23,
         help="(Cluster) ratio grid nodes / first-level mesh nodes.",
     )
     parser.add_argument(

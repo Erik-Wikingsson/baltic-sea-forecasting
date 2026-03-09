@@ -68,25 +68,25 @@ class BaseHiGraphModel(BaseGraphModel):
         # Separate mesh node embedders for each level
         self.mesh_embedders = nn.ModuleList(
             [
-                utils.make_mlp([mesh_dim] + self.mlp_blueprint_mesh)
+                utils.make_mlp([mesh_dim] + self.mlp_blueprint_end)
                 for _ in range(self.num_levels)
             ]
         )
         self.mesh_same_embedders = nn.ModuleList(
             [
-                utils.make_mlp([mesh_same_dim] + self.mlp_blueprint_mesh)
+                utils.make_mlp([mesh_same_dim] + self.mlp_blueprint_end)
                 for _ in range(self.num_levels)
             ]
         )
         self.mesh_up_embedders = nn.ModuleList(
             [
-                utils.make_mlp([mesh_up_dim] + self.mlp_blueprint_mesh)
+                utils.make_mlp([mesh_up_dim] + self.mlp_blueprint_end)
                 for _ in range(self.num_levels - 1)
             ]
         )
         self.mesh_down_embedders = nn.ModuleList(
             [
-                utils.make_mlp([mesh_down_dim] + self.mlp_blueprint_mesh)
+                utils.make_mlp([mesh_down_dim] + self.mlp_blueprint_end)
                 for _ in range(self.num_levels - 1)
             ]
         )

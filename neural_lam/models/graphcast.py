@@ -49,10 +49,8 @@ class GraphCast(BaseGraphModel):
 
         # Define sub-models
         # Feature embedders for mesh
-        self.mesh_embedder = utils.make_mlp(
-            [mesh_dim] + self.mlp_blueprint_mesh
-        )
-        self.m2m_embedder = utils.make_mlp([m2m_dim] + self.mlp_blueprint_mesh)
+        self.mesh_embedder = utils.make_mlp([mesh_dim] + self.mlp_blueprint_end)
+        self.m2m_embedder = utils.make_mlp([m2m_dim] + self.mlp_blueprint_end)
 
         # GNNs
         # processor

@@ -2,6 +2,7 @@
 import networkx
 import numpy as np
 import scipy
+import scipy.spatial
 import torch
 import torch_geometric as pyg
 from torch_geometric.utils.convert import from_networkx
@@ -617,6 +618,68 @@ def connect_disconnected_m2g(
         # Update edge features
         add_edge_features_pyg(pyg_m2g)
         print(f"Connected {len(new_edges)} disconnected nodes in m2g")
+
+
+def compute_voronoi_areas_2d(xy: np.ndarray) -> np.ndarray:
+    """Compute Voronoi cell areas for 2D planar mesh nodes.
+
+    Parameters
+    ----------
+    xy : np.ndarray
+        (N, 2) array of 2D coordinates (x, y).
+
+    Returns
+    -------
+    np.ndarray
+        (N,) array of Voronoi cell areas.
+    """
+    voronoi = scipy.spatial.Voronoi(xy)
+    areas = np.zeros(xy.shape[0], dtype=np.float32)
+
+    for point_idx, region_idx in enumerate(voronoi.point_region):
+        region = voronoi.regions[region_idx]
+        if -1 in region or len(region) == 0:
+            areas[point_idx] = 0.0
+        else:
+            # Compute area of finite Voronoi region
+            vertices = voronoi.vertices[region]
+            if len(vertices) >= 3:
+                # Use shoelace formula for polygon area
+                area = 0.0
+                for i in range(len(vertices)):
+                    j = (i + 1) % len(vertices)
+                    area += vertices[i][0] * vertices[j][1]
+                    area -= vertices[j][0] * vertices[i][1]
+                areas[point_idx] = abs(area) / 2.0
+            else:
+                areas[point_idx] = 0.0
+
+    return areas.astype(np.float32)
+
+
+def compute_voronoi_areas_spherical(cart: np.ndarray) -> np.ndarray:
+    """Compute Voronoi cell areas for 3D spherical mesh nodes on unit sphere.
+
+    Parameters
+    ----------
+    cart : np.ndarray
+        (N, 3) array of Cartesian coordinates on unit sphere.
+
+    Returns
+    -------
+    np.ndarray
+        (N,) array of Voronoi cell areas on the unit sphere (in steradians).
+    """
+    # Normalize to unit sphere
+    r = np.linalg.norm(cart, axis=1, keepdims=True)
+    cart = cart / r
+
+    sv = scipy.spatial.SphericalVoronoi(cart, radius=1.0)
+    areas = sv.calculate_areas()
+    # Handle any NaN or invalid values
+    areas = np.nan_to_num(areas, nan=0.0, posinf=0.0, neginf=0.0)
+
+    return areas.astype(np.float32)
 
 
 def print_graph_stats(save_graphs, pyg_g2m, pyg_m2g):

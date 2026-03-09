@@ -190,10 +190,29 @@ def create_graph(
     for graph_name, graph in save_graphs.items():
         saving.save_edges_list(graph, graph_name, graph_dir_path)
 
-    # Save mesh positions
+    # Compute Voronoi cell areas for each mesh level and add to features
+    mesh_features_with_area = []
+    for level_pos in mesh_pos:
+        pos_np = (
+            level_pos.cpu().numpy()
+            if isinstance(level_pos, torch.Tensor)
+            else level_pos
+        )
+        # Compute Voronoi areas (2D planar)
+        voronoi_areas = gutils.compute_voronoi_areas_2d(pos_np)
+        # Concatenate position (x, y) with Voronoi area
+        features = np.concatenate(
+            [pos_np, voronoi_areas.reshape(-1, 1)], axis=1
+        )
+        mesh_features_with_area.append(
+            torch.from_numpy(features.astype(np.float32))
+        )
+
+    # Save mesh features (positions + Voronoi areas)
     torch.save(
-        mesh_pos, os.path.join(graph_dir_path, "mesh_features.pt")
-    )  # mesh pos, in float32
+        mesh_features_with_area,
+        os.path.join(graph_dir_path, "mesh_features.pt"),
+    )  # mesh features: (x, y, voronoi_area) in float32
 
     #
     # Grid2Mesh

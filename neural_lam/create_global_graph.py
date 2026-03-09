@@ -388,11 +388,18 @@ def create_global_graph(
     if graph_type == "cluster" and save_graphs_cluster is not None:
         m2m_graphs = save_graphs_cluster["m2m"]
         saving.save_edges_list(m2m_graphs, "m2m", graph_dir_path)
-        # Node features from 3D: cos(lat), sin(lat), sin(lon), cos(lon)
-        mesh_features_list = [
-            torch.from_numpy(_cart_to_node_features(g.pos.numpy()))
-            for g in m2m_graphs
-        ]
+        # Node features cos(lat), sin(lat), sin(lon), cos(lon), Voronoi area
+        mesh_features_list = []
+        for g in m2m_graphs:
+            cart = g.pos.numpy()
+            node_feat = _cart_to_node_features(cart)
+            voronoi_areas = gutils.compute_voronoi_areas_spherical(cart)
+            features = np.concatenate(
+                [node_feat, voronoi_areas.reshape(-1, 1)], axis=1
+            )
+            mesh_features_list.append(
+                torch.from_numpy(features.astype(np.float32))
+            )
         if hierarchical_cluster:
             mesh_up = save_graphs_cluster["mesh_up"]
             mesh_down = save_graphs_cluster["mesh_down"]
@@ -426,9 +433,16 @@ def create_global_graph(
                         vdiff=torch.from_numpy(lvl_vdiff_3d),
                     )
                 )
-                # Node features from 3D: cos(lat), sin(lat), sin(lon), cos(lon)
+                # Node features
+                # cos(lat), sin(lat), sin(lon), cos(lon), Voronoi area
                 lvl_node_feat = _cart_to_node_features(lvl_cart)
-                mesh_features_list.append(torch.from_numpy(lvl_node_feat))
+                voronoi_areas = gutils.compute_voronoi_areas_spherical(lvl_cart)
+                features = np.concatenate(
+                    [lvl_node_feat, voronoi_areas.reshape(-1, 1)], axis=1
+                )
+                mesh_features_list.append(
+                    torch.from_numpy(features.astype(np.float32))
+                )
 
             saving.save_edges_list(m2m_graphs, "m2m", graph_dir_path)
 
@@ -513,9 +527,15 @@ def create_global_graph(
                 vdiff=torch.from_numpy(m2m_vdiff_3d),
             )
             saving.save_edges_list([m2m_graph], "m2m", graph_dir_path)
-            # Node features from 3D: cos(lat), sin(lat), sin(lon), cos(lon)
+            # Node features
+            # cos(lat), sin(lat), sin(lon), cos(lon), Voronoi area
             mesh_node_feat = _cart_to_node_features(mesh_cart)
-            mesh_features_list = [torch.from_numpy(mesh_node_feat)]
+            voronoi_areas = gutils.compute_voronoi_areas_spherical(mesh_cart)
+            # Concatenate: (sin_lon, cos_lon, sin_lat, cos_lat, voronoi_area)
+            features = np.concatenate(
+                [mesh_node_feat, voronoi_areas.reshape(-1, 1)], axis=1
+            )
+            mesh_features_list = [torch.from_numpy(features.astype(np.float32))]
     torch.save(
         mesh_features_list,
         os.path.join(graph_dir_path, "mesh_features.pt"),

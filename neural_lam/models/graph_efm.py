@@ -71,21 +71,32 @@ class GraphEFM(ARProbModel):
 
         # Determine grid hidden dim
         if args.hidden_dim_grid is None:
-            # Same as hidden_dim
             hidden_dim_grid = args.hidden_dim
         else:
             hidden_dim_grid = args.hidden_dim_grid
 
+        # Determine edge hidden dim
+        if args.hidden_dim_edge is None:
+            hidden_dim_edge = hidden_dim_grid
+        else:
+            hidden_dim_edge = args.hidden_dim_edge
+
+        # Determine mesh node hidden dim
+        if args.hidden_dim_mesh_nodes is None:
+            hidden_dim_mesh_nodes = args.hidden_dim
+        else:
+            hidden_dim_mesh_nodes = args.hidden_dim_mesh_nodes
+
         print(
             f"Using hidden_dim_grid={hidden_dim_grid}, "
-            f"hidden_dim={args.hidden_dim}"
+            f"hidden_dim_mesh_nodes={hidden_dim_mesh_nodes}, "
+            f"hidden_dim_edge={hidden_dim_edge}, hidden_dim={args.hidden_dim}"
         )
 
         # interior_dim from data + static
         self.g2m_edges, g2m_dim = self.g2m_features.shape
         self.m2g_edges, m2g_dim = self.m2g_features.shape
 
-        # g2m_dim.shape: 3, m2g_dim.shape: 3
         print(f"g2m_dim.shape: {g2m_dim}, m2g_dim.shape: {m2g_dim}")
 
         # Define sub-models
@@ -93,6 +104,10 @@ class GraphEFM(ARProbModel):
         self.mlp_blueprint_end = [args.hidden_dim] * (args.hidden_layers + 1)
         # For grid hidden dim
         self.grid_mlp_blueprint_end = [hidden_dim_grid] * (
+            args.hidden_layers + 1
+        )
+        # For edge hidden dim
+        self.edge_mlp_blueprint_end = [hidden_dim_edge] * (
             args.hidden_layers + 1
         )
 
@@ -126,10 +141,10 @@ class GraphEFM(ARProbModel):
 
         # Embedders for mesh
         self.g2m_embedder = utils.make_mlp(
-            [g2m_dim] + self.grid_mlp_blueprint_end
+            [g2m_dim] + self.edge_mlp_blueprint_end
         )
         self.m2g_embedder = utils.make_mlp(
-            [m2g_dim] + self.grid_mlp_blueprint_end
+            [m2g_dim] + self.edge_mlp_blueprint_end
         )
 
         if self.hierarchical_graph:
@@ -160,9 +175,11 @@ class GraphEFM(ARProbModel):
             mesh_down_dim = self.mesh_down_features[0].shape[1]
 
             # Separate mesh node embedders for each level
+            mesh_embedder_blueprint_0 = [hidden_dim_mesh_nodes] * (
+                args.hidden_layers + 1
+            )
             self.mesh_embedders = nn.ModuleList(
-                # Bottom mesh level is first embedded to hidden dim of grid
-                [utils.make_mlp([mesh_dim] + self.grid_mlp_blueprint_end)]
+                [utils.make_mlp([mesh_dim] + mesh_embedder_blueprint_0)]
                 + [
                     utils.make_mlp([mesh_dim] + self.mlp_blueprint_end)
                     for _ in range(num_levels - 1)
@@ -230,6 +247,8 @@ class GraphEFM(ARProbModel):
                     self.mesh_up_edge_index,
                     args.hidden_dim,
                     hidden_dim_grid,
+                    hidden_dim_mesh_nodes,
+                    hidden_dim_edge,
                     args.prior_processor_layers,
                     hidden_layers=args.hidden_layers,
                     output_dist=args.prior_dist,
@@ -258,6 +277,8 @@ class GraphEFM(ARProbModel):
                 self.mesh_up_edge_index,
                 args.hidden_dim,
                 hidden_dim_grid,
+                hidden_dim_mesh_nodes,
+                hidden_dim_edge,
                 args.encoder_processor_layers,
                 hidden_layers=args.hidden_layers,
                 output_dist="diagonal",
@@ -272,6 +293,8 @@ class GraphEFM(ARProbModel):
                 self.mesh_down_edge_index,
                 args.hidden_dim,
                 hidden_dim_grid,
+                hidden_dim_mesh_nodes,
+                hidden_dim_edge,
                 latent_dim,
                 self._datastore.get_num_data_vars(category="state"),
                 args.processor_layers,

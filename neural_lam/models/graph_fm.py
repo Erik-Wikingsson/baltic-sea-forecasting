@@ -69,10 +69,9 @@ class GraphFM(BaseHiGraphModel):
         """
         Make GNNs for processing steps up through the hierarchy.
         """
-        gnn_class = PropagationNet if args.vertical_propnets else InteractionNet
         return nn.ModuleList(
             [
-                gnn_class(
+                PropagationNet(
                     edge_index,
                     args.hidden_dim,
                     hidden_layers=args.hidden_layers,

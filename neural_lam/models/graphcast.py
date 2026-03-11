@@ -49,7 +49,12 @@ class GraphCast(BaseGraphModel):
 
         # Define sub-models
         # Feature embedders for mesh
-        self.mesh_embedder = utils.make_mlp([mesh_dim] + self.mlp_blueprint_end)
+        mesh_embedder_blueprint = [self.hidden_dim_mesh_nodes] * (
+            args.hidden_layers + 1
+        )
+        self.mesh_embedder = utils.make_mlp(
+            [mesh_dim] + mesh_embedder_blueprint
+        )
         self.m2m_embedder = utils.make_mlp([m2m_dim] + self.mlp_blueprint_end)
 
         # GNNs
@@ -84,7 +89,7 @@ class GraphCast(BaseGraphModel):
         Get the total number of mesh nodes that have a connection to
         the grid (e.g. bottom level in a hierarchy)
         """
-        return self.num_mesh_nodes  # All nodes
+        return self.mesh_static_features.shape[0]
 
     def embedd_mesh_nodes(self):
         """

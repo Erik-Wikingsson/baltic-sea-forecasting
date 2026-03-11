@@ -8,7 +8,7 @@ import torch
 from .. import utils
 from ..config import NeuralLAMConfig
 from ..datastore import BaseDatastore
-from ..interaction_net import InteractionNet, PropagationNet
+from ..interaction_net import FlexiblePropagationNet
 from .ar_model import ARModel
 
 
@@ -49,6 +49,30 @@ class BaseGraphModel(ARModel):
             else:
                 setattr(self, name, attr_value)
 
+        # Determine grid hidden dim
+        if args.hidden_dim_grid is None:
+            hidden_dim_grid = args.hidden_dim
+        else:
+            hidden_dim_grid = args.hidden_dim_grid
+
+        # Determine edge hidden dim
+        if args.hidden_dim_edge is None:
+            hidden_dim_edge = hidden_dim_grid
+        else:
+            hidden_dim_edge = args.hidden_dim_edge
+
+        # Determine mesh node hidden dim
+        if args.hidden_dim_mesh_nodes is None:
+            self.hidden_dim_mesh_nodes = args.hidden_dim
+        else:
+            self.hidden_dim_mesh_nodes = args.hidden_dim_mesh_nodes
+
+        print(
+            f"Using hidden_dim_grid={hidden_dim_grid}, "
+            f"hidden_dim_mesh_nodes={self.hidden_dim_mesh_nodes}, "
+            f"hidden_dim_edge={hidden_dim_edge}, hidden_dim={args.hidden_dim}"
+        )
+
         # grid_dim from data + static
         self.g2m_edges, g2m_dim = self.g2m_features.shape
         self.m2g_edges, m2g_dim = self.m2g_features.shape
@@ -56,46 +80,69 @@ class BaseGraphModel(ARModel):
         # Define sub-models
         # Feature embedders for grid
         self.mlp_blueprint_end = [args.hidden_dim] * (args.hidden_layers + 1)
+        # For grid hidden dim
+        self.grid_mlp_blueprint_end = [hidden_dim_grid] * (
+            args.hidden_layers + 1
+        )
+        # For edge hidden dim
+        self.edge_mlp_blueprint_end = [hidden_dim_edge] * (
+            args.hidden_layers + 1
+        )
+
+        # Grid embedders output hidden_dim_grid
         self.interior_embedder = utils.make_mlp(
-            [self.interior_input_dim] + self.mlp_blueprint_end
+            [self.interior_input_dim] + self.grid_mlp_blueprint_end
         )
         if self.boundary_forced:
             self.boundary_embedder = utils.make_mlp(
-                [self.boundary_dim] + self.mlp_blueprint_end
+                [self.boundary_dim] + self.grid_mlp_blueprint_end
             )
         if self.atmosphere_forced and self.use_atmosphere_g2m:
             self.atmosphere_embedder = utils.make_mlp(
-                [self.atmosphere_dim] + self.mlp_blueprint_end
+                [self.atmosphere_dim] + self.grid_mlp_blueprint_end
             )
-        self.g2m_embedder = utils.make_mlp([g2m_dim] + self.mlp_blueprint_end)
-        self.m2g_embedder = utils.make_mlp([m2g_dim] + self.mlp_blueprint_end)
+
+        self.pre_mesh_proj = utils.make_mlp(
+            [hidden_dim_grid] + self.mlp_blueprint_end
+        )
+        self.post_mesh_proj = utils.make_mlp(
+            [args.hidden_dim] + self.grid_mlp_blueprint_end
+        )
+
+        self.g2m_embedder = utils.make_mlp(
+            [g2m_dim] + self.edge_mlp_blueprint_end
+        )
+        self.m2g_embedder = utils.make_mlp(
+            [m2g_dim] + self.edge_mlp_blueprint_end
+        )
 
         # GNNs
-        gnn_class = PropagationNet if args.vertical_propnets else InteractionNet
         # encoder
-        self.g2m_gnn = gnn_class(
-            self.g2m_edge_index,
-            args.hidden_dim,
+        self.g2m_gnn = FlexiblePropagationNet(
+            edge_index=self.g2m_edge_index,
+            send_node_dim=hidden_dim_grid,
+            rec_node_dim=self.hidden_dim_mesh_nodes,
+            edge_dim=hidden_dim_edge,
             hidden_layers=args.hidden_layers,
-            update_edges=False,
             num_rec=self.num_grid_connected_mesh_nodes,
         )
         self.encoding_grid_mlp = utils.make_mlp(
-            [args.hidden_dim] + self.mlp_blueprint_end
+            [hidden_dim_grid] + self.grid_mlp_blueprint_end
         )
 
         # decoder
-        self.m2g_gnn = gnn_class(
-            self.m2g_edge_index,
-            args.hidden_dim,
+        self.m2g_gnn = FlexiblePropagationNet(
+            edge_index=self.m2g_edge_index,
+            send_node_dim=hidden_dim_grid,
+            rec_node_dim=hidden_dim_grid,
+            edge_dim=hidden_dim_edge,
             hidden_layers=args.hidden_layers,
-            update_edges=False,
             num_rec=self.num_grid_nodes,
         )
 
-        # Output mapping (hidden_dim -> output_dim)
+        # Output mapping (hidden_dim_grid -> output_dim)
         self.output_map = utils.make_mlp(
-            [args.hidden_dim] * (args.hidden_layers + 1)
+            [hidden_dim_grid] * (args.hidden_layers + 1)
             + [self.grid_output_dim],
             layer_norm=False,
         )  # No layer norm on this one
@@ -431,8 +478,14 @@ class BaseGraphModel(ARModel):
             interior_emb
         )  # (B, num_interior_nodes, d_h)
 
+        # Project up mesh rep to hidden dim of graph
+        mesh_rep = self.pre_mesh_proj(mesh_rep)  # g -> m
+
         # Run processor step
-        mesh_rep = self.process_step(mesh_rep)
+        mesh_rep = self.process_step(mesh_rep)  # m -> m
+
+        # Project down mesh rep to hidden dim of grid
+        mesh_rep = self.post_mesh_proj(mesh_rep)  # m -> g
 
         # Map back from mesh to grid
         m2g_emb_expanded = self.expand_to_batch(m2g_emb, batch_size)

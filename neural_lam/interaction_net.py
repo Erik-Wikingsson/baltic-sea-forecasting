@@ -62,10 +62,6 @@ class InteractionNet(pyg.nn.MessagePassing):
             self.num_rec = edge_index[1].max() + 1
         else:
             self.num_rec = num_rec
-            assert edge_index[1].max() < self.num_rec, (
-                "Given edge index has receiver node index up to "
-                f"{edge_index[1].max()}, but num_rec is just {self.num_rec}."
-            )
 
         # any edge_index used here must start sender and rec. nodes at index 0
         edge_index = torch.stack(
@@ -212,6 +208,84 @@ class PropagationNet(InteractionNet):
         """
         # Residual connection is to sender node, propagating information to edge
         return x_j + self.edge_mlp(torch.cat((edge_attr, x_j, x_i), dim=-1))
+
+
+class FlexiblePropagationNet(pyg.nn.MessagePassing):
+    """
+    More flexible version of propagationnet, allows for separate receiver and
+    sender node rep dimensions.
+    """
+
+    def __init__(
+        self,
+        edge_index,
+        send_node_dim,
+        rec_node_dim,
+        edge_dim,
+        hidden_layers=1,
+        num_rec=None,
+    ):
+        super().__init__(aggr="mean")
+
+        # The output dimensionality has to be the same as for the sender nodes
+        hidden_dim = send_node_dim
+
+        # Store number of receiver nodes according to edge_index
+        if num_rec is None:
+            # Derive from edge_index
+            self.num_rec = edge_index[1].max() + 1
+        else:
+            self.num_rec = num_rec
+
+        # any edge_index used here must start sender and rec. nodes at index 0
+        self.register_buffer("edge_index", edge_index, persistent=False)
+
+        # Create MLPs
+        edge_mlp_recipe = [send_node_dim + rec_node_dim + edge_dim] + [
+            hidden_dim
+        ] * (hidden_layers + 1)
+        aggr_mlp_recipe = [hidden_dim + rec_node_dim] + [hidden_dim] * (
+            hidden_layers + 1
+        )
+
+        self.edge_mlp = utils.make_mlp(edge_mlp_recipe)
+        self.aggr_mlp = utils.make_mlp(aggr_mlp_recipe)
+
+    def forward(self, send_rep, rec_rep, edge_rep, emb=None):
+        """
+        Apply propagation network to update the representations of receiver
+        nodes, and optionally the edge representations.
+        send_rep: (N_send, d_h), vector representations of sender nodes
+        rec_rep: (N_rec, d_h), vector representations of receiver nodes
+        edge_rep: (M, d_h), vector representations of edges used
+        Returns:
+        rec_rep: (N_rec, d_h), updated vector representations of receiver nodes
+        """
+        edge_rep_aggr = self.propagate(
+            self.edge_index,
+            send_rep=send_rep,
+            rec_rep=rec_rep,
+            edge_attr=edge_rep,
+            dim_size=self.num_rec,
+            emb=emb,
+        )
+        rec_diff = self.aggr_mlp(torch.cat((rec_rep, edge_rep_aggr), dim=-1))
+
+        # Residual connections
+        rec_rep = edge_rep_aggr + rec_diff  # residual is to aggregation
+
+        return rec_rep
+
+    def message(self, send_rep_j, rec_rep_i, edge_attr, emb=None):
+        """
+        Compute messages from node j to node i.
+        send_rep_j contains sender representations for each edge
+        rec_rep_i contains receiver representations for each edge
+        """
+        # Residual connection is to sender node, propagating information to edge
+        return send_rep_j + self.edge_mlp(
+            torch.cat((edge_attr, send_rep_j, rec_rep_i), dim=-1)
+        )
 
 
 class SplitMLPs(nn.Module):

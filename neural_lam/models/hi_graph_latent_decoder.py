@@ -4,6 +4,7 @@ from torch import nn
 # First-party
 from neural_lam import utils
 from neural_lam.interaction_net import (
+    FlexiblePropagationNet,
     InteractionNet,
     PropagationNet,
 )
@@ -25,6 +26,8 @@ class HiGraphLatentDecoder(BaseGraphLatentDecoder):
         mesh_down_edge_index,
         hidden_dim,
         hidden_dim_grid,
+        hidden_dim_mesh_nodes,
+        hidden_dim_edge,
         latent_dim,
         output_dim,
         intra_level_layers,
@@ -43,19 +46,21 @@ class HiGraphLatentDecoder(BaseGraphLatentDecoder):
         )
 
         # GNN from grid to mesh
-        self.g2m_gnn = InteractionNet(
-            g2m_edge_index,
-            hidden_dim_grid,
+        self.g2m_gnn = FlexiblePropagationNet(
+            edge_index=g2m_edge_index,
+            send_node_dim=hidden_dim_grid,
+            rec_node_dim=hidden_dim_mesh_nodes,
+            edge_dim=hidden_dim_edge,
             hidden_layers=hidden_layers,
-            update_edges=False,
             num_rec=num_grid_con_mesh_nodes,
         )
         # GNN from mesh to grid
-        self.m2g_gnn = PropagationNet(
-            m2g_edge_index,
-            hidden_dim_grid,
+        self.m2g_gnn = FlexiblePropagationNet(
+            edge_index=m2g_edge_index,
+            send_node_dim=hidden_dim_grid,
+            rec_node_dim=hidden_dim_grid,
+            edge_dim=hidden_dim_edge,
             hidden_layers=hidden_layers,
-            update_edges=False,
             num_rec=num_interior_nodes,
         )
 

@@ -115,8 +115,26 @@ def main(input_args=None):
         "--hidden_dim_grid",
         type=int,
         help=(
-            "(For Graph-EFM) Dimensionality of hidden representations related "
+            "Dimensionality of hidden representations related "
             "to grid nodes (default: None, use same as hidden_dim)."
+        ),
+    )
+    parser.add_argument(
+        "--hidden_dim_edge",
+        type=int,
+        help=(
+            "Dimensionality of hidden representations related to edge nodes "
+            "(edge encodings and in edge-level MLPs)"
+            "(default: None, use same as hidden_dim_grid)"
+        ),
+    )
+    parser.add_argument(
+        "--hidden_dim_mesh_nodes",
+        type=int,
+        help=(
+            "Dimensionality of hidden representations related to mesh nodes "
+            "(mesh encodings and in mesh-level MLPs)"
+            "(default: None, use same as hidden_dim)"
         ),
     )
     parser.add_argument(
@@ -179,14 +197,6 @@ def main(input_args=None):
         help="If the prior should be learned as a mapping from previous state "
         "and forcing, otherwise static with mean 0 (default: 1 (yes))",
     )
-    parser.add_argument(
-        "--vertical_propnets",
-        type=int,
-        default=1,
-        help="If PropagationNets should be used for all vertical message "
-        "passing (g2m, m2g, up in hierarchy), in deterministic models."
-        "(default: 1 (yes))",
-    )
 
     # EDM options
     parser.add_argument(
@@ -237,14 +247,19 @@ def main(input_args=None):
         help="If the EDM model should predict residuals instead of the "
         "next state",
     )
+    parser.add_argument(
+        "--channel_mult_noise",
+        type=int,
+        default=2,
+        help="Channel multiplier for noise MLP (default: 2)",
+    )
 
     # Graph-CRPS options
     parser.add_argument(
         "--noise_embedding",
         type=str,
-        default="fourier",
-        help="Type of encoder to use in edm model (positional/fourier)"
-        "(default: 'fourier')",
+        default="linear",
+        help="Type of encoder to use (default: 'linear')",
     )
     parser.add_argument(
         "--noise_dim",
@@ -257,6 +272,12 @@ def main(input_args=None):
         type=float,
         default=0.95,
         help="Alpha parameter for the Almost Fair CRPS (default: 0.95)",
+    )
+    parser.add_argument(
+        "--channel_mult_emb",
+        type=int,
+        default=2,
+        help="Channel multiplier for noise embedding MLP",
     )
 
     # Training options

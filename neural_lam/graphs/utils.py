@@ -683,8 +683,6 @@ def compute_voronoi_areas_spherical(cart: np.ndarray) -> np.ndarray:
 
     sv = scipy.spatial.SphericalVoronoi(cart, radius=1.0)
     areas = sv.calculate_areas()
-    # Handle any NaN or invalid values
-    areas = np.nan_to_num(areas, nan=0.0, posinf=0.0, neginf=0.0)
 
     # Zero out extreme outliers (=coastal points)
     positive = areas > 0

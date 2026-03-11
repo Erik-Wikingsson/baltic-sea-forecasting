@@ -39,7 +39,7 @@ class GraphDiff(ARModel):
         )
         print("Initializing GraphDiff")
 
-        self.channel_mult_emb = 1
+        self.channel_mult_emb = 2
         self.channel_mult_noise = 2
         self.remove_cond = True if args.model == "SI" else False
 
@@ -91,14 +91,9 @@ class GraphDiff(ARModel):
         self.g2m_edges, g2m_dim = self.g2m_features.shape
         self.m2g_edges, m2g_dim = self.m2g_features.shape
 
-        # Encode/decode dims
-        self.encode_dim = getattr(args, "encode_dim", None) or args.hidden_dim
-        self.decode_dim = getattr(args, "decode_dim", None) or args.hidden_dim
-
         # Define sub-models
+        # Feature embedders for grid
         self.mlp_blueprint_end = [args.hidden_dim] * (args.hidden_layers + 1)
-        self.mlp_blueprint_encode = [self.encode_dim] * (args.hidden_layers + 1)
-        self.mlp_blueprint_decode = [self.decode_dim] * (args.hidden_layers + 1)
 
         print(f"Using noise embedding: {args.noise_embedding}")
         self.noise_level_dim = (
@@ -121,75 +116,57 @@ class GraphDiff(ARModel):
             )
 
         self.interior_embedder = make_mlp(
-            [self.interior_input_dim] + self.mlp_blueprint_encode,
+            [self.interior_input_dim] + self.mlp_blueprint_end,
             noise_level_dim=self.noise_level_dim,
         )
         if self.boundary_forced:
             self.boundary_embedder = make_mlp(
-                [self.boundary_dim] + self.mlp_blueprint_encode,
+                [self.boundary_dim] + self.mlp_blueprint_end,
                 noise_level_dim=self.noise_level_dim,
             )
         if self.atmosphere_forced and self.use_atmosphere_g2m:
             self.atmosphere_embedder = make_mlp(
-                [self.atmosphere_dim] + self.mlp_blueprint_encode,
+                [self.atmosphere_dim] + self.mlp_blueprint_end,
                 noise_level_dim=self.noise_level_dim,
             )
         self.g2m_embedder = make_mlp(
-            [g2m_dim] + self.mlp_blueprint_encode,
+            [g2m_dim] + self.mlp_blueprint_end,
             noise_level_dim=self.noise_level_dim,
         )
         self.m2g_embedder = make_mlp(
-            [m2g_dim] + self.mlp_blueprint_decode,
+            [m2g_dim] + self.mlp_blueprint_end,
             noise_level_dim=self.noise_level_dim,
         )
-
-        if self.encode_dim != args.hidden_dim:
-            self.mesh_hidden_to_encode = nn.Linear(
-                args.hidden_dim, self.encode_dim
-            )
-            self.mesh_encode_to_hidden = nn.Linear(
-                self.encode_dim, args.hidden_dim
-            )
-        else:
-            self.mesh_hidden_to_encode = None
-            self.mesh_encode_to_hidden = None
-
-        if self.decode_dim != args.hidden_dim:
-            self.mesh_hidden_to_decode = nn.Linear(
-                args.hidden_dim, self.decode_dim
-            )
-        else:
-            self.mesh_hidden_to_decode = None
 
         # GNNs
         gnn_class = PropagationNet if args.vertical_propnets else InteractionNet
         # encoder
         self.g2m_gnn = gnn_class(
             self.g2m_edge_index,
-            self.encode_dim,
+            args.hidden_dim,
             hidden_layers=args.hidden_layers,
             update_edges=False,
             num_rec=self.num_grid_connected_mesh_nodes,
             noise_dim=self.noise_level_dim,
         )
         self.encoding_grid_mlp = make_mlp(
-            [self.encode_dim] + self.mlp_blueprint_decode,
+            [args.hidden_dim] + self.mlp_blueprint_end,
             noise_level_dim=self.noise_level_dim,
         )
 
         # decoder
         self.m2g_gnn = gnn_class(
             self.m2g_edge_index,
-            self.decode_dim,
+            args.hidden_dim,
             hidden_layers=args.hidden_layers,
             update_edges=False,
             num_rec=self.num_grid_nodes,
             noise_dim=self.noise_level_dim,
         )
 
-        # Output mapping (decode_dim -> output_dim)
+        # Output mapping (hidden_dim -> output_dim)
         self.output_map = make_mlp(
-            [self.decode_dim] * (args.hidden_layers + 1)
+            [args.hidden_dim] * (args.hidden_layers + 1)
             + [self.grid_output_dim],
             layer_norm=False,
         )  # No layer norm on this one
@@ -421,38 +398,31 @@ class GraphDiff(ARModel):
             grid_emb = torch.cat(grid_emb_list, dim=1)
             # (B, num_grid_nodes, d_h)
 
-        # Map from grid to mesh (g2m in encode_dim)
-        if self.mesh_hidden_to_encode is not None:
-            mesh_emb_for_g2m = self.mesh_hidden_to_encode(mesh_emb)
-        else:
-            mesh_emb_for_g2m = mesh_emb
+        # Map from grid to mesh
         mesh_emb_expanded = self.expand_to_batch(
-            mesh_emb_for_g2m, batch_size
-        )  # (B, num_mesh_nodes, encode_dim)
+            mesh_emb, batch_size
+        )  # (B, num_mesh_nodes, d_h)
         g2m_emb_expanded = self.expand_to_batch(g2m_emb, batch_size)
 
+        # This also splits representation into grid and mesh
         mesh_rep = self.g2m_gnn(
             grid_emb, mesh_emb_expanded, g2m_emb_expanded, emb
-        )  # (B, num_mesh_nodes, encode_dim)
-        if self.mesh_encode_to_hidden is not None:
-            mesh_rep = self.mesh_encode_to_hidden(mesh_rep)
-        # mesh_rep (B, num_mesh_nodes, hidden_dim)
-
+        )  # (B, num_mesh_nodes, d_h)
+        # Also MLP with residual for grid representation
         grid_rep = interior_emb + self.encoding_grid_mlp(
             interior_emb, emb
-        )  # (B, num_interior_nodes, decode_dim)
+        )  # (B, num_interior_nodes, d_h)
 
+        # Run processor step
         mesh_rep = self.process_step(mesh_rep, emb)
 
-        if self.mesh_hidden_to_decode is not None:
-            mesh_rep_for_m2g = self.mesh_hidden_to_decode(mesh_rep)
-        else:
-            mesh_rep_for_m2g = mesh_rep
+        # Map back from mesh to grid
         m2g_emb_expanded = self.expand_to_batch(m2g_emb, batch_size)
         grid_rep = self.m2g_gnn(
-            mesh_rep_for_m2g, grid_rep, m2g_emb_expanded, emb
-        )  # (B, num_grid_nodes, decode_dim)
+            mesh_rep, grid_rep, m2g_emb_expanded, emb
+        )  # (B, num_grid_nodes, d_h)
 
+        # Map to output dimension, only for grid
         net_output = self.output_map(
             grid_rep, emb
         )  # (B, num_grid_nodes, d_grid_out)

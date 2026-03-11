@@ -140,18 +140,6 @@ def main(input_args=None):
         "decoder) (default: 3)",
     )
     parser.add_argument(
-        "--encode_dim",
-        type=int,
-        default=None,
-        help="Dimension for g2m encode path (default: hidden_dim)",
-    )
-    parser.add_argument(
-        "--decode_dim",
-        type=int,
-        default=None,
-        help="Dimension for m2g decode path (default: hidden_dim)",
-    )
-    parser.add_argument(
         "--encoder_processor_layers",
         type=int,
         default=1,

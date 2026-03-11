@@ -5,7 +5,6 @@ from typing import Union
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint
 import wandb
 
 # First-party
@@ -70,19 +69,16 @@ class GraphEFM(ARProbModel):
             else:
                 setattr(self, name, attr_value)
 
-        # Determine grid hidden dim and optional encode/decode dims
+        # Determine grid hidden dim
         if args.hidden_dim_grid is None:
+            # Same as hidden_dim
             hidden_dim_grid = args.hidden_dim
         else:
             hidden_dim_grid = args.hidden_dim_grid
-        self.encode_dim = getattr(args, "encode_dim", None) or hidden_dim_grid
-        self.decode_dim = getattr(args, "decode_dim", None) or hidden_dim_grid
-        self.prior_checkpoint = getattr(args, "prior_checkpoint", False)
 
         print(
             f"Using hidden_dim_grid={hidden_dim_grid}, "
-            f"encode_dim={self.encode_dim}, "
-            f"decode_dim={self.decode_dim}, hidden_dim={args.hidden_dim}"
+            f"hidden_dim={args.hidden_dim}"
         )
 
         # interior_dim from data + static
@@ -93,11 +89,10 @@ class GraphEFM(ARProbModel):
         print(f"g2m_dim.shape: {g2m_dim}, m2g_dim.shape: {m2g_dim}")
 
         # Define sub-models
+        # Feature embedders for grid
         self.mlp_blueprint_end = [args.hidden_dim] * (args.hidden_layers + 1)
-        self.grid_mlp_blueprint_encode = [self.encode_dim] * (
-            args.hidden_layers + 1
-        )
-        self.grid_mlp_blueprint_decode = [self.decode_dim] * (
+        # For grid hidden dim
+        self.grid_mlp_blueprint_end = [hidden_dim_grid] * (
             args.hidden_layers + 1
         )
 
@@ -108,37 +103,34 @@ class GraphEFM(ARProbModel):
             f"self.atmosphere_dim={getattr(self, 'atmosphere_dim', None)}, "
         )
 
-        # Feature embedders for interior (output encode_dim for g2m path)
+        # Feature embedders for interior
         self.interior_embedder = utils.make_mlp(
-            [self.interior_input_dim] + self.grid_mlp_blueprint_encode
+            [self.interior_input_dim] + self.grid_mlp_blueprint_end
         )
 
+        # We encode the current state as well, so we need to add more channels
         self.interior_current_embedder = utils.make_mlp(
             [self.interior_input_dim + self.num_state_vars]
-            + self.grid_mlp_blueprint_encode
+            + self.grid_mlp_blueprint_end
         )
 
+        # Define embedder for boundary and atmosphere nodes
         if self.boundary_forced:
             self.boundary_embedder = utils.make_mlp(
-                [self.boundary_dim] + self.grid_mlp_blueprint_encode,
+                [self.boundary_dim] + self.grid_mlp_blueprint_end,
             )
         if self.atmosphere_forced and self.use_atmosphere_g2m:
             self.atmosphere_embedder = utils.make_mlp(
-                [self.atmosphere_dim] + self.grid_mlp_blueprint_encode,
+                [self.atmosphere_dim] + self.grid_mlp_blueprint_end,
             )
 
+        # Embedders for mesh
         self.g2m_embedder = utils.make_mlp(
-            [g2m_dim] + self.grid_mlp_blueprint_encode
+            [g2m_dim] + self.grid_mlp_blueprint_end
         )
         self.m2g_embedder = utils.make_mlp(
-            [m2g_dim] + self.grid_mlp_blueprint_decode
+            [m2g_dim] + self.grid_mlp_blueprint_end
         )
-
-        # For decoder: residual and original grid in decode_dim
-        self.encoding_grid_mlp = utils.make_mlp(
-            [self.encode_dim] + self.grid_mlp_blueprint_decode
-        )
-        self.encode_to_decode_proj = nn.Linear(self.encode_dim, self.decode_dim)
 
         if self.hierarchical_graph:
             # Print some useful info
@@ -169,8 +161,8 @@ class GraphEFM(ARProbModel):
 
             # Separate mesh node embedders for each level
             self.mesh_embedders = nn.ModuleList(
-                # Bottom mesh level for g2m in encode_dim
-                [utils.make_mlp([mesh_dim] + self.grid_mlp_blueprint_encode)]
+                # Bottom mesh level is first embedded to hidden dim of grid
+                [utils.make_mlp([mesh_dim] + self.grid_mlp_blueprint_end)]
                 + [
                     utils.make_mlp([mesh_dim] + self.mlp_blueprint_end)
                     for _ in range(num_levels - 1)
@@ -237,7 +229,7 @@ class GraphEFM(ARProbModel):
                     self.m2m_edge_index,
                     self.mesh_up_edge_index,
                     args.hidden_dim,
-                    self.encode_dim,
+                    hidden_dim_grid,
                     args.prior_processor_layers,
                     hidden_layers=args.hidden_layers,
                     output_dist=args.prior_dist,
@@ -258,18 +250,20 @@ class GraphEFM(ARProbModel):
 
         # Enc. + Dec.
         if self.hierarchical_graph:
+            # Encoder
             self.encoder = HiGraphLatentEncoder(
                 latent_dim,
                 self.g2m_edge_index,
                 self.m2m_edge_index,
                 self.mesh_up_edge_index,
                 args.hidden_dim,
-                self.encode_dim,
+                hidden_dim_grid,
                 args.encoder_processor_layers,
                 hidden_layers=args.hidden_layers,
                 output_dist="diagonal",
                 num_grid_con_mesh_nodes=self.num_grid_con_mesh_nodes,
             )
+            # Decoder
             self.decoder = HiGraphLatentDecoder(
                 self.g2m_edge_index,
                 self.m2m_edge_index,
@@ -277,7 +271,7 @@ class GraphEFM(ARProbModel):
                 self.mesh_up_edge_index,
                 self.mesh_down_edge_index,
                 args.hidden_dim,
-                self.decode_dim,
+                hidden_dim_grid,
                 latent_dim,
                 self._datastore.get_num_data_vars(category="state"),
                 args.processor_layers,
@@ -331,23 +325,6 @@ class GraphEFM(ARProbModel):
             # (B, num_grid_nodes, d_state)
 
         return pred_mean  # (B, num_grid_nodes, d_state)
-
-    def _prior_params_for_checkpoint(self, grid_prev_emb, graph_emb):
-        """Run prior and return (mean, scale) for gradient checkpointing."""
-        dist = self.prior_model(grid_prev_emb, graph_emb=graph_emb)
-        return (dist.loc, dist.scale)
-
-    def _get_prior_dist(self, grid_prev_emb, graph_emb):
-        """Prior distribution, optionally with gradient checkpointing."""
-        if self.prior_checkpoint:
-            prior_loc, prior_scale = torch.utils.checkpoint.checkpoint(
-                self._prior_params_for_checkpoint,
-                grid_prev_emb,
-                graph_emb,
-                use_reentrant=False,
-            )
-            return torch.distributions.Normal(prior_loc, prior_scale)
-        return self.prior_model(grid_prev_emb, graph_emb=graph_emb)
 
     def _add_optional_grid_embeddings(
         self,
@@ -614,8 +591,10 @@ class GraphEFM(ARProbModel):
             graph_emb,
         )
         if self.kl_beta > 0:
-            # Compute prior (checkpointed to save memory)
-            prior_dist = self._get_prior_dist(grid_prev_emb, graph_emb)
+            # Compute prior
+            prior_dist = self.prior_model(
+                grid_prev_emb, graph_emb=graph_emb
+            )  # Gaussian, (B, num_mesh_nodes, d_latent)
 
             # Compute KL
             kl_term = torch.sum(
@@ -659,8 +638,8 @@ class GraphEFM(ARProbModel):
 
         # Compute reconstruction (decoder)
         pred_mean, model_pred_std = self.decoder(
-            self.encode_to_decode_proj(grid_prev_emb),
-            self.encoding_grid_mlp(interior_grid_prev_emb),
+            grid_prev_emb,
+            interior_grid_prev_emb,
             latent_samples,
             last_state,
             graph_emb,
@@ -837,8 +816,10 @@ class GraphEFM(ARProbModel):
             atmosphere_forcing,
         )
 
-        # Compute prior (checkpointed when prior_checkpoint=True)
-        prior_dist = self._get_prior_dist(grid_prev_emb, graph_emb)
+        # Compute prior
+        prior_dist = self.prior_model(
+            grid_prev_emb, graph_emb=graph_emb
+        )  # (B, num_mesh_nodes, d_latent)
 
         # Sample from prior
         latent_samples = prior_dist.rsample()
@@ -846,8 +827,8 @@ class GraphEFM(ARProbModel):
 
         # Compute reconstruction (decoder)
         pred_mean, pred_std = self.decoder(
-            self.encode_to_decode_proj(grid_prev_emb),
-            self.encoding_grid_mlp(grid_prev_interior_emb),
+            grid_prev_emb,
+            grid_prev_interior_emb,
             latent_samples,
             prev_state,
             graph_emb,
@@ -985,8 +966,8 @@ class GraphEFM(ARProbModel):
 
             # Compute reconstruction (decoder)
             pred_mean, pred_std = self.decoder(
-                self.encode_to_decode_proj(grid_prev_emb),
-                self.encoding_grid_mlp(grid_prev_interior_emb),
+                grid_prev_emb,
+                grid_prev_interior_emb,
                 latent_samples,
                 prev_state,
                 graph_emb,
@@ -1172,7 +1153,9 @@ class GraphEFM(ARProbModel):
             )  # (B, num_grid_nodes, d_h)
 
             # Create latent variable samples
-            prior_dist = self._get_prior_dist(grid_prev_emb, graph_emb)
+            prior_dist = self.prior_model(
+                grid_prev_emb, graph_emb=graph_emb
+            )  # Gaussian, (B, num_mesh_nodes, d_latent)
             prior_samples = prior_dist.rsample(
                 (self.num_latents_plot,)
             ).transpose(

@@ -8,6 +8,7 @@ import networkx
 import numpy as np
 import scipy.spatial
 import torch
+from torch_geometric.data import Data
 from torch_geometric.utils import degree
 from torch_geometric.utils.convert import from_networkx
 
@@ -213,6 +214,21 @@ def create_graph(
         mesh_features_with_area,
         os.path.join(graph_dir_path, "mesh_features.pt"),
     )  # mesh features: (x, y, voronoi_area) in float32
+
+    # Plot Voronoi areas
+    if create_plot:
+        for level_i, g in enumerate(save_graphs["m2m"]):
+            pos_t = mesh_pos[level_i]
+            areas = mesh_features_with_area[level_i][:, 2].cpu().numpy()
+            plot_g = Data(pos=pos_t, edge_index=g.edge_index)
+            vis.plot_node_values(
+                plot_g,
+                f"Mesh Voronoi areas, level {level_i}",
+                graph_dir_path,
+                node_values=areas,
+                value_name="Voronoi area (m²)",
+            )
+            plt.show()
 
     #
     # Grid2Mesh

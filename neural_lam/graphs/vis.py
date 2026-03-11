@@ -81,6 +81,56 @@ def plot_graph(
     plt.close(fig)
 
 
+def plot_node_values(
+    graph,
+    title=None,
+    graph_dir_path=None,
+    node_values=None,
+    value_name="Voronoi area",
+):
+    fig, axis = plt.subplots(figsize=(8, 8), dpi=200)
+    edge_index = graph.edge_index
+    pos = graph.pos
+
+    if edge_index.numel() > 0:
+        edge_index = edge_index - edge_index.min()
+    if pyg.utils.is_undirected(edge_index):
+        edge_index = edge_index[:, edge_index[0] < edge_index[1]]
+
+    edge_index = edge_index.cpu().numpy()
+    pos = pos.cpu().numpy()
+
+    values = np.ravel(
+        node_values.cpu().numpy()
+        if hasattr(node_values, "cpu")
+        else np.asarray(node_values)
+    )
+
+    edge_lines = np.stack((pos[edge_index[0]], pos[edge_index[1]]), axis=1)
+    axis.add_collection(
+        matplotlib.collections.LineCollection(
+            edge_lines, lw=0.3, colors="black", zorder=1, rasterized=True
+        )
+    )
+
+    s = axis.scatter(
+        pos[:, 0],
+        pos[:, 1],
+        c=values,
+        s=2,
+        cmap="viridis",
+        zorder=2,
+        rasterized=True,
+    )
+    cbar = plt.colorbar(s, aspect=50)
+    cbar.set_label(value_name)
+    if title is not None:
+        axis.set_title(title)
+    if graph_dir_path is not None:
+        plt.savefig(os.path.join(graph_dir_path, f"{title}.png"))
+    plt.close(fig)
+
+
 def make_earth(radius, resolution_reduction=1.0):
     """
     Plotly earth from

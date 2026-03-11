@@ -596,6 +596,14 @@ def create_global_graph(
                     f"Mesh graph, level {level_i}",
                     graph_dir_path,
                 )
+                voronoi_areas = mesh_features_list[level_i][:, 4].cpu().numpy()
+                vis.plot_node_values(
+                    level_graph,
+                    f"Mesh Voronoi areas, level {level_i}",
+                    graph_dir_path,
+                    node_values=voronoi_areas,
+                    value_name="Voronoi area (steradians)",
+                )
             # Plot inter-level edges if present
             # (convert 3D pos to lon/lat for 2D plot)
             mesh_up_graphs_plot = save_graphs_cluster.get("mesh_up", [])
@@ -633,6 +641,14 @@ def create_global_graph(
                     level_graph,
                     f"Mesh graph, level {level_i}",
                     graph_dir_path,
+                )
+                voronoi_areas = mesh_features_list[level_i][:, 4].cpu().numpy()
+                vis.plot_node_values(
+                    level_graph,
+                    f"Mesh Voronoi areas, level {level_i}",
+                    graph_dir_path,
+                    node_values=voronoi_areas,
+                    value_name="Voronoi area (steradians)",
                 )
             # Plot inter-level edges (fine level_i -> coarse level_i+1)
             for level_i in range(len(mesh_levels) - 1):
@@ -679,6 +695,14 @@ def create_global_graph(
                 mesh_level_graph,
                 "Mesh graph, level 0",
                 graph_dir_path,
+            )
+            voronoi_areas = mesh_features_list[0][:, 4].cpu().numpy()
+            vis.plot_node_values(
+                mesh_level_graph,
+                "Mesh Voronoi areas, level 0",
+                graph_dir_path,
+                node_values=voronoi_areas,
+                value_name="Voronoi area (steradians)",
             )
 
         # G2M: build pyg with pos (lon, lat), compute disconnected

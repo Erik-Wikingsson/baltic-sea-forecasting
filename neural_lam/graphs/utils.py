@@ -641,7 +641,6 @@ def compute_voronoi_areas_2d(xy: np.ndarray) -> np.ndarray:
         if -1 in region or len(region) == 0:
             areas[point_idx] = 0.0
         else:
-            # Compute area of finite Voronoi region
             vertices = voronoi.vertices[region]
             if len(vertices) >= 3:
                 # Use shoelace formula for polygon area
@@ -653,6 +652,14 @@ def compute_voronoi_areas_2d(xy: np.ndarray) -> np.ndarray:
                 areas[point_idx] = abs(area) / 2.0
             else:
                 areas[point_idx] = 0.0
+
+    # Zero out extreme outliers (=coastal points)
+    positive = areas > 0
+    med = np.median(areas[positive])
+    mad = np.median(np.abs(areas[positive] - med))
+    if mad > 0:
+        threshold = med + 10.0 * mad
+        areas[areas > threshold] = 0.0
 
     return areas.astype(np.float32)
 
@@ -668,7 +675,7 @@ def compute_voronoi_areas_spherical(cart: np.ndarray) -> np.ndarray:
     Returns
     -------
     np.ndarray
-        (N,) array of Voronoi cell areas on the unit sphere (in steradians).
+        (N,) array of Voronoi cell areas on the unit sphere.
     """
     # Normalize to unit sphere
     r = np.linalg.norm(cart, axis=1, keepdims=True)
@@ -678,6 +685,14 @@ def compute_voronoi_areas_spherical(cart: np.ndarray) -> np.ndarray:
     areas = sv.calculate_areas()
     # Handle any NaN or invalid values
     areas = np.nan_to_num(areas, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Zero out extreme outliers (=coastal points)
+    positive = areas > 0
+    med = np.median(areas[positive])
+    mad = np.median(np.abs(areas[positive] - med))
+    if mad > 0:
+        threshold = med + 10.0 * mad
+        areas[areas > threshold] = 0.0
 
     return areas.astype(np.float32)
 

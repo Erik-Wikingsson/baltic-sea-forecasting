@@ -40,6 +40,7 @@ def create_graph(
     g2m_mean_degree: int = 0,
     connect_disconnected: bool = False,
     use_atmosphere_g2m: bool = True,
+    max_edge_len: float = 20000,
 ):
     """
     Create graph components from `xy` grid coordinates and store in
@@ -173,6 +174,7 @@ def create_graph(
                 grid_to_first_mesh_refinement=grid_to_first_mesh_refinement,
                 mesh_refinement_factor=mesh_refinement_factor,
                 mesh_plot_function=mesh_plot_func,
+                max_edge_len=max_edge_len,
             )
         )
     else:
@@ -477,7 +479,9 @@ def create_graph(
     pyg_m2g = from_networkx(G_m2g)
 
     # Remove m2g edges over land (edges_only: no node filter, no reindex)
-    gutils.filter_edges_land(pyg_m2g, xy, xy_land, edges_only=True)
+    gutils.filter_edges_land(
+        pyg_m2g, xy, xy_land, max_edge_len=max_edge_len, edges_only=True
+    )
 
     # Check for disconnected nodes in m2g
     m2g_node_list = list(G_m2g.nodes)
@@ -703,6 +707,12 @@ def cli(input_args=None):
         help="Connect remaining disconnected nodes using nearest neighbor.",
     )
     parser.add_argument(
+        "--max_edge_len",
+        type=float,
+        default=20000,
+        help="Max edge length in meters for land filtering.",
+    )
+    parser.add_argument(
         "--use_atmosphere_g2m",
         action="store_true",
         help="Atmosphere as separate grid nodes in g2m encoding (experimental)",
@@ -736,6 +746,7 @@ def cli(input_args=None):
         m2g_k=args.m2g_k,
         g2m_mean_degree=args.g2m_mean_degree,
         connect_disconnected=args.connect_disconnected,
+        max_edge_len=args.max_edge_len,
         use_atmosphere_g2m=args.use_atmosphere_g2m,
     )
 

@@ -156,7 +156,7 @@ def create_global_graph(
     connect_disconnected: bool = False,
     sea_xy: Optional[np.ndarray] = None,
     land_xy: Optional[np.ndarray] = None,
-    max_edge_len_deg: float = 2.0,
+    max_chord_len: float = 0.1,
     mesh_refinement_factor: float = 9,
     grid_to_first_mesh_refinement: float = 9,
 ):
@@ -181,7 +181,7 @@ def create_global_graph(
                 mesh_refinement_factor=mesh_refinement_factor,
                 grid_to_first_mesh_refinement=grid_to_first_mesh_refinement,
                 limit_mesh_levels=levels,
-                base_max_edge_len_deg=max_edge_len_deg,
+                max_chord_len=max_chord_len,
             )
         )
         mesh_cart = bottom_mesh.pos.numpy()
@@ -338,7 +338,12 @@ def create_global_graph(
         pos_m2g_3d = np.concatenate([mesh_cart, grid_cart], axis=0)
         ei_np = m2g_edge_index_t.numpy()
         _, ei_filtered = gutils.filter_global_edges_land(
-            pos_m2g_3d, ei_np, sea_xy, land_xy, edges_only=True
+            pos_m2g_3d,
+            ei_np,
+            sea_xy,
+            land_xy,
+            max_chord_len=max_chord_len,
+            edges_only=True,
         )
         pyg_m2g = pyg.data.Data(
             pos=torch.from_numpy(pos_m2g_3d.astype(np.float32)).float(),
@@ -863,10 +868,11 @@ def cli(input_args=None):
         help="Connect disconnected grid/mesh nodes via nearest neighbor.",
     )
     parser.add_argument(
-        "--max_edge_len_deg",
+        "--max_chord_len",
         type=float,
-        default=2.0,
-        help="Max m2g edge length in degrees for land filtering.",
+        default=0.1,
+        help="Max edge chord length on unit sphere for land filtering (~0.1 "
+        "corresponds to ~5.7° great-circle arc).",
     )
     parser.add_argument(
         "--mesh_refinement_factor",
@@ -905,7 +911,7 @@ def cli(input_args=None):
         connect_disconnected=args.connect_disconnected,
         sea_xy=sea_xy,
         land_xy=land_xy,
-        max_edge_len_deg=args.max_edge_len_deg,
+        max_chord_len=args.max_chord_len,
         mesh_refinement_factor=args.mesh_refinement_factor,
         grid_to_first_mesh_refinement=args.grid_to_first_mesh_refinement,
     )

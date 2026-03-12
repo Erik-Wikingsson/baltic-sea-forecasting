@@ -11,9 +11,6 @@ import torch_geometric as pyg
 from . import utils as gutils
 from .spherical_kmeans import SphericalKMeans
 
-# Max m2m edge length for land filtering in degrees
-BASE_MAX_EDGE_LEN_DEG = 2.0
-
 
 def _cart_to_lon_lat_matching_utils(cart: np.ndarray) -> np.ndarray:
     """Convert 3D Cartesian to (lon, lat) in degrees."""
@@ -119,7 +116,7 @@ def build_cluster_mesh_graph_global(
     limit_mesh_levels: Optional[int] = None,
     mesh_plot_function=None,
     random_state: int = 42,
-    base_max_edge_len_deg: float = BASE_MAX_EDGE_LEN_DEG,
+    max_chord_len: float = 0.1,
 ):
     """Build hierarchical cluster mesh over the globe (sea points only).
 
@@ -136,8 +133,8 @@ def build_cluster_mesh_graph_global(
     limit_mesh_levels : max number of levels (default: from formula)
     mesh_plot_function : optional callback(level_graph, title)
     random_state : for KMeans
-    base_max_edge_len_deg : max edge length in degrees for land filter (scale
-        per level)
+    max_chord_len : max edge chord length on unit sphere for land filter (~0.1
+        corresponds to ~5.7° great-circle arc)
 
     Returns
     -------
@@ -199,8 +196,16 @@ def build_cluster_mesh_graph_global(
         level_graph = build_graph_from_mesh_pos_sphere_delaunay(level_lon_lat)
         mesh_cart = gutils.node_lon_lat_to_cart(level_graph.pos.numpy())
         edge_index_np = level_graph.edge_index.numpy()
+        # Scale max chord length by level
+        max_chord_len_level = max_chord_len * (
+            mesh_refinement_factor ** (0.5 * level_i)
+        )
         mesh_cart_f, edge_index_f = gutils.filter_global_edges_land(
-            mesh_cart, edge_index_np, sea_xy, land_xy
+            mesh_cart,
+            edge_index_np,
+            sea_xy,
+            land_xy,
+            max_chord_len=max_chord_len_level,
         )
         level_graph.pos = torch.from_numpy(mesh_cart_f.astype(np.float32))
         level_graph.edge_index = torch.from_numpy(edge_index_f.astype(np.int64))

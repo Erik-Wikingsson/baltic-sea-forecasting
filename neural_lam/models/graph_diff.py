@@ -168,11 +168,11 @@ class GraphDiff(ARModel):
         )
 
         self.pre_mesh_proj = make_mlp(
-            [hidden_dim_grid] + self.mlp_blueprint_end,
+            [hidden_dim_grid] + [args.hidden_dim],
             noise_level_dim=self.noise_level_dim,
         )
         self.post_mesh_proj = make_mlp(
-            [args.hidden_dim] + self.grid_mlp_blueprint_end,
+            [args.hidden_dim] + [args.hidden_dim_grid],
             noise_level_dim=self.noise_level_dim,
         )
 

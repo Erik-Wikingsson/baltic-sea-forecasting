@@ -103,10 +103,10 @@ class BaseGraphModel(ARModel):
             )
 
         self.pre_mesh_proj = utils.make_mlp(
-            [hidden_dim_grid] + self.mlp_blueprint_end
+            [hidden_dim_grid] + [args.hidden_dim]
         )
         self.post_mesh_proj = utils.make_mlp(
-            [args.hidden_dim] + self.grid_mlp_blueprint_end
+            [args.hidden_dim] + [args.hidden_dim_grid]
         )
 
         self.g2m_embedder = utils.make_mlp(

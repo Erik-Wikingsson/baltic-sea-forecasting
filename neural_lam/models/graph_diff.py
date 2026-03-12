@@ -176,7 +176,7 @@ class GraphDiff(ARModel):
             noise_level_dim=self.noise_level_dim,
         )
 
-        self.g2m_gnn = FlexiblePropagationNet(
+        self.g2m_gnn = FlexibleNet(
             edge_index=self.g2m_edge_index,
             send_node_dim=hidden_dim_grid,
             rec_node_dim=hidden_dim_mesh_nodes,
@@ -184,6 +184,7 @@ class GraphDiff(ARModel):
             hidden_layers=args.hidden_layers,
             num_rec=self.num_grid_connected_mesh_nodes,
             noise_dim=self.noise_level_dim,
+            propagation=True,
         )
         self.encoding_grid_mlp = make_mlp(
             [hidden_dim_grid] + self.grid_mlp_blueprint_end,
@@ -191,7 +192,7 @@ class GraphDiff(ARModel):
         )
 
         # decoder
-        self.m2g_gnn = FlexiblePropagationNet(
+        self.m2g_gnn = FlexibleNet(
             edge_index=self.m2g_edge_index,
             send_node_dim=hidden_dim_grid,
             rec_node_dim=hidden_dim_grid,
@@ -199,6 +200,7 @@ class GraphDiff(ARModel):
             hidden_layers=args.hidden_layers,
             num_rec=self.num_grid_nodes,
             noise_dim=self.noise_level_dim,
+            propagation=False,
         )
 
         # Output mapping (hidden_dim_grid -> output_dim)
@@ -1162,10 +1164,10 @@ class PropagationNet(InteractionNet):
         )
 
 
-class FlexiblePropagationNet(pyg.nn.MessagePassing):
+class FlexibleNet(pyg.nn.MessagePassing):
     """
-    More flexible version of propagationnet, allows for separate receiver and
-    sender node rep dimensions.
+    Flexible version of Interaction/Propagation Networks, allows for
+    separate sender, receiver and edge dimensions.
     """
 
     def __init__(
@@ -1177,11 +1179,14 @@ class FlexiblePropagationNet(pyg.nn.MessagePassing):
         hidden_layers=1,
         num_rec=None,
         noise_dim=None,
+        propagation=True,
     ):
         super().__init__(aggr="mean")
+        self.propagation = propagation
 
-        # The output dimensionality has to be the same as for the sender nodes
-        hidden_dim = send_node_dim
+        # The output dimensionality has to be the same as receiver
+        # or sender nodes, depending on formulation
+        hidden_dim = send_node_dim if propagation else rec_node_dim
 
         # Store number of receiver nodes according to edge_index
         if num_rec is None:
@@ -1227,7 +1232,12 @@ class FlexiblePropagationNet(pyg.nn.MessagePassing):
         )
 
         # Residual connections
-        rec_rep = edge_rep_aggr + rec_diff  # residual is to aggregation
+        if self.propagation:
+            rec_rep = edge_rep_aggr + rec_diff  # residual is to aggregation
+        else:
+            rec_rep = (
+                rec_rep + rec_diff
+            )  # residual is to previous rec representation
 
         return rec_rep
 
@@ -1237,10 +1247,15 @@ class FlexiblePropagationNet(pyg.nn.MessagePassing):
         send_rep_j contains sender representations for each edge
         rec_rep_i contains receiver representations for each edge
         """
-        # Residual connection is to sender node, propagating information to edge
-        return send_rep_j + self.edge_mlp(
+        mlp_output = self.edge_mlp(
             torch.cat((edge_attr, send_rep_j, rec_rep_i), dim=-1), emb
         )
+        if self.propagation:
+            # Residual connection is to sender node,
+            # propagating information to edge
+            return send_rep_j + mlp_output
+        else:
+            return mlp_output
 
 
 class SplitMLPs(nn.Module):

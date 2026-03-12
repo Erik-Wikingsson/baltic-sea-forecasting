@@ -210,10 +210,10 @@ class PropagationNet(InteractionNet):
         return x_j + self.edge_mlp(torch.cat((edge_attr, x_j, x_i), dim=-1))
 
 
-class FlexiblePropagationNet(pyg.nn.MessagePassing):
+class FlexibleNet(pyg.nn.MessagePassing):
     """
-    More flexible version of propagationnet, allows for separate receiver and
-    sender node rep dimensions.
+    Flexible version of Interaction/Propagation Networks, allows for
+    separate sender, receiver and edge dimensions.
     """
 
     def __init__(
@@ -224,11 +224,14 @@ class FlexiblePropagationNet(pyg.nn.MessagePassing):
         edge_dim,
         hidden_layers=1,
         num_rec=None,
+        propagation=True,
     ):
         super().__init__(aggr="mean")
+        self.propagation = propagation
 
-        # The output dimensionality has to be the same as for the sender nodes
-        hidden_dim = send_node_dim
+        # The output dimensionality has to be the same as receiver
+        # or sender nodes, depending on formulation
+        hidden_dim = send_node_dim if propagation else rec_node_dim
 
         # Store number of receiver nodes according to edge_index
         if num_rec is None:
@@ -251,7 +254,7 @@ class FlexiblePropagationNet(pyg.nn.MessagePassing):
         self.edge_mlp = utils.make_mlp(edge_mlp_recipe)
         self.aggr_mlp = utils.make_mlp(aggr_mlp_recipe)
 
-    def forward(self, send_rep, rec_rep, edge_rep, emb=None):
+    def forward(self, send_rep, rec_rep, edge_rep):
         """
         Apply propagation network to update the representations of receiver
         nodes, and optionally the edge representations.
@@ -267,25 +270,34 @@ class FlexiblePropagationNet(pyg.nn.MessagePassing):
             rec_rep=rec_rep,
             edge_attr=edge_rep,
             dim_size=self.num_rec,
-            emb=emb,
         )
         rec_diff = self.aggr_mlp(torch.cat((rec_rep, edge_rep_aggr), dim=-1))
 
         # Residual connections
-        rec_rep = edge_rep_aggr + rec_diff  # residual is to aggregation
+        if self.propagation:
+            rec_rep = edge_rep_aggr + rec_diff  # residual is to aggregation
+        else:
+            rec_rep = (
+                rec_rep + rec_diff
+            )  # residual is to previous rec representation
 
         return rec_rep
 
-    def message(self, send_rep_j, rec_rep_i, edge_attr, emb=None):
+    def message(self, send_rep_j, rec_rep_i, edge_attr):
         """
         Compute messages from node j to node i.
         send_rep_j contains sender representations for each edge
         rec_rep_i contains receiver representations for each edge
         """
-        # Residual connection is to sender node, propagating information to edge
-        return send_rep_j + self.edge_mlp(
+        mlp_output = self.edge_mlp(
             torch.cat((edge_attr, send_rep_j, rec_rep_i), dim=-1)
         )
+        if self.propagation:
+            # Residual connection is to sender node,
+            # propagating information to edge
+            return send_rep_j + mlp_output
+        else:
+            return mlp_output
 
 
 class SplitMLPs(nn.Module):

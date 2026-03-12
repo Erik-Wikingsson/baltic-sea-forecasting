@@ -8,7 +8,7 @@ import torch
 from .. import utils
 from ..config import NeuralLAMConfig
 from ..datastore import BaseDatastore
-from ..interaction_net import FlexiblePropagationNet
+from ..interaction_net import FlexibleNet
 from .ar_model import ARModel
 
 
@@ -118,26 +118,28 @@ class BaseGraphModel(ARModel):
 
         # GNNs
         # encoder
-        self.g2m_gnn = FlexiblePropagationNet(
+        self.g2m_gnn = FlexibleNet(
             edge_index=self.g2m_edge_index,
             send_node_dim=hidden_dim_grid,
             rec_node_dim=self.hidden_dim_mesh_nodes,
             edge_dim=hidden_dim_edge,
             hidden_layers=args.hidden_layers,
             num_rec=self.num_grid_connected_mesh_nodes,
+            propagation=True,
         )
         self.encoding_grid_mlp = utils.make_mlp(
             [hidden_dim_grid] + self.grid_mlp_blueprint_end
         )
 
         # decoder
-        self.m2g_gnn = FlexiblePropagationNet(
+        self.m2g_gnn = FlexibleNet(
             edge_index=self.m2g_edge_index,
             send_node_dim=hidden_dim_grid,
             rec_node_dim=hidden_dim_grid,
             edge_dim=hidden_dim_edge,
             hidden_layers=args.hidden_layers,
             num_rec=self.num_grid_nodes,
+            propagation=False,
         )
 
         # Output mapping (hidden_dim_grid -> output_dim)

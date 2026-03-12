@@ -225,8 +225,9 @@ class FlexibleNet(pyg.nn.MessagePassing):
         hidden_layers=1,
         num_rec=None,
         propagation=True,
+        aggr="mean",
     ):
-        super().__init__(aggr="mean")
+        super().__init__(aggr=aggr)
         self.propagation = propagation
 
         # The output dimensionality has to be the same as receiver

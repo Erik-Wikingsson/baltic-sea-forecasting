@@ -54,6 +54,7 @@ class HiGraphLatentDecoder(BaseGraphLatentDecoder):
             hidden_layers=hidden_layers,
             num_rec=num_grid_con_mesh_nodes,
             propagation=True,
+            aggr="mean",
         )
         # GNN from mesh to grid
         self.m2g_gnn = FlexibleNet(
@@ -64,6 +65,7 @@ class HiGraphLatentDecoder(BaseGraphLatentDecoder):
             hidden_layers=hidden_layers,
             num_rec=num_interior_nodes,
             propagation=False,
+            aggr="sum",
         )
 
         # GNNs going up through mesh levels

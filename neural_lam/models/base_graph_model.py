@@ -126,6 +126,7 @@ class BaseGraphModel(ARModel):
             hidden_layers=args.hidden_layers,
             num_rec=self.num_grid_connected_mesh_nodes,
             propagation=True,
+            aggr="mean",
         )
         self.encoding_grid_mlp = utils.make_mlp(
             [hidden_dim_grid] + self.grid_mlp_blueprint_end
@@ -140,6 +141,7 @@ class BaseGraphModel(ARModel):
             hidden_layers=args.hidden_layers,
             num_rec=self.num_grid_nodes,
             propagation=False,
+            aggr="sum",
         )
 
         # Output mapping (hidden_dim_grid -> output_dim)

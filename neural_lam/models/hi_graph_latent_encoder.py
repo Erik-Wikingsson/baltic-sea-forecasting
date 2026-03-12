@@ -47,6 +47,7 @@ class HiGraphLatentEncoder(BaseLatentEncoder):
             hidden_layers=hidden_layers,
             num_rec=num_grid_con_mesh_nodes,
             propagation=True,
+            aggr="mean",
         )
 
         # GNNs going up through mesh levels

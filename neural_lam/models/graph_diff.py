@@ -185,6 +185,7 @@ class GraphDiff(ARModel):
             num_rec=self.num_grid_connected_mesh_nodes,
             noise_dim=self.noise_level_dim,
             propagation=True,
+            aggr="mean",
         )
         self.encoding_grid_mlp = make_mlp(
             [hidden_dim_grid] + self.grid_mlp_blueprint_end,
@@ -201,6 +202,7 @@ class GraphDiff(ARModel):
             num_rec=self.num_grid_nodes,
             noise_dim=self.noise_level_dim,
             propagation=False,
+            aggr="sum",
         )
 
         # Output mapping (hidden_dim_grid -> output_dim)
@@ -1180,8 +1182,9 @@ class FlexibleNet(pyg.nn.MessagePassing):
         num_rec=None,
         noise_dim=None,
         propagation=True,
+        aggr="mean",
     ):
-        super().__init__(aggr="mean")
+        super().__init__(aggr=aggr)
         self.propagation = propagation
 
         # The output dimensionality has to be the same as receiver

@@ -319,6 +319,7 @@ def _plot_auxiliary_graph(graph_dir_path: str, grid_xy: np.ndarray):
     if not isinstance(m2m_edge_index_list, list):
         m2m_edge_index_list = [m2m_edge_index_list]
 
+    m2m_graphs = []
     # Mesh level(s)
     for level_i, ei_pt in enumerate(m2m_edge_index_list):
         ei = _reindex_edge_index(ei_pt)
@@ -330,6 +331,7 @@ def _plot_auxiliary_graph(graph_dir_path: str, grid_xy: np.ndarray):
             pos=torch.from_numpy(lvl_xy).float(),
             edge_index=torch.from_numpy(ei),
         )
+        m2m_graphs.append(level_graph)
         vis.plot_graph(
             level_graph,
             f"Mesh graph, level {level_i}",
@@ -398,13 +400,39 @@ def _plot_auxiliary_graph(graph_dir_path: str, grid_xy: np.ndarray):
         except FileNotFoundError:
             pass
 
-    # G2M
-    print("  G2M (grid-to-mesh)")
+    # Build save_graphs and print statistics
+    mesh_up_list = []
+    mesh_down_list = []
+    for prefix in ["mesh_up", "mesh_down"]:
+        try:
+            ei_list = load_pt(f"{prefix}_edge_index.pt")
+            if not isinstance(ei_list, list):
+                ei_list = [ei_list]
+            for e in ei_list:
+                g = pyg.data.Data(edge_index=e.clone())
+                (
+                    mesh_up_list if prefix == "mesh_up" else mesh_down_list
+                ).append(g)
+        except FileNotFoundError:
+            pass
+    save_graphs = {
+        "m2m": m2m_graphs,
+        "mesh_up": mesh_up_list,
+        "mesh_down": mesh_down_list,
+    }
     g2m_edge_index = load_pt("g2m_edge_index.pt")
+    m2g_edge_index = load_pt("m2g_edge_index.pt")
     pyg_g2m = pyg.data.Data(
         pos=torch.from_numpy(pos_combined).float(),
         edge_index=g2m_edge_index.clone(),
     )
+    pyg_m2g = pyg.data.Data(
+        pos=torch.from_numpy(pos_combined).float(),
+        edge_index=m2g_edge_index.clone(),
+    )
+    gutils.print_graph_stats(save_graphs, pyg_g2m, pyg_m2g)
+
+    # G2M
     grid_mask_t = torch.as_tensor(is_any_grid, device=pyg_g2m.pos.device)
     mesh_mask_t = torch.as_tensor(is_mesh, device=pyg_g2m.pos.device)
     g2m_src = pyg_g2m.edge_index[0]
@@ -430,12 +458,6 @@ def _plot_auxiliary_graph(graph_dir_path: str, grid_xy: np.ndarray):
     vis.plot_graph(pyg_g2m_r, "Grid-to-mesh-r", graph_dir_path)
 
     # M2G
-    print("  M2G (mesh-to-grid)")
-    m2g_edge_index = load_pt("m2g_edge_index.pt")
-    pyg_m2g = pyg.data.Data(
-        pos=torch.from_numpy(pos_combined).float(),
-        edge_index=m2g_edge_index.clone(),
-    )
     m2g_dst = pyg_m2g.edge_index[1]
     m2g_indeg = degree(m2g_dst, num_nodes=pyg_m2g.num_nodes)
     m2g_disc_grid_np = (

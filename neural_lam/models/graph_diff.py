@@ -213,130 +213,178 @@ class GraphDiff(ARModel):
         )  # No layer norm on this one
 
         # ---------------------------------------------------------------------
-        # BaseHIGraphModel parameters# Track number of nodes, edges on each lvl
-        # Flatten lists for efficient embedding
-        self.num_levels = len(self.mesh_static_features)
+        # Mesh processor setup: hierarchical and single-level graphs use
+        # different processing paths.
+        if self.hierarchical:
+            self.num_levels = len(self.mesh_static_features)
 
-        # Number of mesh nodes at each level
-        self.level_mesh_sizes = [
-            mesh_feat.shape[0] for mesh_feat in self.mesh_static_features
-        ]  # Needs as python list for later
+            # Number of mesh nodes at each level
+            self.level_mesh_sizes = [
+                mesh_feat.shape[0] for mesh_feat in self.mesh_static_features
+            ]  # Needs as list for later
 
-        # Print some useful info
-        utils.rank_zero_print("Loaded hierarchical graph with structure:")
-        for level_index, level_mesh_size in enumerate(self.level_mesh_sizes):
-            same_level_edges = self.m2m_features[level_index].shape[0]
-            utils.rank_zero_print(
-                f"level {level_index} - {level_mesh_size} nodes, "
-                f"{same_level_edges} same-level edges"
+            # Print some useful info
+            utils.rank_zero_print("Loaded hierarchical graph with structure:")
+            for level_index, level_mesh_size in enumerate(
+                self.level_mesh_sizes
+            ):
+                same_level_edges = self.m2m_features[level_index].shape[0]
+                utils.rank_zero_print(
+                    f"level {level_index} - {level_mesh_size} nodes, "
+                    f"{same_level_edges} same-level edges"
+                )
+
+                if level_index < (self.num_levels - 1):
+                    up_edges = self.mesh_up_features[level_index].shape[0]
+                    down_edges = self.mesh_down_features[level_index].shape[0]
+                    utils.rank_zero_print(
+                        f"  {level_index}<->{level_index + 1}"
+                    )
+                    utils.rank_zero_print(
+                        f" - {up_edges} up edges, {down_edges} down edges"
+                    )
+
+            # Embedders
+            # Assume all levels have same static feature dimensionality
+            mesh_dim = self.mesh_static_features[0].shape[1]
+            mesh_same_dim = self.m2m_features[0].shape[1]
+            mesh_up_dim = self.mesh_up_features[0].shape[1]
+            mesh_down_dim = self.mesh_down_features[0].shape[1]
+
+            # Separate mesh node embedders for each level
+            mesh_embedder_blueprint_0 = [hidden_dim_mesh_nodes] * (
+                args.hidden_layers + 1
+            )
+            self.mesh_embedders = nn.ModuleList(
+                [
+                    make_mlp(
+                        [mesh_dim] + mesh_embedder_blueprint_0,
+                        noise_level_dim=self.noise_level_dim,
+                    )
+                ]
+                + [
+                    make_mlp(
+                        [mesh_dim] + self.mlp_blueprint_end,
+                        noise_level_dim=self.noise_level_dim,
+                    )
+                    for _ in range(self.num_levels - 1)
+                ]
+            )
+            self.mesh_same_embedders = nn.ModuleList(
+                [
+                    make_mlp(
+                        [mesh_same_dim] + self.mlp_blueprint_end,
+                        noise_level_dim=self.noise_level_dim,
+                    )
+                    for _ in range(self.num_levels)
+                ]
+            )
+            self.mesh_up_embedders = nn.ModuleList(
+                [
+                    make_mlp(
+                        [mesh_up_dim] + self.mlp_blueprint_end,
+                        noise_level_dim=self.noise_level_dim,
+                    )
+                    for _ in range(self.num_levels - 1)
+                ]
+            )
+            self.mesh_down_embedders = nn.ModuleList(
+                [
+                    make_mlp(
+                        [mesh_down_dim] + self.mlp_blueprint_end,
+                        noise_level_dim=self.noise_level_dim,
+                    )
+                    for _ in range(self.num_levels - 1)
+                ]
             )
 
-            if level_index < (self.num_levels - 1):
-                up_edges = self.mesh_up_features[level_index].shape[0]
-                down_edges = self.mesh_down_features[level_index].shape[0]
-                utils.rank_zero_print(f"  {level_index}<->{level_index + 1}")
-                utils.rank_zero_print(
-                    f" - {up_edges} up edges, {down_edges} down edges"
-                )
-        # Embedders
-        # Assume all levels have same static feature dimensionality
-        mesh_dim = self.mesh_static_features[0].shape[1]
-        mesh_same_dim = self.m2m_features[0].shape[1]
-        mesh_up_dim = self.mesh_up_features[0].shape[1]
-        mesh_down_dim = self.mesh_down_features[0].shape[1]
+            # Instantiate GNNs
+            # Init GNNs
+            self.mesh_init_gnns = nn.ModuleList(
+                [
+                    InteractionNet(
+                        edge_index,
+                        args.hidden_dim,
+                        hidden_layers=args.hidden_layers,
+                        noise_dim=self.noise_level_dim,
+                    )
+                    for edge_index in self.mesh_up_edge_index
+                ]
+            )
 
-        # Separate mesh node embedders for each level
-        mesh_embedder_blueprint_0 = [hidden_dim_mesh_nodes] * (
-            args.hidden_layers + 1
-        )
-        self.mesh_embedders = nn.ModuleList(
-            [
-                make_mlp(
-                    [mesh_dim] + mesh_embedder_blueprint_0,
-                    noise_level_dim=self.noise_level_dim,
-                )
-            ]
-            + [
-                make_mlp(
-                    [mesh_dim] + self.mlp_blueprint_end,
-                    noise_level_dim=self.noise_level_dim,
-                )
-                for _ in range(self.num_levels - 1)
-            ]
-        )
-        self.mesh_same_embedders = nn.ModuleList(
-            [
-                make_mlp(
-                    [mesh_same_dim] + self.mlp_blueprint_end,
-                    noise_level_dim=self.noise_level_dim,
-                )
-                for _ in range(self.num_levels)
-            ]
-        )
-        self.mesh_up_embedders = nn.ModuleList(
-            [
-                make_mlp(
-                    [mesh_up_dim] + self.mlp_blueprint_end,
-                    noise_level_dim=self.noise_level_dim,
-                )
-                for _ in range(self.num_levels - 1)
-            ]
-        )
-        self.mesh_down_embedders = nn.ModuleList(
-            [
-                make_mlp(
-                    [mesh_down_dim] + self.mlp_blueprint_end,
-                    noise_level_dim=self.noise_level_dim,
-                )
-                for _ in range(self.num_levels - 1)
-            ]
-        )
+            # Read out GNNs
+            self.mesh_read_gnns = nn.ModuleList(
+                [
+                    InteractionNet(
+                        edge_index,
+                        args.hidden_dim,
+                        hidden_layers=args.hidden_layers,
+                        update_edges=False,
+                        noise_dim=self.noise_level_dim,
+                    )
+                    for edge_index in self.mesh_down_edge_index
+                ]
+            )
 
-        # Instantiate GNNs
-        # Init GNNs
-        self.mesh_init_gnns = nn.ModuleList(
-            [
-                InteractionNet(
-                    edge_index,
-                    args.hidden_dim,
-                    hidden_layers=args.hidden_layers,
-                    noise_dim=self.noise_level_dim,
-                )
-                for edge_index in self.mesh_up_edge_index
-            ]
-        )
+            # GraphFM-style vertical sweep processors
+            self.mesh_down_gnns = nn.ModuleList(
+                [
+                    self.make_down_gnns(args)
+                    for _ in range(args.processor_layers)
+                ]
+            )  # Nested lists (proc_steps, num_levels-1)
+            self.mesh_down_same_gnns = nn.ModuleList(
+                [
+                    self.make_same_gnns(args)
+                    for _ in range(args.processor_layers)
+                ]
+            )  # Nested lists (proc_steps, num_levels)
+            self.mesh_up_gnns = nn.ModuleList(
+                [self.make_up_gnns(args) for _ in range(args.processor_layers)]
+            )  # Nested lists (proc_steps, num_levels-1)
+            self.mesh_up_same_gnns = nn.ModuleList(
+                [
+                    self.make_same_gnns(args)
+                    for _ in range(args.processor_layers)
+                ]
+            )  # Nested lists (proc_steps, num_levels)
+        else:
+            # Single-level mesh setup (GraphCast-like processor path)
+            num_mesh = self.mesh_static_features.shape[0]
+            num_m2m_edges = self.m2m_features.shape[0]
+            utils.rank_zero_print(
+                "Loaded non-hierarchical graph with structure:"
+            )
+            utils.rank_zero_print(
+                f"  mesh nodes: {num_mesh}, same-level edges: {num_m2m_edges}"
+            )
 
-        # Read out GNNs
-        self.mesh_read_gnns = nn.ModuleList(
-            [
-                InteractionNet(
-                    edge_index,
-                    args.hidden_dim,
-                    hidden_layers=args.hidden_layers,
-                    update_edges=False,
-                    noise_dim=self.noise_level_dim,
-                )
-                for edge_index in self.mesh_down_edge_index
-            ]
-        )
+            mesh_dim = self.mesh_static_features.shape[1]
+            m2m_dim = self.m2m_features.shape[1]
+            mesh_embedder_blueprint = [hidden_dim_mesh_nodes] * (
+                args.hidden_layers + 1
+            )
 
-        # ----------------------------------------------------------------------------
-        # GraphFM specific parameters
-        # Make down GNNs, both for down edges and same level
-        self.mesh_down_gnns = nn.ModuleList(
-            [self.make_down_gnns(args) for _ in range(args.processor_layers)]
-        )  # Nested lists (proc_steps, num_levels-1)
-        self.mesh_down_same_gnns = nn.ModuleList(
-            [self.make_same_gnns(args) for _ in range(args.processor_layers)]
-        )  # Nested lists (proc_steps, num_levels)
-
-        # Make up GNNs, both for up edges and same level
-        self.mesh_up_gnns = nn.ModuleList(
-            [self.make_up_gnns(args) for _ in range(args.processor_layers)]
-        )  # Nested lists (proc_steps, num_levels-1)
-        self.mesh_up_same_gnns = nn.ModuleList(
-            [self.make_same_gnns(args) for _ in range(args.processor_layers)]
-        )  # Nested lists (proc_steps, num_levels)
+            self.mesh_embedder = make_mlp(
+                [mesh_dim] + mesh_embedder_blueprint,
+                noise_level_dim=self.noise_level_dim,
+            )
+            self.m2m_embedder = make_mlp(
+                [m2m_dim] + self.mlp_blueprint_end,
+                noise_level_dim=self.noise_level_dim,
+            )
+            self.processor_gnns = nn.ModuleList(
+                [
+                    InteractionNet(
+                        self.m2m_edge_index,
+                        args.hidden_dim,
+                        hidden_layers=args.hidden_layers,
+                        aggr=args.mesh_aggr,
+                        noise_dim=self.noise_level_dim,
+                    )
+                    for _ in range(args.processor_layers)
+                ]
+            )
 
     # ----------------------------------------------------------------------------
     @property
@@ -345,7 +393,9 @@ class GraphDiff(ARModel):
         Get the total number of mesh nodes that have a connection to
         the grid (e.g. bottom level in a hierarchy)
         """
-        return self.mesh_static_features[0].shape[0]  # Bottom level
+        if self.hierarchical:
+            return self.mesh_static_features[0].shape[0]  # Bottom level
+        return self.mesh_static_features.shape[0]
 
     def forward(
         self, x, noise_level, cond, boundary_forcing, atmosphere_forcing
@@ -492,12 +542,16 @@ class GraphDiff(ARModel):
         Compute number of mesh nodes from loaded features,
         and number of mesh nodes that should be ignored in encoding/decoding
         """
-        num_mesh_nodes = sum(
-            node_feat.shape[0] for node_feat in self.mesh_static_features
-        )
-        num_mesh_nodes_ignore = (
-            num_mesh_nodes - self.mesh_static_features[0].shape[0]
-        )
+        if self.hierarchical:
+            num_mesh_nodes = sum(
+                node_feat.shape[0] for node_feat in self.mesh_static_features
+            )
+            num_mesh_nodes_ignore = (
+                num_mesh_nodes - self.mesh_static_features[0].shape[0]
+            )
+        else:
+            num_mesh_nodes = self.mesh_static_features.shape[0]
+            num_mesh_nodes_ignore = 0
         return num_mesh_nodes, num_mesh_nodes_ignore
 
     def embedd_mesh_nodes(self, emb):
@@ -507,7 +561,9 @@ class GraphDiff(ARModel):
         processing step
         Returns tensor of shape (num_mesh_nodes[0], d_h)
         """
-        return self.mesh_embedders[0](self.mesh_static_features[0], emb)
+        if self.hierarchical:
+            return self.mesh_embedders[0](self.mesh_static_features[0], emb)
+        return self.mesh_embedder(self.mesh_static_features, emb)
 
     def process_step(self, mesh_rep, emb):
         """
@@ -517,6 +573,17 @@ class GraphDiff(ARModel):
         mesh_rep: has shape (B, num_mesh_nodes, d_h)
         Returns mesh_rep: (B, num_mesh_nodes, d_h)
         """
+        if not self.hierarchical:
+            batch_size = mesh_rep.shape[0]
+            m2m_emb = self.m2m_embedder(self.m2m_features, emb)
+            m2m_emb_expanded = self.expand_to_batch(m2m_emb, batch_size)
+
+            for gnn in self.processor_gnns:
+                mesh_rep, m2m_emb_expanded = gnn(
+                    mesh_rep, mesh_rep, m2m_emb_expanded, emb
+                )
+            return mesh_rep
+
         batch_size = mesh_rep.shape[0]
 
         # EMBED REMAINING MESH NODES (levels >= 1) -

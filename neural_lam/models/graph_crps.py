@@ -16,7 +16,7 @@ from ..config import NeuralLAMConfig
 from ..datastore import BaseDatastore
 
 
-class CRPS(ARProbModel):
+class GraphCRPS(ARProbModel):
     """
     Continuous Ranked Probability Score (CRPS) Model.
     """

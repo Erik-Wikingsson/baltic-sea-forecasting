@@ -14,16 +14,16 @@ from loguru import logger
 # Local
 from . import utils
 from .config import load_config_and_datastores
-from .models import CRPS, EDM, FM, SI, GraphCast, GraphEFM, GraphFM
+from .models import EDM, FM, SI, GraphCast, GraphCRPS, GraphEFM, GraphFM
 from .weather_dataset import WeatherDataModule
 
 MODELS = {
     "graphcast": GraphCast,
     "graph_fm": GraphFM,
     "graph_efm": GraphEFM,
+    "graph_crps": GraphCRPS,
     "EDM": EDM,
     "FM": FM,
-    "crps": CRPS,
     "SI": SI,
 }
 

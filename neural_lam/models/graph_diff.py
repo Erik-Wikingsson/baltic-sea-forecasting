@@ -172,7 +172,7 @@ class GraphDiff(ARModel):
             noise_level_dim=self.noise_level_dim,
         )
         self.post_mesh_proj = make_mlp(
-            [args.hidden_dim] + [args.hidden_dim_grid],
+            [args.hidden_dim] + [hidden_dim_grid],
             noise_level_dim=self.noise_level_dim,
         )
 

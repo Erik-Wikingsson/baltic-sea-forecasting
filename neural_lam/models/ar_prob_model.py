@@ -468,14 +468,37 @@ class ARProbModel(ARModel):
             if time_steps is None:
                 # If no set of time steps given, iterate over all
                 # prediction horizon time steps
-                time_steps = range(1, len(target_slice) + 1)
+                time_steps = list(range(1, len(target_slice) + 1))
+            else:
+                time_steps = list(time_steps)
+
+            # Only plot selected (variable_index -> lead steps).
+            # When empty, keep previous behavior (all vars × all steps).
+            plot_filter = getattr(self.args, "var_leads_val_plot", None) or {}
+            if plot_filter:
+                allowed_t = set(time_steps) & {
+                    s for steps in plot_filter.values() for s in steps
+                }
+                time_steps = [t for t in time_steps if t in allowed_t]
 
             plot_dict = {}
             for t_i in time_steps:
                 time_title_part = (
                     f"t={t_i} ({self._datastore.step_length*t_i} h)"
                 )
-                # Create one figure per variable at this time step
+                var_names_list = self._datastore.get_vars_names("state")
+                var_units_list = self._datastore.get_vars_units("state")
+                var_items = list(
+                    enumerate(zip(var_names_list, var_units_list, var_vranges))
+                )
+                if plot_filter:
+                    var_items = [
+                        (var_i, (var_name, var_unit, var_vrange))
+                        for var_i, (var_name, var_unit, var_vrange) in var_items
+                        if var_i in plot_filter and t_i in plot_filter[var_i]
+                    ]
+
+                # Create one figure per selected variable at this time step
                 var_figs = {
                     var_name: vis.plot_ensemble_prediction(
                         [
@@ -491,13 +514,7 @@ class ARProbModel(ARModel):
                         title=f"{var_name} ({var_unit}), {time_title_part}",
                         vrange=var_vrange,
                     )
-                    for var_i, (var_name, var_unit, var_vrange) in enumerate(
-                        zip(
-                            self._datastore.get_vars_names("state"),
-                            self._datastore.get_vars_units("state"),
-                            var_vranges,
-                        )
-                    )
+                    for var_i, (var_name, var_unit, var_vrange) in var_items
                 }
 
                 if log:

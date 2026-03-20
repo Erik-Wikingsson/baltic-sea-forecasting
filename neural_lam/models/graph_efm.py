@@ -15,6 +15,8 @@ from ..config import NeuralLAMConfig
 from ..datastore import BaseDatastore
 from .ar_prob_model import ARProbModel
 from .constant_latent_encoder import ConstantLatentEncoder
+from .graph_latent_decoder import GraphLatentDecoder
+from .graph_latent_encoder import GraphLatentEncoder
 from .hi_graph_latent_decoder import HiGraphLatentDecoder
 from .hi_graph_latent_encoder import HiGraphLatentEncoder
 
@@ -215,8 +217,25 @@ class GraphEFM(ARProbModel):
                     ]
                 )
         else:
-            raise NotImplementedError(
-                "GraphEFM currently only supports hierarchical graphs"
+            # Single-level mesh
+            num_mesh = self.mesh_static_features.shape[0]
+            print(
+                "Loaded non-hierarchical graph with structure:\n"
+                f"  mesh nodes: {num_mesh}\n"
+                f"  g2m edges: {self.g2m_edges}, m2g edges: {self.m2g_edges}, "
+                f"m2m edges: {self.m2m_features.shape[0]}"
+            )
+            mesh_dim = self.mesh_static_features.shape[1]
+            m2m_dim = self.m2m_features.shape[1]
+            mesh_embedder_blueprint = [hidden_dim_mesh_nodes] * (
+                args.hidden_layers + 1
+            )
+            self.mesh_embedder = utils.make_mlp(
+                [mesh_dim] + mesh_embedder_blueprint
+            )
+            # m2m edge dim must equal processor hidden_dim
+            self.m2m_embedder = utils.make_mlp(
+                [m2m_dim] + self.mlp_blueprint_end
             )
 
         latent_dim = (
@@ -255,15 +274,23 @@ class GraphEFM(ARProbModel):
                     num_grid_con_mesh_nodes=self.num_grid_con_mesh_nodes,
                 )
             else:
-                raise NotImplementedError(
-                    "GraphEFM currently only supports hierarchical graphs, "
-                    "but the GraphEFM model was initialized with a "
-                    "non-hierarchical graph."
+                self.prior_model = GraphLatentEncoder(
+                    latent_dim,
+                    self.g2m_edge_index,
+                    self.m2m_edge_index,
+                    args.hidden_dim,
+                    args.prior_processor_layers,
+                    hidden_layers=args.hidden_layers,
+                    output_dist=args.prior_dist,
+                    hidden_dim_grid=hidden_dim_grid,
+                    hidden_dim_mesh_nodes=hidden_dim_mesh_nodes,
+                    hidden_dim_edge=hidden_dim_edge,
+                    num_grid_con_mesh_nodes=self.num_grid_con_mesh_nodes,
                 )
         else:
             self.prior_model = ConstantLatentEncoder(
                 latent_dim,
-                self.num_mesh_nodes,
+                self.num_latent_mesh_nodes,
                 output_dist=args.prior_dist,
             )
 
@@ -304,10 +331,33 @@ class GraphEFM(ARProbModel):
                 num_interior_nodes=self.num_interior_nodes,
             )
         else:
-            raise NotImplementedError(
-                "GraphEFM currently only supports hierarchical graphs, "
-                "but the GraphEFM model was initialized with a "
-                "non-hierarchical graph."
+            self.encoder = GraphLatentEncoder(
+                latent_dim,
+                self.g2m_edge_index,
+                self.m2m_edge_index,
+                args.hidden_dim,
+                args.encoder_processor_layers,
+                hidden_layers=args.hidden_layers,
+                output_dist="diagonal",
+                hidden_dim_grid=hidden_dim_grid,
+                hidden_dim_mesh_nodes=hidden_dim_mesh_nodes,
+                hidden_dim_edge=hidden_dim_edge,
+                num_grid_con_mesh_nodes=self.num_grid_con_mesh_nodes,
+            )
+            self.decoder = GraphLatentDecoder(
+                self.g2m_edge_index,
+                self.m2m_edge_index,
+                self.m2g_edge_index,
+                args.hidden_dim,
+                latent_dim,
+                hidden_dim_grid,
+                self._datastore.get_num_data_vars(category="state"),
+                args.processor_layers,
+                hidden_layers=args.hidden_layers,
+                output_std=bool(args.output_std),
+                hidden_dim_mesh_nodes=hidden_dim_mesh_nodes,
+                hidden_dim_edge=hidden_dim_edge,
+                num_interior_nodes=self.num_interior_nodes,
             )
 
     @property
@@ -315,9 +365,12 @@ class GraphEFM(ARProbModel):
         """
         Get the total number of mesh nodes in the used mesh graph
         """
-        num_mesh_nodes = sum(
-            node_feat.shape[0] for node_feat in self.mesh_static_features
-        )
+        if self.hierarchical_graph:
+            num_mesh_nodes = sum(
+                node_feat.shape[0] for node_feat in self.mesh_static_features
+            )
+        else:
+            num_mesh_nodes = self.mesh_static_features.shape[0]
         return num_mesh_nodes
 
     @property
@@ -326,7 +379,21 @@ class GraphEFM(ARProbModel):
         Get the total number of mesh nodes that have a connection to
         the grid (e.g. bottom level in a hierarchy)
         """
-        return self.mesh_static_features[0].shape[0]  # Bottom level
+        if self.hierarchical_graph:
+            return self.mesh_static_features[0].shape[0]  # Bottom level
+        else:
+            return self.mesh_static_features.shape[0]
+
+    @property
+    def num_latent_mesh_nodes(self):
+        """
+        Number of mesh sites for the variational latent (encoder / prior / KL).
+
+        Single lev graph: same as total mesh nodes, hierarchical: top level only
+        """
+        if self.hierarchical_graph:
+            return self.mesh_static_features[-1].shape[0]
+        return self.mesh_static_features.shape[0]
 
     def sample_next_state(self, pred_mean, pred_std):
         """

@@ -356,7 +356,7 @@ def main(input_args=None):
     parser.add_argument(
         "--input_steps",
         type=int,
-        default=1,
+        default=2,
         choices=[1, 2],
         help="Number of state steps as input (default: 1)",
     )
@@ -421,7 +421,7 @@ def main(input_args=None):
         type=int,
         choices=[0, 1],
         default=1,
-        help="Include current time t in forcing window (1=yes, 0=no; default: 1).",
+        help="Include current time t in forcing window (default: 1).",
     )
     parser.add_argument(
         "--num_past_forcing_steps",
@@ -441,7 +441,7 @@ def main(input_args=None):
         type=int,
         choices=[0, 1],
         default=1,
-        help="Include current time t in boundary window (1=yes, 0=no; default: 1).",
+        help="Include current time t in boundary window (default: 1).",
     )
     parser.add_argument(
         "--num_past_boundary_steps",
@@ -461,13 +461,14 @@ def main(input_args=None):
         type=int,
         choices=[0, 1],
         default=1,
-        help="Include current time t in atmosphere window (1=yes, 0=no; default: 1).",
+        help="Include current time t in atmosphere window (default: 1).",
     )
     parser.add_argument(
         "--num_past_atmosphere_steps",
         type=int,
         default=1,
-        help="Number of past time steps to use as atmosphere input (default: 1).",
+        help="Number of past time steps to use as atmosphere input "
+        "(default: 1).",
     )
     parser.add_argument(
         "--num_future_atmosphere_steps",
@@ -492,13 +493,14 @@ def main(input_args=None):
         "--scheduler",
         type=str,
         default=None,
-        choices=["pretrain", "finetune", "regional"],
+        choices=["pretrain", "finetune", "regional", "deterministic"],
         help="Multi-phase training scheduler. "
         "'pretrain': 100 ep kl_beta=0, then 200 ep kl_beta=0.1 (cosine LR). "
         "'finetune': 75 ep ar=1 kl_beta=0.1, 25 ep ar=2, 10 ep crps=1e4 "
         "(cosine LR). "
         "'regional': 100 ep kl_beta=0, 200 ep kl_beta=0.1, 25 ep ar=2, "
-        "10 ep crps=1e4 (cosine LR). "
+        "25 ep crps=1e5 (cosine LR). "
+        "'deterministic': 175 ep ar=1, 25 ep ar=2 (cosine LR). "
         "Overrides --epochs, --kl_beta, --crps_weight, "
         "--ar_steps_train when set. (default: None)",
     )
@@ -660,8 +662,7 @@ def main(input_args=None):
 
     if args.eval:
         strategy = (
-            "ddp" if args.kl_beta > 0
-            else "ddp_find_unused_parameters_true"
+            "ddp" if args.kl_beta > 0 else "ddp_find_unused_parameters_true"
         )
         trainer = _make_trainer(args.epochs, strategy)
         if trainer.global_rank == 0:
@@ -681,7 +682,7 @@ def main(input_args=None):
         # Phase 1: 100 epochs, kl_beta=0
         model.kl_beta = 0.0
         strategy = "ddp_find_unused_parameters_true"
-        print(f"[pretrain] Phase 1/2: 100 epochs, kl_beta=0")
+        print("[pretrain] Phase 1/2: 100 epochs, kl_beta=0")
         last_ckpt = _run_phase(
             model, data_module, 100, strategy, ckpt_path=args.load
         )
@@ -689,7 +690,7 @@ def main(input_args=None):
         # Phase 2: 200 epochs, kl_beta=0.1
         model.kl_beta = 0.1
         strategy = "ddp"
-        print(f"[pretrain] Phase 2/2: 200 epochs, kl_beta=0.1")
+        print("[pretrain] Phase 2/2: 200 epochs, kl_beta=0.1")
         _run_phase(model, data_module, 300, strategy, ckpt_path=last_ckpt)
 
     elif args.scheduler == "finetune":
@@ -702,14 +703,14 @@ def main(input_args=None):
         # Phase 1: 75 epochs, ar=1, kl_beta=0.1
         data_module.ar_steps_train = 1
         strategy = "ddp"
-        print(f"[finetune] Phase 1/3: 75 epochs, ar=1, kl_beta=0.1")
+        print("[finetune] Phase 1/3: 75 epochs, ar=1, kl_beta=0.1")
         last_ckpt = _run_phase(
             model, data_module, 75, strategy, ckpt_path=args.load
         )
 
         # Phase 2: 25 epochs, ar=2, kl_beta=0.1
         data_module.ar_steps_train = 2
-        print(f"[finetune] Phase 2/3: 25 epochs, ar=2, kl_beta=0.1")
+        print("[finetune] Phase 2/3: 25 epochs, ar=2, kl_beta=0.1")
         last_ckpt = _run_phase(
             model, data_module, 100, strategy, ckpt_path=last_ckpt
         )
@@ -717,13 +718,13 @@ def main(input_args=None):
         # Phase 3: 10 epochs, ar=2, kl_beta=0.1, crps_weight=1e4
         model.crps_weight = 1e4
         print(
-            f"[finetune] Phase 3/3: 10 epochs, ar=2, kl_beta=0.1, "
-            f"crps_weight=1e4"
+            "[finetune] Phase 3/3: 10 epochs, ar=2, kl_beta=0.1, "
+            "crps_weight=1e4"
         )
         _run_phase(model, data_module, 110, strategy, ckpt_path=last_ckpt)
 
     elif args.scheduler == "regional":
-        total_epochs = 100 + 200 + 25 + 10
+        total_epochs = 100 + 200 + 25 + 25
         _add_cosine_lr(model, total_epochs)
 
         model.crps_weight = 0.0
@@ -752,19 +753,36 @@ def main(input_args=None):
             model, data_module, 325, strategy, ckpt_path=last_ckpt
         )
 
-        # Phase 4: 10 epochs, ar=2, kl_beta=0.1, crps_weight=1e4
-        model.crps_weight = 1e4
+        # Phase 4: 25 epochs, ar=2, kl_beta=0.1, crps_weight=1e5
+        model.crps_weight = 1e5
         print(
-            "[regional] Phase 4/4: 10 epochs, ar=2, kl_beta=0.1, "
-            "crps_weight=1e4"
+            "[regional] Phase 4/4: 25 epochs, ar=2, kl_beta=0.1, "
+            "crps_weight=1e5"
         )
-        _run_phase(model, data_module, 335, strategy, ckpt_path=last_ckpt)
+        _run_phase(model, data_module, 350, strategy, ckpt_path=last_ckpt)
+
+    elif args.scheduler == "deterministic":
+        total_epochs = 175 + 25
+        _add_cosine_lr(model, total_epochs)
+
+        strategy = "ddp"
+
+        # Phase 1: 175 epochs, ar=1
+        data_module.ar_steps_train = 1
+        print("[deterministic] Phase 1/2: 175 epochs, ar=1")
+        last_ckpt = _run_phase(
+            model, data_module, 175, strategy, ckpt_path=args.load
+        )
+
+        # Phase 2: 25 epochs, ar=2
+        data_module.ar_steps_train = 2
+        print("[deterministic] Phase 2/2: 25 epochs, ar=2")
+        _run_phase(model, data_module, 200, strategy, ckpt_path=last_ckpt)
 
     else:
         # Default: single-phase training
         strategy = (
-            "ddp" if args.kl_beta > 0
-            else "ddp_find_unused_parameters_true"
+            "ddp" if args.kl_beta > 0 else "ddp_find_unused_parameters_true"
         )
         _add_cosine_lr(model, args.epochs)
         trainer = _make_trainer(args.epochs, strategy)
@@ -772,9 +790,7 @@ def main(input_args=None):
             utils.init_training_logger_metrics(
                 training_logger, val_steps=args.val_steps_to_log
             )
-        trainer.fit(
-            model=model, datamodule=data_module, ckpt_path=args.load
-        )
+        trainer.fit(model=model, datamodule=data_module, ckpt_path=args.load)
 
 
 if __name__ == "__main__":

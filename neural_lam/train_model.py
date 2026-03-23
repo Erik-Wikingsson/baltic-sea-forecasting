@@ -488,6 +488,17 @@ def main(input_args=None):
         default=5,
         help="Number of ensemble members during evaluation (default: 5)",
     )
+    parser.add_argument(
+        "--scheduler",
+        type=str,
+        default=None,
+        choices=["pretrain", "finetune"],
+        help="Multi-phase training scheduler. "
+        "'pretrain': 100 ep kl_beta=0, then 200 ep kl_beta=0.1 (cosine LR). "
+        "'finetune': 75 ep ar=1 kl_beta=0.1, 25 ep ar=2, 10 ep crps=1e4 "
+        "(cosine LR). Overrides --epochs, --kl_beta, --crps_weight, "
+        "--ar_steps_train when set. (default: None)",
+    )
 
     args = parser.parse_args(input_args)
     args.var_leads_metrics_watch = {
@@ -595,43 +606,134 @@ def main(input_args=None):
         )
     )
 
-    # Training strategy
-    # If doing pure autoencoder training (kl_beta = 0), the prior network is not
-    # used at all in producing the loss. This is desired, but DDP complains.
-    strategy = "ddp" if args.kl_beta > 0 else "ddp_find_unused_parameters_true"
-
     # To enable no validation during training, set val_interval to None
     if args.val_interval == 0:
         args.val_interval = None
 
-    trainer = pl.Trainer(
-        max_epochs=args.epochs,
-        deterministic=True,
-        strategy=strategy,
-        accelerator=device_name,
-        num_nodes=args.num_nodes,
-        devices=devices,
-        logger=training_logger,
-        log_every_n_steps=1,
-        callbacks=callbacks,
-        check_val_every_n_epoch=args.val_interval,
-        precision=args.precision,
-        num_sanity_val_steps=args.num_sanity_val_steps,
-    )
+    def _make_trainer(max_epochs, strategy, ckpt_callbacks=None):
+        """Build a pl.Trainer with the given max_epochs and strategy."""
+        cbs = list(ckpt_callbacks or callbacks)
+        return pl.Trainer(
+            max_epochs=max_epochs,
+            deterministic=True,
+            strategy=strategy,
+            accelerator=device_name,
+            num_nodes=args.num_nodes,
+            devices=devices,
+            logger=training_logger,
+            log_every_n_steps=1,
+            callbacks=cbs,
+            check_val_every_n_epoch=args.val_interval,
+            precision=args.precision,
+            num_sanity_val_steps=args.num_sanity_val_steps,
+        )
 
-    # Only init once, on rank 0 only
-    if trainer.global_rank == 0:
-        utils.init_training_logger_metrics(
-            training_logger, val_steps=args.val_steps_to_log
-        )  # Do after initializing logger
+    def _run_phase(model, data_module, max_epochs, strategy, ckpt_path=None):
+        """Run one training phase, return path to last checkpoint."""
+        t = _make_trainer(max_epochs, strategy)
+        if t.global_rank == 0:
+            utils.init_training_logger_metrics(
+                training_logger, val_steps=args.val_steps_to_log
+            )
+        t.fit(model=model, datamodule=data_module, ckpt_path=ckpt_path)
+        return t.checkpoint_callback.last_model_path
+
+    def _add_cosine_lr(model, max_epochs):
+        """Attach a CosineAnnealingLR scheduler to the model."""
+        _orig_configure = model.configure_optimizers
+
+        def configure_optimizers_with_cosine(self_ref=model):
+            opt = _orig_configure()
+            if isinstance(opt, dict):
+                optimizer = opt["optimizer"]
+            else:
+                optimizer = opt
+            sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=max_epochs, eta_min=1e-5
+            )
+            return {"optimizer": optimizer, "lr_scheduler": sched}
+
+        model.configure_optimizers = configure_optimizers_with_cosine
+
     if args.eval:
+        strategy = (
+            "ddp" if args.kl_beta > 0
+            else "ddp_find_unused_parameters_true"
+        )
+        trainer = _make_trainer(args.epochs, strategy)
+        if trainer.global_rank == 0:
+            utils.init_training_logger_metrics(
+                training_logger, val_steps=args.val_steps_to_log
+            )
         trainer.test(
             model=model,
             datamodule=data_module,
             ckpt_path=args.load,
         )
+
+    elif args.scheduler == "pretrain":
+        total_epochs = 100 + 200
+        _add_cosine_lr(model, total_epochs)
+
+        # Phase 1: 100 epochs, kl_beta=0
+        model.kl_beta = 0.0
+        strategy = "ddp_find_unused_parameters_true"
+        print(f"[pretrain] Phase 1/2: 100 epochs, kl_beta=0")
+        last_ckpt = _run_phase(
+            model, data_module, 100, strategy, ckpt_path=args.load
+        )
+
+        # Phase 2: 200 epochs, kl_beta=0.1
+        model.kl_beta = 0.1
+        strategy = "ddp"
+        print(f"[pretrain] Phase 2/2: 200 epochs, kl_beta=0.1")
+        _run_phase(model, data_module, 300, strategy, ckpt_path=last_ckpt)
+
+    elif args.scheduler == "finetune":
+        total_epochs = 75 + 25 + 10
+        _add_cosine_lr(model, total_epochs)
+
+        model.kl_beta = 0.1
+        model.crps_weight = 0.0
+
+        # Phase 1: 75 epochs, ar=1, kl_beta=0.1
+        data_module.ar_steps_train = 1
+        strategy = "ddp"
+        print(f"[finetune] Phase 1/3: 75 epochs, ar=1, kl_beta=0.1")
+        last_ckpt = _run_phase(
+            model, data_module, 75, strategy, ckpt_path=args.load
+        )
+
+        # Phase 2: 25 epochs, ar=2, kl_beta=0.1
+        data_module.ar_steps_train = 2
+        print(f"[finetune] Phase 2/3: 25 epochs, ar=2, kl_beta=0.1")
+        last_ckpt = _run_phase(
+            model, data_module, 100, strategy, ckpt_path=last_ckpt
+        )
+
+        # Phase 3: 10 epochs, ar=2, kl_beta=0.1, crps_weight=1e4
+        model.crps_weight = 1e4
+        print(
+            f"[finetune] Phase 3/3: 10 epochs, ar=2, kl_beta=0.1, "
+            f"crps_weight=1e4"
+        )
+        _run_phase(model, data_module, 110, strategy, ckpt_path=last_ckpt)
+
     else:
-        trainer.fit(model=model, datamodule=data_module, ckpt_path=args.load)
+        # Default: single-phase training
+        strategy = (
+            "ddp" if args.kl_beta > 0
+            else "ddp_find_unused_parameters_true"
+        )
+        _add_cosine_lr(model, args.epochs)
+        trainer = _make_trainer(args.epochs, strategy)
+        if trainer.global_rank == 0:
+            utils.init_training_logger_metrics(
+                training_logger, val_steps=args.val_steps_to_log
+            )
+        trainer.fit(
+            model=model, datamodule=data_module, ckpt_path=args.load
+        )
 
 
 if __name__ == "__main__":

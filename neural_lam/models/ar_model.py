@@ -359,7 +359,10 @@ class ARModel(pl.LightningModule):
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(
-            self.parameters(), lr=self.args.lr, betas=(0.9, 0.95)
+            self.parameters(),
+            lr=self.args.lr,
+            betas=(0.9, 0.95),
+            weight_decay=0.1,
         )
         return opt
 

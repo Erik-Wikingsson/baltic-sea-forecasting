@@ -492,11 +492,14 @@ def main(input_args=None):
         "--scheduler",
         type=str,
         default=None,
-        choices=["pretrain", "finetune"],
+        choices=["pretrain", "finetune", "regional"],
         help="Multi-phase training scheduler. "
         "'pretrain': 100 ep kl_beta=0, then 200 ep kl_beta=0.1 (cosine LR). "
         "'finetune': 75 ep ar=1 kl_beta=0.1, 25 ep ar=2, 10 ep crps=1e4 "
-        "(cosine LR). Overrides --epochs, --kl_beta, --crps_weight, "
+        "(cosine LR). "
+        "'regional': 100 ep kl_beta=0, 200 ep kl_beta=0.1, 25 ep ar=2, "
+        "10 ep crps=1e4 (cosine LR). "
+        "Overrides --epochs, --kl_beta, --crps_weight, "
         "--ar_steps_train when set. (default: None)",
     )
 
@@ -718,6 +721,44 @@ def main(input_args=None):
             f"crps_weight=1e4"
         )
         _run_phase(model, data_module, 110, strategy, ckpt_path=last_ckpt)
+
+    elif args.scheduler == "regional":
+        total_epochs = 100 + 200 + 25 + 10
+        _add_cosine_lr(model, total_epochs)
+
+        model.crps_weight = 0.0
+
+        # Phase 1: 100 epochs, kl_beta=0
+        model.kl_beta = 0.0
+        data_module.ar_steps_train = 1
+        strategy = "ddp_find_unused_parameters_true"
+        print("[regional] Phase 1/4: 100 epochs, kl_beta=0")
+        last_ckpt = _run_phase(
+            model, data_module, 100, strategy, ckpt_path=args.load
+        )
+
+        # Phase 2: 200 epochs, kl_beta=0.1
+        model.kl_beta = 0.1
+        strategy = "ddp"
+        print("[regional] Phase 2/4: 200 epochs, kl_beta=0.1")
+        last_ckpt = _run_phase(
+            model, data_module, 300, strategy, ckpt_path=last_ckpt
+        )
+
+        # Phase 3: 25 epochs, ar=2, kl_beta=0.1
+        data_module.ar_steps_train = 2
+        print("[regional] Phase 3/4: 25 epochs, ar=2, kl_beta=0.1")
+        last_ckpt = _run_phase(
+            model, data_module, 325, strategy, ckpt_path=last_ckpt
+        )
+
+        # Phase 4: 10 epochs, ar=2, kl_beta=0.1, crps_weight=1e4
+        model.crps_weight = 1e4
+        print(
+            "[regional] Phase 4/4: 10 epochs, ar=2, kl_beta=0.1, "
+            "crps_weight=1e4"
+        )
+        _run_phase(model, data_module, 335, strategy, ckpt_path=last_ckpt)
 
     else:
         # Default: single-phase training

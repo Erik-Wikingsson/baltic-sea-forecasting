@@ -81,8 +81,8 @@ class ARModel(pl.LightningModule):
         )
         num_past_forcing_steps = args.num_past_forcing_steps
         num_future_forcing_steps = args.num_future_forcing_steps
-        include_current_forcing_step = getattr(
-            args, "current_forcing_step", False
+        include_current_forcing_step = bool(
+            int(getattr(args, "current_forcing_step", 1))
         )
         num_forcing_steps = (
             num_past_forcing_steps
@@ -190,8 +190,8 @@ class ARModel(pl.LightningModule):
 
             num_past_boundary_steps = args.num_past_boundary_steps
             num_future_boundary_steps = args.num_future_boundary_steps
-            include_current_boundary_step = getattr(
-                args, "current_boundary_step", False
+            include_current_boundary_step = bool(
+                int(getattr(args, "current_boundary_step", 1))
             )
             num_boundary_steps = (
                 num_past_boundary_steps
@@ -219,8 +219,8 @@ class ARModel(pl.LightningModule):
             )
             num_past_atmosphere_steps = args.num_past_atmosphere_steps
             num_future_atmosphere_steps = args.num_future_atmosphere_steps
-            include_current_atmosphere_step = getattr(
-                args, "current_atmosphere_step", False
+            include_current_atmosphere_step = bool(
+                int(getattr(args, "current_atmosphere_step", 1))
             )
             num_atmosphere_steps = (
                 num_past_atmosphere_steps

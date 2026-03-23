@@ -418,14 +418,17 @@ def main(input_args=None):
     )
     parser.add_argument(
         "--current_forcing_step",
-        action="store_true",
-        help="Include current time t in forcing window (default: False).",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Include current time t in forcing window (1=yes, 0=no; default: 1).",
     )
     parser.add_argument(
         "--num_past_forcing_steps",
         type=int,
-        default=0,
-        help="Number of past time steps to use as input for forcing data",
+        default=1,
+        help="Number of past time steps to use as input for forcing data "
+        "(default: 1).",
     )
     parser.add_argument(
         "--num_future_forcing_steps",
@@ -435,14 +438,16 @@ def main(input_args=None):
     )
     parser.add_argument(
         "--current_boundary_step",
-        action="store_true",
-        help="Include current time t in boundary window (default: False).",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Include current time t in boundary window (1=yes, 0=no; default: 1).",
     )
     parser.add_argument(
         "--num_past_boundary_steps",
         type=int,
-        default=0,
-        help="Number of past time steps to use as boundary input (default: 1)",
+        default=1,
+        help="Number of past time steps to use as boundary input (default: 1).",
     )
     parser.add_argument(
         "--num_future_boundary_steps",
@@ -453,15 +458,16 @@ def main(input_args=None):
     )
     parser.add_argument(
         "--current_atmosphere_step",
-        action="store_true",
-        help="Include current time t in atmosphere window (default: False).",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Include current time t in atmosphere window (1=yes, 0=no; default: 1).",
     )
     parser.add_argument(
         "--num_past_atmosphere_steps",
         type=int,
-        default=0,
-        help="Number of past time steps to use as atmosphere input "
-        "(default: 1)",
+        default=1,
+        help="Number of past time steps to use as atmosphere input (default: 1).",
     )
     parser.add_argument(
         "--num_future_atmosphere_steps",
@@ -524,9 +530,9 @@ def main(input_args=None):
         standardize=True,
         num_past_forcing_steps=args.num_past_forcing_steps,
         num_future_forcing_steps=args.num_future_forcing_steps,
-        current_forcing_step=args.current_forcing_step,
-        current_boundary_step=args.current_boundary_step,
-        current_atmosphere_step=args.current_atmosphere_step,
+        current_forcing_step=bool(args.current_forcing_step),
+        current_boundary_step=bool(args.current_boundary_step),
+        current_atmosphere_step=bool(args.current_atmosphere_step),
         num_past_boundary_steps=args.num_past_boundary_steps,
         num_future_boundary_steps=args.num_future_boundary_steps,
         num_past_atmosphere_steps=args.num_past_atmosphere_steps,

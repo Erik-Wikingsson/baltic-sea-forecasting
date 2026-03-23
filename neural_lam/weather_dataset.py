@@ -46,10 +46,11 @@ class WeatherDataset(torch.utils.data.Dataset):
         If True, the forcing window includes time t (current step).
         If False, only past (t-i..t-1) and future (t+1..t+j) are included, so
         you can use e.g. only future step(s) with num_past_forcing_steps=0.
+        Default is True.
     current_boundary_step: bool, optional
-        If True, boundary window includes time t. Default False.
+        If True, boundary window includes time t. Default True.
     current_atmosphere_step: bool, optional
-        If True, atmosphere window includes time t. Default False.
+        If True, atmosphere window includes time t. Default True.
     num_past_boundary_steps: int, optional
         Number of past time steps to include in boundary input. If set to i,
         boundary from times t-i, t-i+1, ..., t-1, t (and potentially beyond,
@@ -74,9 +75,9 @@ class WeatherDataset(torch.utils.data.Dataset):
         input_steps=1,
         num_past_forcing_steps=1,
         num_future_forcing_steps=1,
-        current_forcing_step=False,
-        current_boundary_step=False,
-        current_atmosphere_step=False,
+        current_forcing_step=True,
+        current_boundary_step=True,
+        current_atmosphere_step=True,
         num_past_boundary_steps=1,
         num_future_boundary_steps=1,
         num_past_atmosphere_steps=1,
@@ -385,7 +386,7 @@ class WeatherDataset(torch.utils.data.Dataset):
         if num_future_steps is None:
             num_future_steps = self.num_future_forcing_steps
         if include_current is None:
-            include_current = getattr(self, "current_forcing_step", False)
+            include_current = getattr(self, "current_forcing_step", True)
 
         # The current implementation requires at least 2 time steps for the
         # initial state (see GraphCast). The forcing data is windowed around the
@@ -971,9 +972,9 @@ class WeatherDataModule(pl.LightningDataModule):
         standardize=True,
         num_past_forcing_steps=1,
         num_future_forcing_steps=1,
-        current_forcing_step=False,
-        current_boundary_step=False,
-        current_atmosphere_step=False,
+        current_forcing_step=True,
+        current_boundary_step=True,
+        current_atmosphere_step=True,
         num_past_boundary_steps=1,
         num_future_boundary_steps=1,
         num_past_atmosphere_steps=1,

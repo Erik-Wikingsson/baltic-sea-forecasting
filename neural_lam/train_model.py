@@ -493,12 +493,12 @@ def main(input_args=None):
         "--scheduler",
         type=str,
         default=None,
-        choices=["pretrain", "finetune", "regional", "deterministic"],
+        choices=["pretrain", "finetune", "probabilistic", "deterministic"],
         help="Multi-phase training scheduler. "
-        "'pretrain': 100 ep kl_beta=0, then 200 ep kl_beta=0.1 (cosine LR). "
-        "'finetune': 75 ep ar=1 kl_beta=0.1, 25 ep ar=2, 10 ep crps=1e4 "
-        "(cosine LR). "
-        "'regional': 100 ep kl_beta=0, 200 ep kl_beta=0.1, 25 ep ar=2, "
+        "'pretrain': 100 ep kl_beta=0, 300 ep kl_beta=0.1 (cosine LR). "
+        "'finetune': 20 ep linear warmup, 80 ep ar=1 kl_beta=0.1, 20 ep ar=2, "
+        "20 ep crps=1e4 (cosine LR). "
+        "'probabilistic': 100 ep kl_beta=0, 200 ep kl_beta=0.1, 25 ep ar=2, "
         "25 ep crps=1e5 (cosine LR). "
         "'deterministic': 175 ep ar=1, 25 ep ar=2 (cosine LR). "
         "Overrides --epochs, --kl_beta, --crps_weight, "
@@ -615,9 +615,11 @@ def main(input_args=None):
     if args.val_interval == 0:
         args.val_interval = None
 
-    def _make_trainer(max_epochs, strategy, ckpt_callbacks=None):
+    def _make_trainer(max_epochs, strategy, extra_callbacks=None):
         """Build a pl.Trainer with the given max_epochs and strategy."""
-        cbs = list(ckpt_callbacks or callbacks)
+        cbs = list(callbacks)
+        if extra_callbacks:
+            cbs.extend(extra_callbacks)
         return pl.Trainer(
             max_epochs=max_epochs,
             deterministic=True,
@@ -633,9 +635,16 @@ def main(input_args=None):
             num_sanity_val_steps=args.num_sanity_val_steps,
         )
 
-    def _run_phase(model, data_module, max_epochs, strategy, ckpt_path=None):
+    def _run_phase(
+        model,
+        data_module,
+        max_epochs,
+        strategy,
+        ckpt_path=None,
+        extra_callbacks=None,
+    ):
         """Run one training phase, return path to last checkpoint."""
-        t = _make_trainer(max_epochs, strategy)
+        t = _make_trainer(max_epochs, strategy, extra_callbacks=extra_callbacks)
         if t.global_rank == 0:
             utils.init_training_logger_metrics(
                 training_logger, val_steps=args.val_steps_to_log
@@ -660,6 +669,67 @@ def main(input_args=None):
 
         model.configure_optimizers = configure_optimizers_with_cosine
 
+    def _add_finetune_sequential_lr(
+        model,
+        warmup_epochs,
+        finetune_epochs,
+        initial_lr,
+        lr,
+        eta_min,
+    ):
+        """Linear LR warmup then cosine decay over finetune_epochs."""
+        _orig_configure = model.configure_optimizers
+
+        def configure_optimizers_finetune(self_ref=model):
+            opt = _orig_configure()
+            if isinstance(opt, dict):
+                optimizer = opt["optimizer"]
+            else:
+                optimizer = opt
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = lr
+            linear_warmup = torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=initial_lr / lr,
+                end_factor=1.0,
+                total_iters=warmup_epochs,
+            )
+            cosine_annealing = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=finetune_epochs - warmup_epochs,
+                eta_min=eta_min,
+            )
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer,
+                schedulers=[linear_warmup, cosine_annealing],
+                milestones=[warmup_epochs],
+            )
+            return {"optimizer": optimizer, "lr_scheduler": scheduler}
+
+        model.configure_optimizers = configure_optimizers_finetune
+
+    class _FinetuneWarmupCallback(pl.Callback):
+        def on_train_epoch_start(self, trainer, pl_module):
+            pl_module.kl_beta = 0.0
+            pl_module.crps_weight = 0.0
+
+    class _FinetuneMainCallback(pl.Callback):
+        def __init__(self):
+            super().__init__()
+            self._anchor_epoch = None
+
+        def on_train_epoch_start(self, trainer, pl_module):
+            if self._anchor_epoch is None:
+                self._anchor_epoch = int(trainer.current_epoch)
+            rel = int(trainer.current_epoch) - self._anchor_epoch
+
+            if rel < 70:
+                pl_module.kl_beta = 0.1
+                pl_module.crps_weight = 0.0
+            else:
+                pl_module.kl_beta = 0.1
+                pl_module.crps_weight = 1e4
+
     if args.eval:
         strategy = (
             "ddp" if args.kl_beta > 0 else "ddp_find_unused_parameters_true"
@@ -676,7 +746,7 @@ def main(input_args=None):
         )
 
     elif args.scheduler == "pretrain":
-        total_epochs = 100 + 200
+        total_epochs = 100 + 300
         _add_cosine_lr(model, total_epochs)
 
         # Phase 1: 100 epochs, kl_beta=0
@@ -687,43 +757,85 @@ def main(input_args=None):
             model, data_module, 100, strategy, ckpt_path=args.load
         )
 
-        # Phase 2: 200 epochs, kl_beta=0.1
+        # Phase 2: 300 epochs, kl_beta=0.1
         model.kl_beta = 0.1
         strategy = "ddp"
-        print("[pretrain] Phase 2/2: 200 epochs, kl_beta=0.1")
-        _run_phase(model, data_module, 300, strategy, ckpt_path=last_ckpt)
+        print("[pretrain] Phase 2/2: 300 epochs, kl_beta=0.1")
+        _run_phase(model, data_module, 400, strategy, ckpt_path=last_ckpt)
 
     elif args.scheduler == "finetune":
-        total_epochs = 75 + 25 + 10
-        _add_cosine_lr(model, total_epochs)
+        prior_done = 400
+        warmup_epochs = 20
+        finetune_epochs = 140
+        _add_finetune_sequential_lr(
+            model,
+            warmup_epochs=warmup_epochs,
+            finetune_epochs=finetune_epochs,
+            initial_lr=1e-5,
+            lr=1e-3,
+            eta_min=1e-5,
+        )
 
+        # Phase 1: 20 epochs warmup, kl_beta=0, ar=1
+        model.kl_beta = 0.0
+        model.crps_weight = 0.0
+        data_module.ar_steps_train = 1
+        print(
+            "[finetune] Phase 1/4: 20 ep warmup, ar=1, kl_beta=0, "
+            "strategy=ddp_find_unused_parameters_true"
+        )
+        last_ckpt = _run_phase(
+            model,
+            data_module,
+            prior_done + warmup_epochs,
+            "ddp_find_unused_parameters_true",
+            ckpt_path=args.load,
+            extra_callbacks=[_FinetuneWarmupCallback()],
+        )
+
+        # Phase 2: 80 epochs, kl_beta=0.1, ar=1
         model.kl_beta = 0.1
         model.crps_weight = 0.0
-
-        # Phase 1: 75 epochs, ar=1, kl_beta=0.1
         data_module.ar_steps_train = 1
-        strategy = "ddp"
-        print("[finetune] Phase 1/3: 75 epochs, ar=1, kl_beta=0.1")
+        print("[finetune] Phase 2/4: 80 ep, ar=1, kl_beta=0.1, " "strategy=ddp")
         last_ckpt = _run_phase(
-            model, data_module, 75, strategy, ckpt_path=args.load
+            model,
+            data_module,
+            prior_done + 100,
+            "ddp",
+            ckpt_path=last_ckpt,
         )
 
-        # Phase 2: 25 epochs, ar=2, kl_beta=0.1
+        # Phase 3: 20 epochs, kl_beta=0.1, ar=2
+        model.kl_beta = 0.1
+        model.crps_weight = 0.0
         data_module.ar_steps_train = 2
-        print("[finetune] Phase 2/3: 25 epochs, ar=2, kl_beta=0.1")
+        print("[finetune] Phase 3/4: 20 ep, ar=2, kl_beta=0.1, " "strategy=ddp")
         last_ckpt = _run_phase(
-            model, data_module, 100, strategy, ckpt_path=last_ckpt
+            model,
+            data_module,
+            prior_done + 120,
+            "ddp",
+            ckpt_path=last_ckpt,
         )
 
-        # Phase 3: 10 epochs, ar=2, kl_beta=0.1, crps_weight=1e4
+        # Phase 4: 20 epochs, kl_beta=0.1, ar=2, crps_weight=1e4
+        model.kl_beta = 0.1
         model.crps_weight = 1e4
+        data_module.ar_steps_train = 2
         print(
-            "[finetune] Phase 3/3: 10 epochs, ar=2, kl_beta=0.1, "
-            "crps_weight=1e4"
+            "[finetune] Phase 4/4: 20 ep, ar=2, kl_beta=0.1, "
+            "crps_weight=1e4, strategy=ddp"
         )
-        _run_phase(model, data_module, 110, strategy, ckpt_path=last_ckpt)
+        _run_phase(
+            model,
+            data_module,
+            prior_done + finetune_epochs,
+            "ddp",
+            ckpt_path=last_ckpt,
+        )
 
-    elif args.scheduler == "regional":
+    elif args.scheduler == "probabilistic":
         total_epochs = 100 + 200 + 25 + 25
         _add_cosine_lr(model, total_epochs)
 
@@ -733,7 +845,7 @@ def main(input_args=None):
         model.kl_beta = 0.0
         data_module.ar_steps_train = 1
         strategy = "ddp_find_unused_parameters_true"
-        print("[regional] Phase 1/4: 100 epochs, kl_beta=0")
+        print("[probabilistic] Phase 1/4: 100 epochs, kl_beta=0")
         last_ckpt = _run_phase(
             model, data_module, 100, strategy, ckpt_path=args.load
         )
@@ -741,28 +853,28 @@ def main(input_args=None):
         # Phase 2: 200 epochs, kl_beta=0.1
         model.kl_beta = 0.1
         strategy = "ddp"
-        print("[regional] Phase 2/4: 200 epochs, kl_beta=0.1")
+        print("[probabilistic] Phase 2/4: 200 epochs, kl_beta=0.1")
         last_ckpt = _run_phase(
             model, data_module, 300, strategy, ckpt_path=last_ckpt
         )
 
         # Phase 3: 25 epochs, ar=2, kl_beta=0.1
         data_module.ar_steps_train = 2
-        print("[regional] Phase 3/4: 25 epochs, ar=2, kl_beta=0.1")
+        print("[probabilistic] Phase 3/4: 25 epochs, ar=2, kl_beta=0.1")
         last_ckpt = _run_phase(
             model, data_module, 325, strategy, ckpt_path=last_ckpt
         )
 
-        # Phase 4: 25 epochs, ar=2, kl_beta=0.1, crps_weight=1e5
-        model.crps_weight = 1e5
+        # Phase 4: 25 epochs, ar=2, kl_beta=0.1, crps_weight=1e4
+        model.crps_weight = 1e4
         print(
-            "[regional] Phase 4/4: 25 epochs, ar=2, kl_beta=0.1, "
-            "crps_weight=1e5"
+            "[probabilistic] Phase 4/4: 25 epochs, ar=2, kl_beta=0.1, "
+            "crps_weight=1e4"
         )
         _run_phase(model, data_module, 350, strategy, ckpt_path=last_ckpt)
 
     elif args.scheduler == "deterministic":
-        total_epochs = 175 + 25
+        total_epochs = 150 + 25
         _add_cosine_lr(model, total_epochs)
 
         strategy = "ddp"

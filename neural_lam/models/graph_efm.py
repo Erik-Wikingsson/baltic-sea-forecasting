@@ -42,6 +42,8 @@ class GraphEFM(ARProbModel):
             datastore_atmosphere=datastore_atmosphere,
         )
 
+        self.prepare_clamping_params(config, datastore)
+
         assert (
             args.n_example_pred <= args.batch_size
         ), "Can not plot more examples than batch size in GraphEFM"
@@ -735,6 +737,11 @@ class GraphEFM(ARProbModel):
             graph_emb,
         )  # both (B, num_grid_nodes, d_state)
 
+        # Apply output clamping
+        # (decoder adds residual: pred_mean = prev + delta)
+        state_delta = pred_mean - last_state
+        pred_mean = self.get_clamped_new_state(state_delta, last_state)
+
         if self.output_std:
             pred_std = model_pred_std  # (B, num_grid_nodes, d_state)
         else:
@@ -860,14 +867,25 @@ class GraphEFM(ARProbModel):
             )
             # (B, S=2, pred_steps, num_grid_nodes, d_f), always 2 samples
 
-            # Compute CRPS
-            crps_estimate = metrics.crps_ens(
+            # Compute almost-fair CRPS without reduction
+            crps_estimate = metrics.afcrps_ens(
                 pred_traj_means,
                 target_states,
                 pred_traj_stds,
-                mask=self.loss_mask,
-            )  # (B, pred_steps)
-            crps_loss = torch.mean(crps_estimate)
+                average_grid=False,
+                sum_vars=False,
+                alpha=self.args.crps_alpha,
+            )  # (B, pred_steps, num_grid_nodes, d_f)
+
+            # Per-variable normalization and reduce
+            crps_loss = torch.mean(
+                metrics.mask_and_reduce_metric(
+                    crps_estimate / self.per_var_std,
+                    mask=self.loss_mask,
+                    average_grid=True,
+                    sum_vars=True,
+                )
+            )
 
             # Add onto loss
             loss = loss + self.crps_weight * crps_loss
@@ -926,6 +944,11 @@ class GraphEFM(ARProbModel):
 
         # TODO: Add option for pred_residual,
         # for now it is always True in the decoder
+
+        # Apply output clamping
+        # (decoder adds residual: pred_mean = prev + delta)
+        state_delta = pred_mean - prev_state
+        pred_mean = self.get_clamped_new_state(state_delta, prev_state)
 
         return self.sample_next_state(pred_mean, pred_std), pred_std
 
@@ -1062,6 +1085,10 @@ class GraphEFM(ARProbModel):
                 prev_state,
                 graph_emb,
             )  # (B, num_grid_nodes, d_state)
+
+            # Apply output clamping
+            state_delta = pred_mean - prev_state
+            pred_mean = self.get_clamped_new_state(state_delta, prev_state)
 
             new_state = self.sample_next_state(pred_mean, pred_std)
             # pred_state: (B, num_grid_nodes, d_f)

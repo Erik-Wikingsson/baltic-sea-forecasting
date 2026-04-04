@@ -11,7 +11,7 @@ import torch
 import xarray as xr
 
 # Local
-from .. import metrics, vis
+from .. import metrics, utils, vis
 from ..config import NeuralLAMConfig
 from ..datastore import BaseDatastore
 from ..loss_weighting import get_state_feature_weighting
@@ -309,6 +309,176 @@ class ARModel(pl.LightningModule):
             )
         else:
             self.unroll_ckpt_func = lambda f, *args: f(*args)
+
+    def prepare_clamping_params(
+        self, config: NeuralLAMConfig, datastore: BaseDatastore
+    ):
+        """
+        Prepare parameters for clamping predicted values to valid range.
+        Call this from subclass __init__ after super().__init__.
+        """
+        state_feature_names = datastore.get_vars_names(category="state")
+        lower_lims = config.training.output_clamping.lower
+        upper_lims = config.training.output_clamping.upper
+
+        unknown_features_lower = set(lower_lims.keys()) - set(
+            state_feature_names
+        )
+        unknown_features_upper = set(upper_lims.keys()) - set(
+            state_feature_names
+        )
+        if unknown_features_lower or unknown_features_upper:
+            raise ValueError(
+                "State feature limits were provided for unknown features: "
+                f"{unknown_features_lower.union(unknown_features_upper)}"
+            )
+
+        sigmoid_sharpness = 1
+        softplus_sharpness = 1
+        sigmoid_center = 0
+        softplus_center = 0
+
+        normalize_clamping_lim = (
+            lambda x, feature_idx: (x - self.state_mean[feature_idx])
+            / self.state_std[feature_idx]
+        )
+
+        sigmoid_lower_upper_idx = []
+        sigmoid_lower_lims = []
+        sigmoid_upper_lims = []
+
+        softplus_lower_idx = []
+        softplus_lower_lims = []
+
+        softplus_upper_idx = []
+        softplus_upper_lims = []
+
+        for feature_idx, feature in enumerate(state_feature_names):
+            if feature in lower_lims and feature in upper_lims:
+                assert lower_lims[feature] < upper_lims[feature], (
+                    f'Invalid clamping limits for feature "{feature}", '
+                    f"lower: {lower_lims[feature]}, larger than "
+                    f"upper: {upper_lims[feature]}"
+                )
+                sigmoid_lower_upper_idx.append(feature_idx)
+                sigmoid_lower_lims.append(
+                    normalize_clamping_lim(lower_lims[feature], feature_idx)
+                )
+                sigmoid_upper_lims.append(
+                    normalize_clamping_lim(upper_lims[feature], feature_idx)
+                )
+            elif feature in lower_lims and feature not in upper_lims:
+                softplus_lower_idx.append(feature_idx)
+                softplus_lower_lims.append(
+                    normalize_clamping_lim(lower_lims[feature], feature_idx)
+                )
+            elif feature not in lower_lims and feature in upper_lims:
+                softplus_upper_idx.append(feature_idx)
+                softplus_upper_lims.append(
+                    normalize_clamping_lim(upper_lims[feature], feature_idx)
+                )
+
+        self.register_buffer(
+            "sigmoid_lower_lims", torch.tensor(sigmoid_lower_lims)
+        )
+        self.register_buffer(
+            "sigmoid_upper_lims", torch.tensor(sigmoid_upper_lims)
+        )
+        self.register_buffer(
+            "softplus_lower_lims", torch.tensor(softplus_lower_lims)
+        )
+        self.register_buffer(
+            "softplus_upper_lims", torch.tensor(softplus_upper_lims)
+        )
+
+        self.register_buffer(
+            "clamp_lower_upper_idx", torch.tensor(sigmoid_lower_upper_idx)
+        )
+        self.register_buffer(
+            "clamp_lower_idx", torch.tensor(softplus_lower_idx)
+        )
+        self.register_buffer(
+            "clamp_upper_idx", torch.tensor(softplus_upper_idx)
+        )
+
+        self.clamp_lower_upper = lambda x: (
+            self.sigmoid_lower_lims
+            + (self.sigmoid_upper_lims - self.sigmoid_lower_lims)
+            * torch.sigmoid(sigmoid_sharpness * (x - sigmoid_center))
+        )
+        self.clamp_lower = lambda x: (
+            self.softplus_lower_lims
+            + torch.nn.functional.softplus(
+                x - softplus_center, beta=softplus_sharpness
+            )
+        )
+        self.clamp_upper = lambda x: (
+            self.softplus_upper_lims
+            - torch.nn.functional.softplus(
+                softplus_center - x, beta=softplus_sharpness
+            )
+        )
+
+        self.inverse_clamp_lower_upper = lambda x: (
+            sigmoid_center
+            + utils.inverse_sigmoid(
+                (x - self.sigmoid_lower_lims)
+                / (self.sigmoid_upper_lims - self.sigmoid_lower_lims)
+            )
+            / sigmoid_sharpness
+        )
+        self.inverse_clamp_lower = lambda x: (
+            utils.inverse_softplus(
+                x - self.softplus_lower_lims, beta=softplus_sharpness
+            )
+            + softplus_center
+        )
+        self.inverse_clamp_upper = lambda x: (
+            -utils.inverse_softplus(
+                self.softplus_upper_lims - x, beta=softplus_sharpness
+            )
+            + softplus_center
+        )
+
+    def get_clamped_new_state(self, state_delta, prev_state):
+        """
+        Clamp prediction to valid range supplied in config.
+        Returns the clamped new state after adding delta to original state.
+
+        Instead of the new state being computed as
+        $X_{t+1} = X_t + delta$
+        The clamped values will be
+        $f(f^{-1}(X_t) + delta)$
+        which ensures the output stays in the valid range while remaining
+        differentiable.
+
+        state_delta: (B, num_grid_nodes, feature_dim)
+        prev_state: (B, num_grid_nodes, feature_dim)
+        """
+        new_state = prev_state + state_delta
+
+        if self.clamp_lower_upper_idx.numel() > 0:
+            idx = self.clamp_lower_upper_idx
+            new_state[:, :, idx] = self.clamp_lower_upper(
+                self.inverse_clamp_lower_upper(prev_state[:, :, idx])
+                + state_delta[:, :, idx]
+            )
+
+        if self.clamp_lower_idx.numel() > 0:
+            idx = self.clamp_lower_idx
+            new_state[:, :, idx] = self.clamp_lower(
+                self.inverse_clamp_lower(prev_state[:, :, idx])
+                + state_delta[:, :, idx]
+            )
+
+        if self.clamp_upper_idx.numel() > 0:
+            idx = self.clamp_upper_idx
+            new_state[:, :, idx] = self.clamp_upper(
+                self.inverse_clamp_upper(prev_state[:, :, idx])
+                + state_delta[:, :, idx]
+            )
+
+        return new_state
 
     def _create_dataarray_from_tensor(
         self,
@@ -961,4 +1131,19 @@ class ARModel(pl.LightningModule):
                 del loaded_state_dict[old_key]
         if not self.restore_opt:
             opt = self.configure_optimizers()
-            checkpoint["optimizer_states"] = [opt.state_dict()]
+            if isinstance(opt, dict):
+                checkpoint["optimizer_states"] = [opt["optimizer"].state_dict()]
+                lr_cfg = opt.get("lr_scheduler")
+                if lr_cfg is not None:
+                    sched = (
+                        lr_cfg["scheduler"]
+                        if isinstance(lr_cfg, dict) and "scheduler" in lr_cfg
+                        else lr_cfg
+                    )
+                    # Match current schedule (e.g. SequentialLR on finetune)
+                    checkpoint["lr_schedulers"] = [sched.state_dict()]
+                else:
+                    checkpoint.pop("lr_schedulers", None)
+            else:
+                checkpoint["optimizer_states"] = [opt.state_dict()]
+                checkpoint.pop("lr_schedulers", None)

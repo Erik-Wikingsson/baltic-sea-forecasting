@@ -673,6 +673,11 @@ class ARProbModel(ARModel):
             ) * (
                 spread / skill
             )  # (pred_steps, d_f)
+
+            # Strip density channels before plotting/logging
+            if self.use_density:
+                spsk_ratios = spsk_ratios[:, : self._density_idx]
+
             log_dict = self.create_metric_log_dict(
                 spsk_ratios, prefix, "spsk_ratio"
             )

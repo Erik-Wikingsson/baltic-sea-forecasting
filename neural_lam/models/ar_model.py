@@ -116,12 +116,32 @@ class ARModel(pl.LightningModule):
             ),
         }
 
+        # Density channel: extend stats and store indices
+        density_cfg = getattr(config.training, "density_channel", None)
+        self.use_density = density_cfg is not None
+        if self.use_density:
+            state_feature_names = datastore.get_vars_names(category="state")
+            self._density_idx = len(state_feature_names)
+            self._associated_idxs = [
+                state_feature_names.index(v)
+                for v in density_cfg.associated_vars
+            ]
+            self.num_state_vars += 1
+            for key in state_stats:
+                state_stats[key] = torch.cat(
+                    [state_stats[key], torch.zeros(1)], dim=0
+                )
+            state_stats["state_std"][-1] = 1.0
+            state_stats["diff_std"][-1] = 1.0
+
         for key, val in state_stats.items():
             self.register_buffer(key, val, persistent=False)
 
         state_feature_weights = get_state_feature_weighting(
             config=config, datastore=datastore
         )
+        if self.use_density:
+            state_feature_weights = np.append(state_feature_weights, 1.0)
         self.feature_weights = torch.tensor(
             state_feature_weights, dtype=torch.float32
         )
@@ -265,6 +285,16 @@ class ARModel(pl.LightningModule):
 
         # Instantiate loss function
         self.loss = metrics.get_metric(args.loss)
+
+        # Extend masks for density channel (surface variable, same mask as any
+        # single-level ocean variable)
+        if self.use_density:
+            density_col = loss_mask_np[:, 0:1]
+            loss_mask_np = np.concatenate([loss_mask_np, density_col], axis=1)
+            density_interior = self.interior_mask[:, 0:1]
+            self.interior_mask = np.concatenate(
+                [self.interior_mask, density_interior], axis=1
+            )
 
         # Grid loss/metric mask (float, can encode both mask and latitude
         # weighting). Shape (num_grid_nodes, d_features).
@@ -440,6 +470,42 @@ class ARModel(pl.LightningModule):
             + softplus_center
         )
 
+    def apply_density_threshold(self, state):
+        """
+        Density channel thresholding for autoregressive rollout.
+
+        The predicted density channel is passed through sigmoid and thresholded
+        at 0.5.  Where density < 0.5, the density channel and all associated
+        ice variables are set to their normalized-zero values. Where density
+        >= 0.5, density is set to 1 (in normalized space).
+
+        This is applied only to the state that is fed back as input to the next
+        step, not to the state used for loss computation.
+
+        state: (B, num_grid_nodes, d_f) in standardized space
+        returns: state with density thresholding applied (same shape)
+        """
+        if not self.use_density:
+            return state
+
+        idx_d = self._density_idx
+        density_raw = state[:, :, idx_d]
+        density_sigmoid = torch.sigmoid(density_raw)
+        ice_present = density_sigmoid > 0.5
+
+        state = state.clone()
+        norm_zero = -self.state_mean / self.state_std
+        state[:, :, idx_d] = torch.where(
+            ice_present,
+            (1.0 - self.state_mean[idx_d]) / self.state_std[idx_d],
+            norm_zero[idx_d],
+        )
+        for idx_v in self._associated_idxs:
+            state[:, :, idx_v] = torch.where(
+                ice_present, state[:, :, idx_v], norm_zero[idx_v]
+            )
+        return state
+
     def get_clamped_new_state(self, state_delta, prev_state):
         """
         Clamp prediction to valid range supplied in config.
@@ -522,6 +588,8 @@ class ARModel(pl.LightningModule):
         time = np.array(time, dtype="datetime64[ns]")
 
         tensor = tensor.detach().cpu()
+        if self.use_density and category == "state":
+            tensor = tensor[..., : self._density_idx]
         da = weather_dataset.create_dataarray_from_tensor(
             tensor=tensor, time=time, category=category
         )
@@ -612,10 +680,14 @@ class ARModel(pl.LightningModule):
             if self.output_std:
                 pred_std_list.append(pred_std)
 
+            # Apply density thresholding to the state fed back as input
+            # (raw predictions kept for loss computation)
+            feedback_state = self.apply_density_threshold(pred_state)
+
             # Update conditioning states
             if self.input_steps >= 2:
                 prev_prev_state = prev_state
-            prev_state = pred_state
+            prev_state = feedback_state
 
         prediction = torch.stack(
             prediction_list, dim=1
@@ -881,18 +953,24 @@ class ARModel(pl.LightningModule):
             save_path = os.path.join(save_dir, example_name)
             ds_examples.to_zarr(save_path, mode="w")
 
+            plot_pred = pred_slice
+            plot_target = target_slice
+            if self.use_density:
+                plot_pred = pred_slice[..., : self._density_idx]
+                plot_target = target_slice[..., : self._density_idx]
+
             var_vmin = (
                 torch.minimum(
-                    pred_slice.flatten(0, 1).min(dim=0)[0],
-                    target_slice.flatten(0, 1).min(dim=0)[0],
+                    plot_pred.flatten(0, 1).min(dim=0)[0],
+                    plot_target.flatten(0, 1).min(dim=0)[0],
                 )
                 .cpu()
                 .numpy()
             )  # (d_f,)
             var_vmax = (
                 torch.maximum(
-                    pred_slice.flatten(0, 1).max(dim=0)[0],
-                    target_slice.flatten(0, 1).max(dim=0)[0],
+                    plot_pred.flatten(0, 1).min(dim=0)[0],
+                    plot_target.flatten(0, 1).min(dim=0)[0],
                 )
                 .cpu()
                 .numpy()
@@ -1010,6 +1088,12 @@ class ARModel(pl.LightningModule):
                 metric_tensor_averaged = torch.mean(metric_tensor, dim=0)
                 # (pred_steps, d_f)
 
+                # Strip density channel before plotting/logging
+                if self.use_density:
+                    metric_tensor_averaged = metric_tensor_averaged[
+                        :, : self._density_idx
+                    ]
+
                 # Take square root after averaging to change squared metrics
                 if "mse" in metric_name:
                     metric_tensor_averaged = torch.sqrt(metric_tensor_averaged)
@@ -1019,7 +1103,8 @@ class ARModel(pl.LightningModule):
                     metric_name = metric_name[: -len("_squared")]
 
                 # NOTE: we here assume rescaling for all metrics is linear
-                metric_rescaled = metric_tensor_averaged * self.state_std
+                state_std = self.state_std[: metric_tensor_averaged.shape[1]]
+                metric_rescaled = metric_tensor_averaged * state_std
                 # (pred_steps, d_f)
                 log_dict.update(
                     self.create_metric_log_dict(

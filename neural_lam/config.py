@@ -1,7 +1,7 @@
 # Standard library
 import dataclasses
 from pathlib import Path
-from typing import Dict, Union
+from typing import Dict, List, Union
 
 # Third-party
 import dataclass_wizard
@@ -84,6 +84,34 @@ class OutputClamping:
 
 
 @dataclasses.dataclass
+class DensityChannel:
+    """
+    Density channel for sea ice/wave variables.
+
+    A binary density channel (1 = ice present, 0 = absent) is constructed from
+    `reference_var` and appended to the state features. The model predicts the
+    density channel alongside all other variables. During autoregressive rollout
+    the predicted density is thresholded at 0.5: where density < 0.5, all
+    `associated_vars` (and the density channel itself) are set to zero, ensuring
+    clean ice-free regions without softplus drift.
+
+    Attributes
+    ----------
+    reference_var : str
+        State variable used to determine ice presence (e.g. "siconc").
+        Density = 1 where reference_var > 0 in physical space.
+    associated_vars : List[str]
+        State variables to zero out where density < 0.5 (e.g. ["siconc",
+        "sithick"]).  Should include the reference_var itself.
+    """
+
+    reference_var: str = "siconc"
+    associated_vars: List[str] = dataclasses.field(
+        default_factory=lambda: ["siconc", "sithick"]
+    )
+
+
+@dataclasses.dataclass
 class TrainingConfig:
     """
     Configuration related to training neural-lam
@@ -104,6 +132,8 @@ class TrainingConfig:
     output_clamping: OutputClamping = dataclasses.field(
         default_factory=OutputClamping
     )
+
+    density_channel: Union[DensityChannel, None] = None
 
     # If True, weigh grid-point contributions in loss/metrics by cos(latitude)
     # (normalized to unit mean over the interior grid), approximating equal-area

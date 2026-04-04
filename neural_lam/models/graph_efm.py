@@ -325,7 +325,7 @@ class GraphEFM(ARProbModel):
                 hidden_dim_mesh_nodes,
                 hidden_dim_edge,
                 latent_dim,
-                self._datastore.get_num_data_vars(category="state"),
+                self.num_state_vars,
                 args.processor_layers,
                 hidden_layers=args.hidden_layers,
                 output_std=bool(args.output_std),
@@ -353,7 +353,7 @@ class GraphEFM(ARProbModel):
                 args.hidden_dim,
                 latent_dim,
                 hidden_dim_grid,
-                self._datastore.get_num_data_vars(category="state"),
+                self.num_state_vars,
                 args.processor_layers,
                 hidden_layers=args.hidden_layers,
                 output_std=bool(args.output_std),
@@ -825,10 +825,13 @@ class GraphEFM(ARProbModel):
             # Get predicted next state (sample or mean)
             predicted_state = self.sample_next_state(pred_mean, pred_std)
 
+            # Apply density thresholding to the state fed back as input
+            feedback_state = self.apply_density_threshold(predicted_state)
+
             # Update conditioning states
             if self.input_steps >= 2:
                 prev_prev_state = prev_state
-            prev_state = predicted_state
+            prev_state = feedback_state
 
         # Compute final ELBO and loss, sum over time, mean over batch
         per_sample_likelihood = torch.sum(
@@ -1098,10 +1101,13 @@ class GraphEFM(ARProbModel):
             if self.output_std:
                 pred_std_list.append(pred_std)
 
+            # Apply density thresholding to the state fed back as input
+            feedback_state = self.apply_density_threshold(new_state)
+
             # Update conditioning states
             if self.input_steps >= 2:
                 prev_prev_state = prev_state
-            prev_state = new_state
+            prev_state = feedback_state
 
         prediction = torch.stack(
             prediction_list, dim=1

@@ -556,6 +556,7 @@ def main(input_args=None):
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         use_atmosphere_g2m=args.use_atmosphere_g2m,
+        density_channel=getattr(config.training, "density_channel", None),
     )
 
     # Instantiate model + trainer

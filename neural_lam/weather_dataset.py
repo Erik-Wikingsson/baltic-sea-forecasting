@@ -63,6 +63,9 @@ class WeatherDataset(torch.utils.data.Dataset):
         at time t. Default is 1.
     standardize : bool, optional
         Whether to standardize the data. Default is True.
+    density_channel : DensityChannel or None, optional
+        If provided, an binary density channel is constructed from
+        the reference variable and appended to the state features.
     """
 
     def __init__(
@@ -84,6 +87,7 @@ class WeatherDataset(torch.utils.data.Dataset):
         num_future_atmosphere_steps=1,
         standardize=True,
         use_atmosphere_g2m=False,
+        density_channel=None,
     ):
         super().__init__()
 
@@ -103,6 +107,18 @@ class WeatherDataset(torch.utils.data.Dataset):
         self.num_past_atmosphere_steps = num_past_atmosphere_steps
         self.num_future_atmosphere_steps = num_future_atmosphere_steps
         self.use_atmosphere_g2m = use_atmosphere_g2m
+        self.density_channel = density_channel
+
+        # Pre-compute index and standardized threshold for density channel
+        if self.density_channel is not None:
+            state_var_names = datastore.get_vars_names(category="state")
+            ref_var = self.density_channel.reference_var
+            if ref_var not in state_var_names:
+                raise ValueError(
+                    f"density_channel.reference_var='{ref_var}' "
+                    f"not found in state variables: {state_var_names}"
+                )
+            self._ref_idx = state_var_names.index(ref_var)
 
         self.da_state = self.datastore.get_dataarray(
             category="state", split=self.split
@@ -201,6 +217,15 @@ class WeatherDataset(torch.utils.data.Dataset):
 
             self.da_state_mean = self.ds_state_stats.state_mean
             self.da_state_std = self.ds_state_stats.state_std
+
+            if self.density_channel is not None:
+                mean_ref = float(
+                    self.da_state_mean.isel(state_feature=self._ref_idx).values
+                )
+                std_ref = float(
+                    self.da_state_std.isel(state_feature=self._ref_idx).values
+                )
+                self._ref_std_threshold = -mean_ref / std_ref
 
             if self.da_forcing is not None:
                 self.ds_forcing_stats = (
@@ -822,6 +847,29 @@ class WeatherDataset(torch.utils.data.Dataset):
                 boundary,
             )
 
+        # Construct and append ice density channel.
+        # density = 1 where reference variable > 0 in physical space, else 0.
+        # Land nodes get density = 0 via the land mask.
+        if self.density_channel is not None:
+            idx = self._ref_idx
+            if self.standardize:
+                thr = self._ref_std_threshold
+            else:
+                thr = 0.0
+            land_ref = torch.tensor(
+                self.land_mask_bool[0, :, idx], dtype=torch.bool
+            )  # (N_grid,), True for land
+            init_density = (init_states[:, :, idx] > thr).float()
+            init_density[:, land_ref] = 0.0
+            target_density = (target_states[:, :, idx] > thr).float()
+            target_density[:, land_ref] = 0.0
+            init_states = torch.cat(
+                [init_states, init_density.unsqueeze(-1)], dim=-1
+            )
+            target_states = torch.cat(
+                [target_states, target_density.unsqueeze(-1)], dim=-1
+            )
+
         # init_states: (2, N_grid, d_features)
         # target_states: (ar_steps, N_grid, d_features)
         # forcing: (ar_steps, N_grid, d_windowed_forcing)
@@ -982,12 +1030,14 @@ class WeatherDataModule(pl.LightningDataModule):
         batch_size=4,
         num_workers=16,
         use_atmosphere_g2m=False,
+        density_channel=None,
     ):
         super().__init__()
         self._datastore = datastore
         self._datastore_boundary = datastore_boundary
         self._datastore_atmosphere = datastore_atmosphere
         self.use_atmosphere_g2m = use_atmosphere_g2m
+        self.density_channel = density_channel
         self.num_past_forcing_steps = num_past_forcing_steps
         self.num_future_forcing_steps = num_future_forcing_steps
         self.current_forcing_step = current_forcing_step
@@ -1033,6 +1083,7 @@ class WeatherDataModule(pl.LightningDataModule):
                 num_past_atmosphere_steps=self.num_past_atmosphere_steps,
                 num_future_atmosphere_steps=self.num_future_atmosphere_steps,
                 use_atmosphere_g2m=self.use_atmosphere_g2m,
+                density_channel=self.density_channel,
             )
             self.val_dataset = WeatherDataset(
                 datastore=self._datastore,
@@ -1052,6 +1103,7 @@ class WeatherDataModule(pl.LightningDataModule):
                 num_past_atmosphere_steps=self.num_past_atmosphere_steps,
                 num_future_atmosphere_steps=self.num_future_atmosphere_steps,
                 use_atmosphere_g2m=self.use_atmosphere_g2m,
+                density_channel=self.density_channel,
             )
 
         if stage == "test" or stage is None:
@@ -1073,6 +1125,7 @@ class WeatherDataModule(pl.LightningDataModule):
                 num_past_atmosphere_steps=self.num_past_atmosphere_steps,
                 num_future_atmosphere_steps=self.num_future_atmosphere_steps,
                 use_atmosphere_g2m=self.use_atmosphere_g2m,
+                density_channel=self.density_channel,
             )
 
     def train_dataloader(self):

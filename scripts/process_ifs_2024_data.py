@@ -20,10 +20,10 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-ZARR_LONG_PATH = "ifs_fc240_subset.zarr"       # 10-day Wednesday forecasts, no lead_time=0
-ZARR_ANALYSIS_PATH = "ifs_fc240_analysis_subset_dummy.zarr"  # Analysis (lead_time=0 only), Wednesdays
-ZARR_SHORT_PATH = "ifs_fc24_subset.zarr"       # 24h Mon/Tue forecasts
-OUTPUT_PATH = "ifs2024_daily_subset.zarr"
+ZARR_LONG_PATH = "/capstor/store/cscs/swissai/a122/ojoel/oceanography_data/ifs240_wed2024/ifs/ifs_control_combined.zarr"       # 10-day Wednesday forecasts, no lead_time=0
+ZARR_ANALYSIS_PATH = "/capstor/store/cscs/swissai/a122/ojoel/oceanography_data/ifs240_wed2024_T00/ifs/ifs_control_combined.zarr"  # Analysis (lead_time=0 only), Wednesdays
+ZARR_SHORT_PATH = "/capstor/store/cscs/swissai/a122/ojoel/oceanography_data/ifs24_inits2024/ifs/ifs_control_combined.zarr"       # 24h Mon/Tue forecasts
+OUTPUT_PATH = "/capstor/store/cscs/swissai/a122/ojoel/oceanography_data/ifs2024_daily_means.zarr"
 
 # Variables accumulated from forecast start; all others are treated as instantaneous
 ACCUM_VARS = ["ssrd", "strd"]
@@ -98,6 +98,8 @@ def main():
 
     # Step 1: Restore lead_time=0 to the long forecast by merging with analysis
     print("Merging long forecast with analysis (restoring lead_time=0)...")
+    if "lead_time" not in ds_analysis.dims:
+        ds_analysis = ds_analysis.expand_dims(lead_time=[pd.Timedelta(0)])
     ds_merged = xr.concat([ds_analysis, ds_long], dim="lead_time").sortby("lead_time")
 
     # Step 2: Compute daily means for each forecast type

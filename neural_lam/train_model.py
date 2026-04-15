@@ -606,9 +606,6 @@ def main(input_args=None):
         datastore=datastore,
         datastore_boundary=datastore_boundary,
         datastore_atmosphere=datastore_atmosphere,
-        statistics_datastore=statistics_datastore,
-        statistics_datastore_boundary=statistics_datastore_boundary,
-        statistics_datastore_atmosphere=statistics_datastore_atmosphere,
     )
 
     if args.eval:

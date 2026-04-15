@@ -29,7 +29,6 @@ class GraphDiff(ARModel):
         datastore: BaseDatastore,
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
-        **kwargs,
     ):
         super().__init__(
             args,
@@ -37,7 +36,6 @@ class GraphDiff(ARModel):
             datastore=datastore,
             datastore_boundary=datastore_boundary,
             datastore_atmosphere=datastore_atmosphere,
-            **kwargs,
         )
         print("Initializing GraphDiff")
 

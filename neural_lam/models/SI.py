@@ -29,11 +29,9 @@ class SI(EDM):
         datastore: BaseDatastore,
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
-        **kwargs,
     ):
         super().__init__(
-            args, config, datastore, datastore_boundary, datastore_atmosphere,
-            **kwargs,
+            args, config, datastore, datastore_boundary, datastore_atmosphere
         )
         self.GT = None
         self.sampler = "euler"  # TODO: Only euler for now

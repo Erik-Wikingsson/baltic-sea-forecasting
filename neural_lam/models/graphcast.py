@@ -26,7 +26,6 @@ class GraphCast(BaseGraphModel):
         datastore: BaseDatastore,
         datastore_boundary: Union[BaseDatastore, None] = None,
         datastore_atmosphere: Union[BaseDatastore, None] = None,
-        **kwargs,
     ):
         super().__init__(
             args,
@@ -34,7 +33,6 @@ class GraphCast(BaseGraphModel):
             datastore=datastore,
             datastore_boundary=datastore_boundary,
             datastore_atmosphere=datastore_atmosphere,
-            **kwargs,
         )
 
         assert (

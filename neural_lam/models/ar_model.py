@@ -67,6 +67,11 @@ class ARModel(pl.LightningModule):
             else datastore_atmosphere
         )
         self.num_state_vars = datastore.get_num_data_vars(category="state")
+        self._density_channel = getattr(
+            config.training, "density_channel", None
+        )
+        if self._density_channel is not None:
+            self.num_state_vars += 1
         num_forcing_vars = datastore.get_num_data_vars(category="forcing")
         # Load masks
         self.surface_mask = datastore.get_mask(
@@ -122,34 +127,56 @@ class ARModel(pl.LightningModule):
             persistent=False,
         )
 
+        state_mean = torch.tensor(
+            da_state_stats.state_mean.values, dtype=torch.float32
+        )
+        state_std = torch.tensor(
+            da_state_stats.state_std.values, dtype=torch.float32
+        )
+        diff_mean = torch.tensor(
+            da_state_stats.state_diff_mean_standardized.values,
+            dtype=torch.float32,
+        )
+        diff_std = torch.tensor(
+            da_state_stats.state_diff_std_standardized.values,
+            dtype=torch.float32,
+        )
+
+        state_feature_weights = get_state_feature_weighting(
+            config=config, datastore=datastore
+        )
+        feature_weights = torch.tensor(
+            state_feature_weights, dtype=torch.float32
+        )
+
+        if self._density_channel is not None:
+            state_mean = torch.cat(
+                [state_mean, torch.zeros(1)], dim=0
+            )
+            state_std = torch.cat(
+                [state_std, torch.ones(1)], dim=0
+            )
+            diff_mean = torch.cat(
+                [diff_mean, torch.zeros(1)], dim=0
+            )
+            diff_std = torch.cat(
+                [diff_std, torch.ones(1)], dim=0
+            )
+            feature_weights = torch.cat(
+                [feature_weights, torch.ones(1)], dim=0
+            )
+
         state_stats = {
-            "state_mean": torch.tensor(
-                da_state_stats.state_mean.values, dtype=torch.float32
-            ),
-            "state_std": torch.tensor(
-                da_state_stats.state_std.values, dtype=torch.float32
-            ),
-            # Note that the one-step-diff stats (diff_mean and diff_std) are
-            # for differences computed on standardized data
-            "diff_mean": torch.tensor(
-                da_state_stats.state_diff_mean_standardized.values,
-                dtype=torch.float32,
-            ),
-            "diff_std": torch.tensor(
-                da_state_stats.state_diff_std_standardized.values,
-                dtype=torch.float32,
-            ),
+            "state_mean": state_mean,
+            "state_std": state_std,
+            "diff_mean": diff_mean,
+            "diff_std": diff_std,
         }
 
         for key, val in state_stats.items():
             self.register_buffer(key, val, persistent=False)
 
-        state_feature_weights = get_state_feature_weighting(
-            config=config, datastore=datastore
-        )
-        self.feature_weights = torch.tensor(
-            state_feature_weights, dtype=torch.float32
-        )
+        self.feature_weights = feature_weights
 
         # Double grid output dim. to also output std.-dev.
         self.output_std = bool(args.output_std)
@@ -290,6 +317,21 @@ class ARModel(pl.LightningModule):
 
         # Instantiate loss function
         self.loss = metrics.get_metric(args.loss)
+
+        if self._density_channel is not None:
+            ref_var = self._density_channel.reference_var
+            state_var_names = datastore.get_vars_names(category="state")
+            ref_idx = state_var_names.index(ref_var)
+            loss_mask_np = np.concatenate(
+                [loss_mask_np, loss_mask_np[:, ref_idx : ref_idx + 1]], axis=1
+            )
+            self.interior_mask = np.concatenate(
+                [
+                    self.interior_mask,
+                    self.interior_mask[:, ref_idx : ref_idx + 1],
+                ],
+                axis=1,
+            )
 
         # Grid loss/metric mask (float, can encode both mask and latitude
         # weighting). Shape (num_grid_nodes, d_features).
@@ -869,6 +911,9 @@ class ARModel(pl.LightningModule):
         prediction_rescaled = prediction * self.state_std + self.state_mean
         target_rescaled = target * self.state_std + self.state_mean
 
+        # Strip density channel for plotting/zarr (not a physical variable)
+        n_phys = self._datastore.get_num_data_vars(category="state")
+
         # Iterate over the examples
         for pred_slice, target_slice, time_slice in zip(
             prediction_rescaled[:n_examples],
@@ -879,13 +924,13 @@ class ARModel(pl.LightningModule):
             self.plotted_examples += 1  # Increment already here
 
             da_prediction = self._create_dataarray_from_tensor(
-                tensor=pred_slice,
+                tensor=pred_slice[..., :n_phys],
                 time=time_slice,
                 split=split,
                 category="state",
             ).unstack("grid_index")
             da_target = self._create_dataarray_from_tensor(
-                tensor=target_slice,
+                tensor=target_slice[..., :n_phys],
                 time=time_slice,
                 split=split,
                 category="state",
@@ -1046,6 +1091,13 @@ class ARModel(pl.LightningModule):
                 # NOTE: we here assume rescaling for all metrics is linear
                 metric_rescaled = metric_tensor_averaged * self.state_std
                 # (pred_steps, d_f)
+
+                # Strip density channel before plotting/logging
+                n_phys = self._datastore.get_num_data_vars(
+                    category="state"
+                )
+                metric_rescaled = metric_rescaled[:, :n_phys]
+
                 log_dict.update(
                     self.create_metric_log_dict(
                         metric_rescaled, prefix, metric_name

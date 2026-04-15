@@ -75,17 +75,20 @@ class MDPDatastore(BaseRegularGridDatastore):
                 var_names = self.get_vars_names(category)
                 rank_zero_print(f" {category:<8s}: {' '.join(var_names)}")
 
-        # check that all three train/val/test splits are available
-        required_splits = ["train", "val", "test"]
-        available_splits = list(self._ds.splits.split_name.values)
-        if not all(split in available_splits for split in required_splits):
-            raise ValueError(
-                f"Missing required splits: {required_splits} in available "
-                f"splits: {available_splits}"
+        self._available_splits = list(self._ds.splits.split_name.values)
+        all_splits = ["train", "val", "test"]
+        missing = [
+            s for s in all_splits if s not in self._available_splits
+        ]
+        if missing:
+            warnings.warn(
+                f"Splits {missing} not found in datastore "
+                f"(available: {self._available_splits}). "
+                "Training/validation will not be possible without them."
             )
 
         rank_zero_print("With the following splits (over time):")
-        for split in required_splits:
+        for split in self._available_splits:
             da_split = self._ds.splits.sel(split_name=split)
             da_split_start = da_split.sel(split_part="start").load().item()
             da_split_end = da_split.sel(split_part="end").load().item()
@@ -110,6 +113,11 @@ class MDPDatastore(BaseRegularGridDatastore):
         )
         if sample_var is not None and "init_time" in self._ds[sample_var].dims:
             self.is_forecast = True
+
+    @property
+    def available_splits(self) -> list:
+        """The splits available in this datastore."""
+        return list(self._available_splits)
 
     @property
     def root_path(self) -> Path:
@@ -276,6 +284,11 @@ class MDPDatastore(BaseRegularGridDatastore):
         da_category = da_category.set_index(grid_index=self.CARTESIAN_COORDS)
 
         if "time" in da_category.dims or "init_time" in da_category.dims:
+            if split not in self._available_splits:
+                raise ValueError(
+                    f"Requested split '{split}' not available in datastore. "
+                    f"Available splits: {self._available_splits}"
+                )
             t_start = (
                 self._ds.splits.sel(split_name=split)
                 .sel(split_part="start")

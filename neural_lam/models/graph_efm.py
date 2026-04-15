@@ -33,6 +33,7 @@ class GraphEFM(ARProbModel):
         datastore: BaseDatastore,
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
+        **kwargs,
     ):
         super().__init__(
             args,
@@ -40,6 +41,7 @@ class GraphEFM(ARProbModel):
             datastore=datastore,
             datastore_boundary=datastore_boundary,
             datastore_atmosphere=datastore_atmosphere,
+            **kwargs,
         )
 
         self.prepare_clamping_params(config, datastore)

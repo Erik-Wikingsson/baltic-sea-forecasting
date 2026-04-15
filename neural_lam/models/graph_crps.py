@@ -28,9 +28,11 @@ class GraphCRPS(ARProbModel):
         datastore: BaseDatastore,
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
+        **kwargs,
     ):
         super().__init__(
-            args, config, datastore, datastore_boundary, datastore_atmosphere
+            args, config, datastore, datastore_boundary, datastore_atmosphere,
+            **kwargs,
         )
         self.val_metrics.update(
             {

@@ -539,7 +539,7 @@ def cli(input_args=None):
     )
     args = parser.parse_args(input_args)
 
-    _, datastore, _, _ = load_config_and_datastores(
+    _, datastore, *_ = load_config_and_datastores(
         config_path=args.config_path
     )
     sea_xy, land_xy = load_grid_from_datastore(datastore)

@@ -169,6 +169,9 @@ class NeuralLAMConfig(dataclass_wizard.JSONWizard, dataclass_wizard.YAMLWizard):
     datastore: DatastoreSelection
     datastore_boundary: Union[DatastoreSelection, None] = None
     datastore_atmosphere: Union[DatastoreSelection, None] = None
+    statistics_datastore: Union[DatastoreSelection, None] = None
+    statistics_datastore_boundary: Union[DatastoreSelection, None] = None
+    statistics_datastore_atmosphere: Union[DatastoreSelection, None] = None
     training: TrainingConfig = dataclasses.field(default_factory=TrainingConfig)
 
     class _(dataclass_wizard.JSONWizard.Meta):
@@ -257,4 +260,51 @@ def load_config_and_datastores(
     else:
         datastore_atmosphere = None
 
-    return config, datastore, datastore_boundary, datastore_atmosphere
+    # Optional separate datastores for loading standardization statistics
+    # (e.g. training-data stats used to normalize forecast-mode data).
+    # When not specified, statistics are loaded from the main datastores.
+    if config.statistics_datastore is not None:
+        stats_ds_config_path = (
+            Path(config_path).parent
+            / config.statistics_datastore.config_path
+        )
+        statistics_datastore = init_datastore(
+            datastore_kind=config.statistics_datastore.kind,
+            config_path=stats_ds_config_path,
+        )
+    else:
+        statistics_datastore = None
+
+    if config.statistics_datastore_boundary is not None:
+        stats_boundary_config_path = (
+            Path(config_path).parent
+            / config.statistics_datastore_boundary.config_path
+        )
+        statistics_datastore_boundary = init_datastore(
+            datastore_kind=config.statistics_datastore_boundary.kind,
+            config_path=stats_boundary_config_path,
+        )
+    else:
+        statistics_datastore_boundary = None
+
+    if config.statistics_datastore_atmosphere is not None:
+        stats_atmosphere_config_path = (
+            Path(config_path).parent
+            / config.statistics_datastore_atmosphere.config_path
+        )
+        statistics_datastore_atmosphere = init_datastore(
+            datastore_kind=config.statistics_datastore_atmosphere.kind,
+            config_path=stats_atmosphere_config_path,
+        )
+    else:
+        statistics_datastore_atmosphere = None
+
+    return (
+        config,
+        datastore,
+        datastore_boundary,
+        datastore_atmosphere,
+        statistics_datastore,
+        statistics_datastore_boundary,
+        statistics_datastore_atmosphere,
+    )

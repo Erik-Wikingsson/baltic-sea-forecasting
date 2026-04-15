@@ -113,7 +113,7 @@ def main():
 
     assert args.config_path is not None, "Specify --config_path"
 
-    _, datastore, _, _ = load_config_and_datastores(
+    _, datastore, *_ = load_config_and_datastores(
         config_path=args.config_path
     )
 

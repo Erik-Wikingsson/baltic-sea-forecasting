@@ -320,9 +320,9 @@ class DummyDatastore(BaseRegularGridDatastore):
         data being loaded.
 
         For categories of data that have a time dimension (i.e. not static
-        data), the dataarray is expected additionally have `(analysis_time,
-        elapsed_forecast_duration)` dimensions if `is_forecast` is True, or
-        `(time)` if `is_forecast` is False.
+        data), the dataarray is expected additionally have `(init_time,
+        lead_time)` dimensions if `is_forecast` is True, or `(time)` if
+        `is_forecast` is False.
 
         If the data is ensemble data, the dataarray is expected to have an
         additional `ensemble_member` dimension.

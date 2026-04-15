@@ -139,7 +139,7 @@ def main():
         args.config_path is not None
     ), "Specify your config with --config_path"
 
-    _, datastore, datastore_boundary, datastore_atmosphere = (
+    _, datastore, datastore_boundary, datastore_atmosphere, *_ = (
         load_config_and_datastores(config_path=args.config_path)
     )
 

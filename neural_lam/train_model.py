@@ -543,15 +543,24 @@ def main(input_args=None):
     seed.seed_everything(args.seed)
 
     # Load neural-lam configuration and datastore to use
-    config, datastore, datastore_boundary, datastore_atmosphere = (
-        load_config_and_datastores(config_path=args.config_path)
-    )
+    (
+        config,
+        datastore,
+        datastore_boundary,
+        datastore_atmosphere,
+        statistics_datastore,
+        statistics_datastore_boundary,
+        statistics_datastore_atmosphere,
+    ) = load_config_and_datastores(config_path=args.config_path)
 
     # Create datamodule
     data_module = WeatherDataModule(
         datastore=datastore,
         datastore_boundary=datastore_boundary,
         datastore_atmosphere=datastore_atmosphere,
+        statistics_datastore=statistics_datastore,
+        statistics_datastore_boundary=statistics_datastore_boundary,
+        statistics_datastore_atmosphere=statistics_datastore_atmosphere,
         ar_steps_train=args.ar_steps_train,
         ar_steps_eval=args.ar_steps_eval,
         input_steps=args.input_steps,

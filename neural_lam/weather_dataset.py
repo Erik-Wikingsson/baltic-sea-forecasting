@@ -88,6 +88,9 @@ class WeatherDataset(torch.utils.data.Dataset):
         standardize=True,
         use_atmosphere_g2m=False,
         density_channel=None,
+        statistics_datastore: BaseDatastore = None,
+        statistics_datastore_boundary: BaseDatastore = None,
+        statistics_datastore_atmosphere: BaseDatastore = None,
     ):
         super().__init__()
 
@@ -108,6 +111,20 @@ class WeatherDataset(torch.utils.data.Dataset):
         self.num_future_atmosphere_steps = num_future_atmosphere_steps
         self.use_atmosphere_g2m = use_atmosphere_g2m
         self.density_channel = density_channel
+        self.statistics_datastore = (
+            statistics_datastore if statistics_datastore is not None
+            else datastore
+        )
+        self.statistics_datastore_boundary = (
+            statistics_datastore_boundary
+            if statistics_datastore_boundary is not None
+            else datastore_boundary
+        )
+        self.statistics_datastore_atmosphere = (
+            statistics_datastore_atmosphere
+            if statistics_datastore_atmosphere is not None
+            else datastore_atmosphere
+        )
 
         # Pre-compute index and standardized threshold for density channel
         if self.density_channel is not None:
@@ -211,8 +228,10 @@ class WeatherDataset(torch.utils.data.Dataset):
         # TODO: This will become part of ar_model.py soon!
         self.standardize = standardize
         if standardize:
-            self.ds_state_stats = self.datastore.get_standardization_dataarray(
-                category="state"
+            self.ds_state_stats = (
+                self.statistics_datastore.get_standardization_dataarray(
+                    category="state"
+                )
             )
 
             self.da_state_mean = self.ds_state_stats.state_mean
@@ -229,27 +248,24 @@ class WeatherDataset(torch.utils.data.Dataset):
 
             if self.da_forcing is not None:
                 self.ds_forcing_stats = (
-                    self.datastore.get_standardization_dataarray(
-                        category="forcing"
-                    )
+                    self.statistics_datastore
+                    .get_standardization_dataarray(category="forcing")
                 )
                 self.da_forcing_mean = self.ds_forcing_stats.forcing_mean
                 self.da_forcing_std = self.ds_forcing_stats.forcing_std
 
             if self.da_boundary_forcing is not None:
                 self.ds_boundary_stats = (
-                    self.datastore_boundary.get_standardization_dataarray(
-                        category="forcing"
-                    )
+                    self.statistics_datastore_boundary
+                    .get_standardization_dataarray(category="forcing")
                 )
                 self.da_boundary_mean = self.ds_boundary_stats.forcing_mean
                 self.da_boundary_std = self.ds_boundary_stats.forcing_std
 
             if self.da_atmosphere_forcing is not None:
                 self.ds_atmosphere_stats = (
-                    self.datastore_atmosphere.get_standardization_dataarray(
-                        category="forcing"
-                    )
+                    self.statistics_datastore_atmosphere
+                    .get_standardization_dataarray(category="forcing")
                 )
                 self.da_atmosphere_mean = self.ds_atmosphere_stats.forcing_mean
                 self.da_atmosphere_std = self.ds_atmosphere_stats.forcing_std
@@ -1028,11 +1044,17 @@ class WeatherDataModule(pl.LightningDataModule):
         num_workers=16,
         use_atmosphere_g2m=False,
         density_channel=None,
+        statistics_datastore: BaseDatastore = None,
+        statistics_datastore_boundary: BaseDatastore = None,
+        statistics_datastore_atmosphere: BaseDatastore = None,
     ):
         super().__init__()
         self._datastore = datastore
         self._datastore_boundary = datastore_boundary
         self._datastore_atmosphere = datastore_atmosphere
+        self._statistics_datastore = statistics_datastore
+        self._statistics_datastore_boundary = statistics_datastore_boundary
+        self._statistics_datastore_atmosphere = statistics_datastore_atmosphere
         self.use_atmosphere_g2m = use_atmosphere_g2m
         self.density_channel = density_channel
         self.num_past_forcing_steps = num_past_forcing_steps
@@ -1061,6 +1083,13 @@ class WeatherDataModule(pl.LightningDataModule):
             self.multiprocessing_context = None
 
     def setup(self, stage=None):
+        stats_kwargs = dict(
+            statistics_datastore=self._statistics_datastore,
+            statistics_datastore_boundary=self._statistics_datastore_boundary,
+            statistics_datastore_atmosphere=(
+                self._statistics_datastore_atmosphere
+            ),
+        )
         if stage == "fit" or stage is None:
             self.train_dataset = WeatherDataset(
                 datastore=self._datastore,
@@ -1081,6 +1110,7 @@ class WeatherDataModule(pl.LightningDataModule):
                 num_future_atmosphere_steps=self.num_future_atmosphere_steps,
                 use_atmosphere_g2m=self.use_atmosphere_g2m,
                 density_channel=self.density_channel,
+                **stats_kwargs,
             )
             self.val_dataset = WeatherDataset(
                 datastore=self._datastore,
@@ -1101,6 +1131,7 @@ class WeatherDataModule(pl.LightningDataModule):
                 num_future_atmosphere_steps=self.num_future_atmosphere_steps,
                 use_atmosphere_g2m=self.use_atmosphere_g2m,
                 density_channel=self.density_channel,
+                **stats_kwargs,
             )
 
         if stage == "test" or stage is None:
@@ -1123,6 +1154,7 @@ class WeatherDataModule(pl.LightningDataModule):
                 num_future_atmosphere_steps=self.num_future_atmosphere_steps,
                 use_atmosphere_g2m=self.use_atmosphere_g2m,
                 density_channel=self.density_channel,
+                **stats_kwargs,
             )
 
     def train_dataloader(self):

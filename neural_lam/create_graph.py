@@ -724,7 +724,7 @@ def cli(input_args=None):
     ), "Specify your config with --config_path"
 
     # Load neural-lam configuration and datastore to use
-    _, datastore, datastore_boundary, datastore_atmosphere = (
+    _, datastore, datastore_boundary, datastore_atmosphere, *_ = (
         load_config_and_datastores(config_path=args.config_path)
     )
 

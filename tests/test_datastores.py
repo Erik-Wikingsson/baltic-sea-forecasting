@@ -192,8 +192,8 @@ def test_get_dataarray(datastore_name):
                     expected_dims.append("time")
                 else:
                     expected_dims += [
-                        "analysis_time",
-                        "elapsed_forecast_duration",
+                        "init_time",
+                        "lead_time",
                     ]
 
             if datastore.is_ensemble and category == "state":

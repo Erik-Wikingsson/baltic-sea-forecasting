@@ -272,7 +272,7 @@ class WeatherDataset(torch.utils.data.Dataset):
 
             # check that there are enough forecast steps available to create
             # samples given the number of autoregressive steps requested
-            n_forecast_steps = self.da_state.elapsed_forecast_duration.size
+            n_forecast_steps = self.da_state.lead_time.size
             if n_forecast_steps < self.input_steps + self.ar_steps:
                 raise ValueError(
                     "The number of forecast steps available "
@@ -282,7 +282,7 @@ class WeatherDataset(torch.utils.data.Dataset):
                     "creating a sample with initial and target states."
                 )
 
-            return self.da_state.analysis_time.size
+            return self.da_state.init_time.size
         else:
             # Calculate the number of samples in the dataset n_samples = total
             # time steps - (autoregressive steps + past forcing + future
@@ -313,9 +313,9 @@ class WeatherDataset(torch.utils.data.Dataset):
         ----------
         da_state : xr.DataArray
             The dataarray to slice. This is expected to have a `time` dimension
-            if the datastore is providing analysis only data, and a
-            `analysis_time` and `elapsed_forecast_duration` dimensions if the
-            datastore is providing forecast data.
+            if the datastore is providing analysis only data, and
+            `init_time` and `lead_time` dimensions if the datastore is
+            providing forecast data.
         idx : int
             The index of the time step to start the sample from.
         n_steps : int
@@ -332,22 +332,21 @@ class WeatherDataset(torch.utils.data.Dataset):
         if self.datastore.is_forecast:
             start_idx = max(0, self.num_past_forcing_steps - init_steps)
             end_idx = max(init_steps, self.num_past_forcing_steps) + n_steps
-            # this implies that the data will have both `analysis_time` and
-            # `elapsed_forecast_duration` dimensions for forecasts. We for now
-            # simply select a analysis time and the first `n_steps` forecast
-            # times (given no offset). Note that this means that we get one
-            # sample per forecast, always starting at forecast time 2.
+            # This implies that the data will have both `init_time` and
+            # `lead_time` dimensions for forecasts. We select an init time
+            # and the corresponding lead time range. One sample per forecast,
+            # always starting from the earliest available lead time.
             da_sliced = da_state.isel(
-                analysis_time=idx,
-                elapsed_forecast_duration=slice(start_idx, end_idx),
+                init_time=idx,
+                lead_time=slice(start_idx, end_idx),
             )
             # create a new time dimension so that the produced sample has a
             # `time` dimension, similarly to the analysis only data
             da_sliced["time"] = (
-                da_sliced.analysis_time + da_sliced.elapsed_forecast_duration
+                da_sliced.init_time + da_sliced.lead_time
             )
             da_sliced = da_sliced.swap_dims(
-                {"elapsed_forecast_duration": "time"}
+                {"lead_time": "time"}
             )
         else:
             # For analysis data we slice the time dimension directly. The offset
@@ -382,9 +381,9 @@ class WeatherDataset(torch.utils.data.Dataset):
         ----------
         da_forcing : xr.DataArray
             The forcing dataarray to slice. This is expected to have a `time`
-            dimension if the datastore is providing analysis only data, and a
-            `analysis_time` and `elapsed_forecast_duration` dimensions if the
-            datastore is providing forecast data.
+            dimension if the datastore is providing analysis only data, and
+            `init_time` and `lead_time` dimensions if the datastore is
+            providing forecast data.
         idx : int
             The index of the time step to start the sample from.
         n_steps : int
@@ -421,12 +420,10 @@ class WeatherDataset(torch.utils.data.Dataset):
         da_list = []
 
         if self.datastore.is_forecast:
-            # This implies that the data will have both `analysis_time` and
-            # `elapsed_forecast_duration` dimensions for forecasts. We for now
-            # simply select an analysis time and the first `n_steps` forecast
-            # times (given no offset). Note that this means that we get one
-            # sample per forecast.
-            # Add a 'time' dimension using the actual forecast times
+            # This implies that the data will have both `init_time` and
+            # `lead_time` dimensions for forecasts. We select an init time
+            # and the corresponding lead time range. One sample per forecast.
+            # Add a 'time' dimension using the actual forecast times.
             offset = max(init_steps, num_past_steps)
             for step in range(n_steps):
                 start_idx = offset + step - num_past_steps
@@ -434,41 +431,41 @@ class WeatherDataset(torch.utils.data.Dataset):
                 current_idx = offset + step
 
                 current_time = (
-                    da_forcing.analysis_time[idx]
-                    + da_forcing.elapsed_forecast_duration[current_idx]
+                    da_forcing.init_time[idx]
+                    + da_forcing.lead_time[current_idx]
                 )
 
                 if include_current:
                     da_sliced = da_forcing.isel(
-                        analysis_time=idx,
-                        elapsed_forecast_duration=slice(start_idx, end_idx + 1),
+                        init_time=idx,
+                        lead_time=slice(start_idx, end_idx + 1),
                     )
                 else:
                     parts = []
                     if num_past_steps > 0:
                         da_past = da_forcing.isel(
-                            analysis_time=idx,
-                            elapsed_forecast_duration=slice(
+                            init_time=idx,
+                            lead_time=slice(
                                 start_idx, current_idx
                             ),
                         )
                         parts.append(da_past)
                     if num_future_steps > 0:
                         da_future = da_forcing.isel(
-                            analysis_time=idx,
-                            elapsed_forecast_duration=slice(
+                            init_time=idx,
+                            lead_time=slice(
                                 current_idx + 1, end_idx + 1
                             ),
                         )
                         parts.append(da_future)
                     da_sliced = (
-                        xr.concat(parts, dim="elapsed_forecast_duration")
+                        xr.concat(parts, dim="lead_time")
                         if len(parts) > 1
                         else parts[0]
                     )
 
                 da_sliced = da_sliced.rename(
-                    {"elapsed_forecast_duration": "window"}
+                    {"lead_time": "window"}
                 )
 
                 # Assign the 'window' coordinate to be relative positions

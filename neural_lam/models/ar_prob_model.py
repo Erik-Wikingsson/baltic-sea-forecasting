@@ -197,93 +197,6 @@ class ARProbModel(ARModel):
         self.log_spsk_ratio(self.val_metrics, "val")
         super().on_validation_epoch_end()
 
-    def _save_predictions_to_zarr(
-        self,
-        batch_times: torch.Tensor,
-        batch_predictions: torch.Tensor,
-        batch_idx: int,
-        zarr_output_path: str,
-    ):
-        """
-        Save state predictions for single batch to zarr dataset. Will append to
-        existing dataset for batch_idx > 0. Resulting dataset will contain a
-        variable named `state` with coordinates (start_time,
-        elapsed_forecast_duration, grid_index, state_feature).
-        Parameters
-        ----------
-        batch_times : torch.Tensor[int]
-            The times for the batch, given as epoch time in nanoseconds. Shape
-            is (B, args.pred_steps) where B is the batch size and
-            args.pred_steps is the number of prediction steps.
-        batch_predictions : torch.Tensor[float]
-            The predictions for the batch, given as (B, args.pred_steps,
-            num_grid_nodes, d_f) where B is the batch size, args.pred_steps is
-            the number of prediction steps, num_grid_nodes is the number of
-            grid nodes, and d_f is the number of state features.
-        batch_idx : int
-            The index of the batch in the current epoch.
-        """
-        # Scale predictions back to original data scale
-        batch_predictions_rescaled = (
-            batch_predictions * self.state_std + self.state_mean
-        )
-
-        # Convert predictions to DataArray using _create_dataarray_from_tensor
-        das_pred = []
-        for i in range(len(batch_times)):
-            da_pred = self._create_dataarray_from_tensor(
-                tensor=batch_predictions_rescaled[i],
-                time=batch_times[i],
-                split="test",
-                category="state",
-            )
-            # Unstack grid coords if necessary, this also avoids the need to
-            # try to store a MultiIndex zarr dataset which is not supported by
-            # xarray
-            if isinstance(self._datastore, BaseRegularGridDatastore):
-                da_pred = self._datastore.unstack_grid_coords(da_pred)
-
-            # First entry in da_pred.coords["time"] is time of first prediction,
-            # so init time of forecast is one time step before
-            t0 = da_pred.coords["time"].values[0] - np.array(
-                self._datastore.step_length, dtype="timedelta64[h]"
-            )
-            da_pred.coords["start_time"] = t0
-            da_pred.coords["elapsed_forecast_duration"] = da_pred.time - t0
-            da_pred = da_pred.swap_dims({"time": "elapsed_forecast_duration"})
-            da_pred.name = "state"
-            das_pred.append(da_pred)
-
-        da_pred_batch = xr.concat(das_pred, dim="start_time")
-
-        # Apply chunking start_time and elapsed_forecast_duration, but leave
-        # whole state in one chunk
-        da_pred_batch = da_pred_batch.chunk(
-            {"start_time": 1, "elapsed_forecast_duration": 1}
-        )
-
-        if batch_idx == 0:
-            logger.info(f"Saving predictions to {zarr_output_path}")
-            compressor = numcodecs.Blosc(
-                cname="zstd", clevel=9, shuffle=numcodecs.Blosc.SHUFFLE
-            )
-            da_pred_batch.to_zarr(
-                zarr_output_path,
-                mode="w",
-                consolidated=True,
-                encoding={
-                    "start_time": {
-                        "units": "Seconds since 1970-01-01 00:00:00",
-                        "dtype": "int64",
-                    },
-                    "state": {"compressor": compressor},
-                },
-            )
-        else:
-            da_pred_batch.to_zarr(
-                zarr_output_path, mode="a", append_dim="start_time"
-            )
-
     def _save_ensemble_example_to_zarr(
         self,
         time_row: torch.Tensor,
@@ -297,6 +210,9 @@ class ARProbModel(ARModel):
         Writes ``example_forecasts/ensemble_example_{example_index}.zarr`` under
         ``logger.save_dir``, next to deterministic ``example_*.zarr`` files.
         Variables: ``prediction`` (ensemble_member, ...), ``target`` (...).
+
+        Uses ``init_time`` and ``lead_time`` (timedelta) as forecast
+        coordinates, with 1-day step size.
         """
         save_dir = os.path.join(self.logger.save_dir, "example_forecasts")
         os.makedirs(save_dir, exist_ok=True)
@@ -320,9 +236,9 @@ class ARProbModel(ARModel):
             t0 = da_m.coords["time"].values[0] - np.array(
                 self._datastore.step_length, dtype="timedelta64[h]"
             )
-            da_m.coords["start_time"] = t0
-            da_m.coords["elapsed_forecast_duration"] = da_m.time - t0
-            da_m = da_m.swap_dims({"time": "elapsed_forecast_duration"})
+            da_m.coords["init_time"] = t0
+            da_m.coords["lead_time"] = da_m.time - t0
+            da_m = da_m.swap_dims({"time": "lead_time"})
             member_das.append(da_m)
 
         ens_dim = xr.DataArray(
@@ -345,9 +261,9 @@ class ARProbModel(ARModel):
         t0_t = da_target.coords["time"].values[0] - np.array(
             self._datastore.step_length, dtype="timedelta64[h]"
         )
-        da_target.coords["start_time"] = t0_t
-        da_target.coords["elapsed_forecast_duration"] = da_target.time - t0_t
-        da_target = da_target.swap_dims({"time": "elapsed_forecast_duration"})
+        da_target.coords["init_time"] = t0_t
+        da_target.coords["lead_time"] = da_target.time - t0_t
+        da_target = da_target.swap_dims({"time": "lead_time"})
         da_target.name = "target"
 
         ds_out = xr.Dataset({"prediction": da_prediction, "target": da_target})
@@ -360,7 +276,7 @@ class ARProbModel(ARModel):
             mode="w",
             consolidated=True,
             encoding={
-                "start_time": {
+                "init_time": {
                     "units": "Seconds since 1970-01-01 00:00:00",
                     "dtype": "int64",
                 },
@@ -422,14 +338,15 @@ class ARProbModel(ARModel):
                 self.n_example_pred - self.plotted_examples,
             )
 
-            time = batch[-1]
-            for i in range(n_additional_examples):
-                self._save_ensemble_example_to_zarr(
-                    time[i],
-                    trajectories[i],
-                    target_states[i],
-                    self.plotted_examples + i + 1,
-                )
+            if getattr(self.args, "save_ensemble_zarr", False):
+                time = batch[-1]
+                for i in range(n_additional_examples):
+                    self._save_ensemble_example_to_zarr(
+                        time[i],
+                        trajectories[i],
+                        target_states[i],
+                        self.plotted_examples + i + 1,
+                    )
 
             self.plot_ensemble_examples(
                 batch,

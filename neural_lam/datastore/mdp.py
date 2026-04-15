@@ -104,6 +104,13 @@ class MDPDatastore(BaseRegularGridDatastore):
 
         self.CARTESIAN_COORDS = dim_order
 
+        # Auto-detect forecast data by checking for init_time/lead_time dims
+        sample_var = next(
+            (v for v in ("state", "forcing") if v in self._ds), None
+        )
+        if sample_var is not None and "init_time" in self._ds[sample_var].dims:
+            self.is_forecast = True
+
     @property
     def root_path(self) -> Path:
         """The root path of the dataset.
@@ -138,6 +145,12 @@ class MDPDatastore(BaseRegularGridDatastore):
             The length of the time steps in hours.
 
         """
+        if self.is_forecast:
+            da_dt = self._ds["lead_time"].diff("lead_time")
+            total_sec = (
+                da_dt.dt.total_seconds().isel(lead_time=0).astype(int)
+            )
+            return (total_sec // 3600).item()
         da_dt = self._ds["time"].diff("time")
         total_sec = da_dt.dt.total_seconds().isel(time=0).astype(int)
         return (total_sec // 3600).item()
@@ -232,9 +245,9 @@ class MDPDatastore(BaseRegularGridDatastore):
         loaded.
 
         For categories of data that have a time dimension (i.e. not static
-        data), the dataarray will additionally have `(analysis_time,
-        elapsed_forecast_duration)` dimensions if `is_forecast` is True, or
-        `(time)` if `is_forecast` is False.
+        data), the dataarray will additionally have `(init_time, lead_time)`
+        dimensions if `is_forecast` is True, or `(time)` if `is_forecast`
+        is False.
 
         If the data is ensemble data, the dataarray will have an additional
         `ensemble_member` dimension.
@@ -262,7 +275,7 @@ class MDPDatastore(BaseRegularGridDatastore):
         # set multi-index for grid-index
         da_category = da_category.set_index(grid_index=self.CARTESIAN_COORDS)
 
-        if "time" in da_category.dims:
+        if "time" in da_category.dims or "init_time" in da_category.dims:
             t_start = (
                 self._ds.splits.sel(split_name=split)
                 .sel(split_part="start")
@@ -275,7 +288,12 @@ class MDPDatastore(BaseRegularGridDatastore):
                 .load()
                 .item()
             )
-            da_category = da_category.sel(time=slice(t_start, t_end))
+            if "init_time" in da_category.dims:
+                da_category = da_category.sel(
+                    init_time=slice(t_start, t_end)
+                )
+            else:
+                da_category = da_category.sel(time=slice(t_start, t_end))
 
         dim_order = self.expected_dim_order(category=category)
         da_category = da_category.transpose(*dim_order)

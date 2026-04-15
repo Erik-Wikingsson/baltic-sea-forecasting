@@ -490,6 +490,12 @@ def main(input_args=None):
         help="Number of ensemble members during evaluation (default: 5)",
     )
     parser.add_argument(
+        "--save_ensemble_zarr",
+        action="store_true",
+        help="Save full ensemble forecasts to zarr during test "
+        "(default: False)",
+    )
+    parser.add_argument(
         "--scheduler",
         type=str,
         default=None,

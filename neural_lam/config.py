@@ -135,6 +135,10 @@ class TrainingConfig:
 
     density_channel: Union[DensityChannel, None] = None
 
+    # Optional per-variable scaling used in GraphEFM CRPS term.
+    # Values act as divisors in CRPS reduction (default 1.0 for all vars).
+    crps_weights: Dict[str, float] = dataclasses.field(default_factory=dict)
+
     # If True, weigh grid-point contributions in loss/metrics by cos(latitude)
     # (normalized to unit mean over the interior grid), approximating equal-area
     # weighting on the sphere. If False (default), all interior grid points are

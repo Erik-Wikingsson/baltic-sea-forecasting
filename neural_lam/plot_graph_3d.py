@@ -73,13 +73,13 @@ def main():
     parser.add_argument(
         "--grid_node_size",
         type=float,
-        default=2.0,
+        default=1.0,
         help="Size of grid nodes",
     )
     parser.add_argument(
         "--mesh_node_size",
         type=float,
-        default=3.0,
+        default=1.5,
         help="Size of mesh nodes",
     )
     # Colors

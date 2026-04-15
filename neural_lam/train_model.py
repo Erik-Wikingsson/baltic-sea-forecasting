@@ -493,7 +493,13 @@ def main(input_args=None):
         "--scheduler",
         type=str,
         default=None,
-        choices=["pretrain", "finetune", "probabilistic", "deterministic"],
+        choices=[
+            "pretrain",
+            "finetune",
+            "probabilistic",
+            "deterministic",
+            "finetune_deterministic",
+        ],
         help="Multi-phase training scheduler. "
         "'pretrain': 100 ep kl_beta=0, 300 ep kl_beta=0.1 (cosine LR). "
         "'finetune': 20 ep linear warmup, 80 ep ar=1 kl_beta=0.1, 20 ep ar=2, "
@@ -709,28 +715,6 @@ def main(input_args=None):
 
         model.configure_optimizers = configure_optimizers_finetune
 
-    class _FinetuneWarmupCallback(pl.Callback):
-        def on_train_epoch_start(self, trainer, pl_module):
-            pl_module.kl_beta = 0.0
-            pl_module.crps_weight = 0.0
-
-    class _FinetuneMainCallback(pl.Callback):
-        def __init__(self):
-            super().__init__()
-            self._anchor_epoch = None
-
-        def on_train_epoch_start(self, trainer, pl_module):
-            if self._anchor_epoch is None:
-                self._anchor_epoch = int(trainer.current_epoch)
-            rel = int(trainer.current_epoch) - self._anchor_epoch
-
-            if rel < 70:
-                pl_module.kl_beta = 0.1
-                pl_module.crps_weight = 0.0
-            else:
-                pl_module.kl_beta = 0.1
-                pl_module.crps_weight = 1e4
-
     if args.eval:
         strategy = (
             "ddp" if args.kl_beta > 0 else "ddp_find_unused_parameters_true"
@@ -747,42 +731,51 @@ def main(input_args=None):
         )
 
     elif args.scheduler == "pretrain":
-        total_epochs = 100 + 300
+        total_epochs = 100 + 200 + 50
         _add_cosine_lr(model, total_epochs)
 
-        # Phase 1: 100 epochs, kl_beta=0
+        # Phase 1: 100 epochs, kl_beta=0, ar=1
         model.kl_beta = 0.0
+        data_module.ar_steps_train = 1
         strategy = "ddp_find_unused_parameters_true"
-        print("[pretrain] Phase 1/2: 100 epochs, kl_beta=0")
+        print("[pretrain] Phase 1/3: 100 epochs, ar=1, kl_beta=0")
         last_ckpt = _run_phase(
             model, data_module, 100, strategy, ckpt_path=args.load
         )
 
-        # Phase 2: 300 epochs, kl_beta=0.1
+        # Phase 2: 200 epochs, kl_beta=0.1, ar=1
         model.kl_beta = 0.1
         strategy = "ddp"
-        print("[pretrain] Phase 2/2: 300 epochs, kl_beta=0.1")
-        _run_phase(model, data_module, 400, strategy, ckpt_path=last_ckpt)
+        print("[pretrain] Phase 2/3: 200 epochs, ar=1, kl_beta=0.1")
+        last_ckpt = _run_phase(
+            model, data_module, 300, strategy, ckpt_path=last_ckpt
+        )
+
+        # Phase 3: 50 epochs, kl_beta=0.1, ar=2
+        data_module.ar_steps_train = 2
+        strategy = "ddp"
+        print("[pretrain] Phase 3/3: 50 epochs, ar=2, kl_beta=0.1")
+        _run_phase(model, data_module, 350, strategy, ckpt_path=last_ckpt)
 
     elif args.scheduler == "finetune":
-        prior_done = 400
-        warmup_epochs = 20
-        finetune_epochs = 140
+        prior_done = 350
+        warmup_epochs = 5
+        finetune_epochs = 165
         _add_finetune_sequential_lr(
             model,
             warmup_epochs=warmup_epochs,
             finetune_epochs=finetune_epochs,
             initial_lr=1e-5,
-            lr=1e-3,
+            lr=1e-4,
             eta_min=1e-5,
         )
 
-        # Phase 1: 20 epochs warmup, kl_beta=0, ar=1
+        # Phase 1: 5 epochs warmup, kl_beta=0, ar=1
         model.kl_beta = 0.0
         model.crps_weight = 0.0
         data_module.ar_steps_train = 1
         print(
-            "[finetune] Phase 1/4: 20 ep warmup, ar=1, kl_beta=0, "
+            "[finetune] Phase 1/4: 5 ep warmup, ar=1, kl_beta=0, "
             "strategy=ddp_find_unused_parameters_true"
         )
         last_ckpt = _run_phase(
@@ -791,41 +784,40 @@ def main(input_args=None):
             prior_done + warmup_epochs,
             "ddp_find_unused_parameters_true",
             ckpt_path=args.load,
-            extra_callbacks=[_FinetuneWarmupCallback()],
         )
 
-        # Phase 2: 80 epochs, kl_beta=0.1, ar=1
+        # Phase 2: 150 epochs, kl_beta=0.1, ar=1
         model.kl_beta = 0.1
         model.crps_weight = 0.0
         data_module.ar_steps_train = 1
-        print("[finetune] Phase 2/4: 80 ep, ar=1, kl_beta=0.1, " "strategy=ddp")
+        print("[finetune] Phase 2/4: 150 ep, ar=1, kl_beta=0.1, strategy=ddp")
         last_ckpt = _run_phase(
             model,
             data_module,
-            prior_done + 100,
+            prior_done + 155,
             "ddp",
             ckpt_path=last_ckpt,
         )
 
-        # Phase 3: 20 epochs, kl_beta=0.1, ar=2
+        # Phase 3: 5 epochs, kl_beta=0.1, ar=2
         model.kl_beta = 0.1
         model.crps_weight = 0.0
         data_module.ar_steps_train = 2
-        print("[finetune] Phase 3/4: 20 ep, ar=2, kl_beta=0.1, " "strategy=ddp")
+        print("[finetune] Phase 3/4: 5 ep, ar=2, kl_beta=0.1, strategy=ddp")
         last_ckpt = _run_phase(
             model,
             data_module,
-            prior_done + 120,
+            prior_done + 160,
             "ddp",
             ckpt_path=last_ckpt,
         )
 
-        # Phase 4: 20 epochs, kl_beta=0.1, ar=2, crps_weight=1e4
+        # Phase 4: 5 epochs, kl_beta=0.1, ar=4, crps_weight=1e4
         model.kl_beta = 0.1
         model.crps_weight = 1e4
-        data_module.ar_steps_train = 2
+        data_module.ar_steps_train = 4
         print(
-            "[finetune] Phase 4/4: 20 ep, ar=2, kl_beta=0.1, "
+            "[finetune] Phase 4/4: 5 ep, ar=4, kl_beta=0.1, "
             "crps_weight=1e4, strategy=ddp"
         )
         _run_phase(
@@ -880,17 +872,50 @@ def main(input_args=None):
 
         strategy = "ddp"
 
-        # Phase 1: 175 epochs, ar=1
+        # Phase 1: 150 epochs, ar=1
         data_module.ar_steps_train = 1
-        print("[deterministic] Phase 1/2: 175 epochs, ar=1")
+        print("[deterministic] Phase 1/2: 150 epochs, ar=1")
         last_ckpt = _run_phase(
-            model, data_module, 175, strategy, ckpt_path=args.load
+            model, data_module, 150, strategy, ckpt_path=args.load
         )
 
         # Phase 2: 25 epochs, ar=2
         data_module.ar_steps_train = 2
         print("[deterministic] Phase 2/2: 25 epochs, ar=2")
-        _run_phase(model, data_module, 200, strategy, ckpt_path=last_ckpt)
+        _run_phase(model, data_module, 175, strategy, ckpt_path=last_ckpt)
+
+    elif args.scheduler == "finetune_deterministic":
+        prior_done = 175
+        _add_finetune_sequential_lr(
+            model,
+            warmup_epochs=5,
+            finetune_epochs=60,
+            initial_lr=1e-5,
+            lr=1e-4,
+            eta_min=1e-5,
+        )
+
+        # Phase 1
+        data_module.ar_steps_train = 1
+        print("[finetune] Phase 1/2: 50 ep, ar=1")
+        last_ckpt = _run_phase(
+            model,
+            data_module,
+            prior_done + 50,
+            "ddp",
+            ckpt_path=args.load,
+        )
+
+        # Phase 2
+        data_module.ar_steps_train = 2
+        print("[finetune] Phase 2/2: 10 ep, ar=2")
+        _run_phase(
+            model,
+            data_module,
+            prior_done + 60,
+            "ddp",
+            ckpt_path=last_ckpt,
+        )
 
     else:
         # Default: single-phase training

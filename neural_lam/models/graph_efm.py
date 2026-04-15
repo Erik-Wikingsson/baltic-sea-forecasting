@@ -866,7 +866,7 @@ class GraphEFM(ARProbModel):
                 boundary_forcing,
                 atmosphere_forcing,
                 target_states,
-                2,
+                self.ensemble_size,
             )
             # (B, S=2, pred_steps, num_grid_nodes, d_f), always 2 samples
 
@@ -883,7 +883,9 @@ class GraphEFM(ARProbModel):
             # Per-variable normalization and reduce
             crps_loss = torch.mean(
                 metrics.mask_and_reduce_metric(
-                    crps_estimate / self.per_var_std,
+                    crps_estimate
+                    / self.per_var_std
+                    / self.per_var_crps_weights,
                     mask=self.loss_mask,
                     average_grid=True,
                     sum_vars=True,

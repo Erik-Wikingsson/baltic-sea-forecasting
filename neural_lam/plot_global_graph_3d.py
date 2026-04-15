@@ -44,13 +44,13 @@ def main():
     parser.add_argument(
         "--mesh_height",
         type=float,
-        default=0.02,
+        default=0.03,
         help="Height of mesh over grid (radius offset).",
     )
     parser.add_argument(
         "--mesh_level_dist",
         type=float,
-        default=0.02,
+        default=0.06,
         help="Distance between mesh levels (radius offset).",
     )
     parser.add_argument(
@@ -67,13 +67,13 @@ def main():
     parser.add_argument(
         "--grid_node_size",
         type=float,
-        default=2.0,
+        default=1.0,
         help="Size of grid nodes.",
     )
     parser.add_argument(
         "--mesh_node_size",
         type=float,
-        default=3.0,
+        default=2.0,
         help="Size of mesh nodes.",
     )
     # Colors
@@ -105,7 +105,7 @@ def main():
     parser.add_argument(
         "--texture_resolution",
         type=float,
-        default=0.5,
+        default=0.75,
         help="Resolution of texture on earth (1.0 = full).",
     )
 
@@ -168,8 +168,7 @@ def main():
     mesh_xy_level = []
     for p in mesh_pos_list:
         arr = np.asarray(to_numpy(p), dtype=np.float32)
-        if arr.shape[1] in (3, 4):
-            arr = node_features_to_lon_lat(arr)
+        arr = node_features_to_lon_lat(arr[:, :4])
         mesh_xy_level.append(arr)
 
     # Edge indices (reindexed by load_graph: grid 0..N_grid-1, mesh 0..N_mesh-1)

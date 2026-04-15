@@ -43,6 +43,7 @@ class ARModel(pl.LightningModule):
         self._datastore_boundary = datastore_boundary
         self._datastore_atmosphere = datastore_atmosphere
         self.num_state_vars = datastore.get_num_data_vars(category="state")
+        state_feature_names = datastore.get_vars_names(category="state")
         num_forcing_vars = datastore.get_num_data_vars(category="forcing")
         # Load masks
         self.surface_mask = datastore.get_mask(
@@ -144,6 +145,31 @@ class ARModel(pl.LightningModule):
             state_feature_weights = np.append(state_feature_weights, 1.0)
         self.feature_weights = torch.tensor(
             state_feature_weights, dtype=torch.float32
+        )
+
+        # Optional per-variable divisor for CRPS terms in Graph-EFM.
+        # Defaults to 1.0 for all state features.
+        crps_weights_cfg = getattr(config.training, "crps_weights", {}) or {}
+        unknown_crps_features = set(crps_weights_cfg.keys()) - set(
+            state_feature_names
+        )
+        if unknown_crps_features:
+            raise ValueError(
+                "CRPS weights provided for unknown state features: "
+                f"{sorted(unknown_crps_features)}. Known features are "
+                f"{state_feature_names}."
+            )
+        per_var_crps_weights = []
+        for feature in state_feature_names:
+            weight = float(crps_weights_cfg.get(feature, 1.0))
+            per_var_crps_weights.append(weight)
+        if self.use_density:
+            # Keep density channel unscaled by default.
+            per_var_crps_weights.append(1.0)
+        self.register_buffer(
+            "per_var_crps_weights",
+            torch.tensor(per_var_crps_weights, dtype=torch.float32),
+            persistent=False,
         )
 
         # Double grid output dim. to also output std.-dev.
@@ -969,8 +995,8 @@ class ARModel(pl.LightningModule):
             )  # (d_f,)
             var_vmax = (
                 torch.maximum(
-                    plot_pred.flatten(0, 1).min(dim=0)[0],
-                    plot_target.flatten(0, 1).min(dim=0)[0],
+                    plot_pred.flatten(0, 1).max(dim=0)[0],
+                    plot_target.flatten(0, 1).max(dim=0)[0],
                 )
                 .cpu()
                 .numpy()

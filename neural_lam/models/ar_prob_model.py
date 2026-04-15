@@ -35,6 +35,7 @@ class ARProbModel(ARModel):
         datastore: BaseDatastore,
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
+        **kwargs,
     ):
         super().__init__(
             args,
@@ -42,6 +43,7 @@ class ARProbModel(ARModel):
             datastore=datastore,
             datastore_boundary=datastore_boundary,
             datastore_atmosphere=datastore_atmosphere,
+            **kwargs,
         )
 
         self.ensemble_size = args.ensemble_size

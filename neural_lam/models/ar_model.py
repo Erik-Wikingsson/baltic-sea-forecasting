@@ -34,14 +34,39 @@ class ARModel(pl.LightningModule):
         datastore: BaseDatastore,
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
+        statistics_datastore: Union[BaseDatastore, None] = None,
+        statistics_datastore_boundary: Union[BaseDatastore, None] = None,
+        statistics_datastore_atmosphere: Union[BaseDatastore, None] = None,
     ):
         super().__init__()
-        self.save_hyperparameters(ignore=["datastore"])
+        self.save_hyperparameters(
+            ignore=[
+                "datastore",
+                "statistics_datastore",
+                "statistics_datastore_boundary",
+                "statistics_datastore_atmosphere",
+            ]
+        )
         self.args = args
         self.input_steps = args.input_steps
         self._datastore = datastore
         self._datastore_boundary = datastore_boundary
         self._datastore_atmosphere = datastore_atmosphere
+        self._statistics_datastore = (
+            statistics_datastore
+            if statistics_datastore is not None
+            else datastore
+        )
+        self._statistics_datastore_boundary = (
+            statistics_datastore_boundary
+            if statistics_datastore_boundary is not None
+            else datastore_boundary
+        )
+        self._statistics_datastore_atmosphere = (
+            statistics_datastore_atmosphere
+            if statistics_datastore_atmosphere is not None
+            else datastore_atmosphere
+        )
         self.num_state_vars = datastore.get_num_data_vars(category="state")
         state_feature_names = datastore.get_vars_names(category="state")
         num_forcing_vars = datastore.get_num_data_vars(category="forcing")
@@ -73,11 +98,12 @@ class ARModel(pl.LightningModule):
             # Uniform weighting over interior grid points
             loss_mask_np = interior_mask_arr
 
-        # Load static features standardized
-        da_static_features = datastore.get_dataarray(
+        # Load static features and state stats from the statistics datastore
+        # (falls back to the main datastore when no separate one is provided)
+        da_static_features = self._statistics_datastore.get_dataarray(
             category="static", split=None, standardize=True
         )[self.surface_mask]
-        da_state_stats = datastore.get_standardization_dataarray(
+        da_state_stats = self._statistics_datastore.get_standardization_dataarray(
             category="state"
         )
         num_past_forcing_steps = args.num_past_forcing_steps
@@ -210,8 +236,10 @@ class ARModel(pl.LightningModule):
             surface_mask_boundary = datastore_boundary.get_mask(
                 surface=True, stacked=True, invert=False
             )
-            da_boundary_static_features = datastore_boundary.get_dataarray(
-                category="static", split=None, standardize=True
+            da_boundary_static_features = (
+                self._statistics_datastore_boundary.get_dataarray(
+                    category="static", split=None, standardize=True
+                )
             )[
                 surface_mask_boundary
             ]  # mask static features
@@ -283,7 +311,7 @@ class ARModel(pl.LightningModule):
                     stacked=True, invert=False
                 )
                 da_atmosphere_static_features = (
-                    datastore_atmosphere.get_dataarray(
+                    self._statistics_datastore_atmosphere.get_dataarray(
                         category="static", split=None, standardize=True
                     )[atmosphere_mask]
                 )

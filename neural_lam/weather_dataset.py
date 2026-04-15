@@ -489,6 +489,9 @@ class WeatherDataset(torch.utils.data.Dataset):
                     window=np.arange(len(da_sliced.window))
                 )
 
+                if "time" in da_sliced.coords:
+                    # time may exist if used to calculate sine/cosine fts
+                    da_sliced = da_sliced.drop_vars("time")
                 da_sliced = da_sliced.expand_dims(
                     dim={"time": [current_time.values]}
                 )

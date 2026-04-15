@@ -637,6 +637,9 @@ class ARModel(pl.LightningModule):
             datastore_atmosphere=self._datastore_atmosphere,
             split=split,
             use_atmosphere_g2m=getattr(self, "use_atmosphere_g2m", False),
+            statistics_datastore=self._statistics_datastore,
+            statistics_datastore_boundary=self._statistics_datastore_boundary,
+            statistics_datastore_atmosphere=self._statistics_datastore_atmosphere,
         )
         time = time.detach().cpu()
         time = np.array(time, dtype="datetime64[ns]")

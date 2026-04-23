@@ -272,19 +272,30 @@ class ARProbModel(ARModel):
         compressor = numcodecs.Blosc(
             cname="zstd", clevel=9, shuffle=numcodecs.Blosc.SHUFFLE
         )
+        n_feat = ds_out.sizes["state_feature"]
+        n_lon  = ds_out.sizes["longitude"]
+        n_lat  = ds_out.sizes["latitude"]
+        encoding = {
+            "init_time": {
+                "units": "Seconds since 1970-01-01 00:00:00",
+                "dtype": "int64",
+            },
+            "prediction": {
+                # one chunk per (ensemble_member, lead_time); all features + full spatial
+                "chunks": (1, 1, n_feat, n_lon, n_lat),
+            },
+            "target": {
+                # one chunk per lead_time; all features + full spatial
+                "chunks": (1, n_feat, n_lon, n_lat),
+            },
+        }
+
         logger.info(f"Saving ensemble example to {zarr_path}")
         ds_out.to_zarr(
             zarr_path,
             mode="w",
             consolidated=True,
-            encoding={
-                "init_time": {
-                    "units": "Seconds since 1970-01-01 00:00:00",
-                    "dtype": "int64",
-                },
-                "prediction": {"compressor": compressor},
-                "target": {"compressor": compressor},
-            },
+            encoding=encoding,
         )
 
     # pylint: disable-next=unused-argument

@@ -426,14 +426,14 @@ def main(input_args=None):
     parser.add_argument(
         "--num_past_forcing_steps",
         type=int,
-        default=1,
+        default=2,
         help="Number of past time steps to use as input for forcing data "
-        "(default: 1).",
+        "(default: 2).",
     )
     parser.add_argument(
         "--num_future_forcing_steps",
         type=int,
-        default=1,
+        default=0,
         help="Number of future time steps to use as input for forcing data",
     )
     parser.add_argument(
@@ -446,15 +446,15 @@ def main(input_args=None):
     parser.add_argument(
         "--num_past_boundary_steps",
         type=int,
-        default=1,
-        help="Number of past time steps to use as boundary input (default: 1).",
+        default=2,
+        help="Number of past time steps to use as boundary input (default: 2).",
     )
     parser.add_argument(
         "--num_future_boundary_steps",
         type=int,
-        default=1,
+        default=0,
         help="Number of future time steps to use as atmosphere input "
-        "(default: 1)",
+        "(default: 0)",
     )
     parser.add_argument(
         "--current_atmosphere_step",
@@ -466,16 +466,16 @@ def main(input_args=None):
     parser.add_argument(
         "--num_past_atmosphere_steps",
         type=int,
-        default=1,
+        default=2,
         help="Number of past time steps to use as atmosphere input "
-        "(default: 1).",
+        "(default: 2).",
     )
     parser.add_argument(
         "--num_future_atmosphere_steps",
         type=int,
-        default=1,
+        default=0,
         help="Number of future time steps to use as boundary input "
-        "(default: 1)",
+        "(default: 0)",
     )
     parser.add_argument(
         "--use_atmosphere_g2m",
@@ -776,7 +776,7 @@ def main(input_args=None):
         _run_phase(model, data_module, 350, strategy, ckpt_path=last_ckpt)
 
     elif args.scheduler == "finetune":
-        prior_done = 350
+        prior_done = 325
         warmup_epochs = 5
         finetune_epochs = 165
         _add_finetune_sequential_lr(
@@ -830,12 +830,12 @@ def main(input_args=None):
             ckpt_path=last_ckpt,
         )
 
-        # Phase 4: 5 epochs, kl_beta=0.1, ar=4, crps_weight=1e4
+        # Phase 4: 5 epochs, kl_beta=0.1, ar=2, crps_weight=1e6
         model.kl_beta = 0.1
-        model.crps_weight = 1e4
-        data_module.ar_steps_train = 4
+        model.crps_weight = 1e6
+        data_module.ar_steps_train = 2
         print(
-            "[finetune] Phase 4/4: 5 ep, ar=4, kl_beta=0.1, "
+            "[finetune] Phase 4/4: 5 ep, ar=2, kl_beta=0.1, "
             "crps_weight=1e4, strategy=ddp"
         )
         _run_phase(

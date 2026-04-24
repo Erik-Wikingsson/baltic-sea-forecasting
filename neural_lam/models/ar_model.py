@@ -102,8 +102,20 @@ class ARModel(pl.LightningModule):
         da_static_features = self._statistics_datastore.get_dataarray(
             category="static", split=None, standardize=True
         )[self.surface_mask]
-        da_state_stats = self._statistics_datastore.get_standardization_dataarray(
-            category="state"
+        # TODO: load static features from main ds and stats from stats ds
+        # also for boundary, atmosphere (baltic sea had no grid mismatch).
+        # Here we replace 2 nans * 7 features with zero in global finetune.
+        _grid_static = torch.tensor(
+            da_static_features.values, dtype=torch.float32
+        )
+        if not torch.isfinite(_grid_static).all():
+            n_bad = int((~torch.isfinite(_grid_static)).sum().item())
+            warnings.warn(f"Replacing {n_bad} static grid values with 0")
+            _grid_static = torch.nan_to_num(_grid_static, nan=0.0)
+        da_state_stats = (
+            self._statistics_datastore.get_standardization_dataarray(
+                category="state"
+            )
         )
         num_past_forcing_steps = args.num_past_forcing_steps
         num_future_forcing_steps = args.num_future_forcing_steps
@@ -119,7 +131,7 @@ class ARModel(pl.LightningModule):
         # Load static features for grid/data,
         self.register_buffer(
             "grid_static_features",
-            torch.tensor(da_static_features.values, dtype=torch.float32),
+            _grid_static,
             persistent=False,
         )
 
@@ -605,6 +617,8 @@ class ARModel(pl.LightningModule):
         # TODO: creating an instance of WeatherDataset here on every call is
         # not how this should be done but whether WeatherDataset should be
         # provided to ARModel or where to put plotting still needs discussion
+        sdb = self._statistics_datastore_boundary
+        sda = self._statistics_datastore_atmosphere
         weather_dataset = WeatherDataset(
             datastore=self._datastore,
             datastore_boundary=self._datastore_boundary,
@@ -612,8 +626,8 @@ class ARModel(pl.LightningModule):
             split=split,
             use_atmosphere_g2m=getattr(self, "use_atmosphere_g2m", False),
             statistics_datastore=self._statistics_datastore,
-            statistics_datastore_boundary=self._statistics_datastore_boundary,
-            statistics_datastore_atmosphere=self._statistics_datastore_atmosphere,
+            statistics_datastore_boundary=sdb,
+            statistics_datastore_atmosphere=sda,
         )
         time = time.detach().cpu()
         time = np.array(time, dtype="datetime64[ns]")

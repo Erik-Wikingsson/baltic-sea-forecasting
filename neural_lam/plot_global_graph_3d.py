@@ -113,9 +113,7 @@ def main():
 
     assert args.config_path is not None, "Specify --config_path"
 
-    _, datastore, *_ = load_config_and_datastores(
-        config_path=args.config_path
-    )
+    _, datastore, *_ = load_config_and_datastores(config_path=args.config_path)
 
     graph_dir_path = os.path.join(
         datastore.root_path, "graphs", args.graph_name

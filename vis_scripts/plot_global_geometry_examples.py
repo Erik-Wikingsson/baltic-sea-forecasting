@@ -10,17 +10,18 @@ import torch
 from matplotlib.colors import ListedColormap
 from tueplots import fonts
 
-# Local
+# First-party
 from neural_lam.config import load_config_and_datastores
 
 CONFIG_PATH = "configs/global_data_small/global_ocean_1_4.yaml"
 GRAPH_NAMES = ["global_cluster_1_4_deg_20_refinement_3_levels"]
 SAVE_DIR = "plots/graph_2d_global"
 
-# Coordinate boxes in lon/lat degrees: label -> (lon_min, lon_max, lat_min, lat_max, legend_loc)
+# Coordinate boxes in lon/lat degrees: label ->
+# (lon_min, lon_max, lat_min, lat_max, legend_loc)
 COORD_BOXES = {
-    "full_domain": (-180, 180, -90,  90, "lower left"),
-    "baltic": (3, 31,  50, 68, "lower right"),
+    "full_domain": (-180, 180, -90, 90, "lower left"),
+    "baltic": (3, 31, 50, 68, "lower right"),
     "indonesia": (92, 154, -17, 19, "upper right"),
 }
 
@@ -38,9 +39,15 @@ PLATE_CARREE = ccrs.PlateCarree()
 
 
 def mesh_features_to_lon_lat(feats: np.ndarray) -> np.ndarray:
-    """Convert global mesh node features (sin_lon, cos_lon, sin_lat, cos_lat, ...) to (lon, lat) degrees."""
+    """
+    Convert global mesh node features (sin_lon, cos_lon,
+    sin_lat, cos_lat, ...) to (lon, lat) degrees.
+    """
     sin_lon, cos_lon, sin_lat, cos_lat = (
-        feats[:, 0], feats[:, 1], feats[:, 2], feats[:, 3],
+        feats[:, 0],
+        feats[:, 1],
+        feats[:, 2],
+        feats[:, 3],
     )
     lon_deg = np.rad2deg(np.arctan2(sin_lon, cos_lon)).astype(np.float32)
     lat_deg = np.rad2deg(np.arctan2(sin_lat, cos_lat)).astype(np.float32)
@@ -54,7 +61,9 @@ def main():
     interior_mask = datastore.get_mask(
         surface=True, stacked=False, invert=False
     )  # (N_lon, N_lat)
-    grid_xy = datastore.get_xy("state", stacked=False)  # (N_lon, N_lat, 2): (lon, lat)
+    grid_xy = datastore.get_xy(
+        "state", stacked=False
+    )  # (N_lon, N_lat, 2): (lon, lat)
     grid_lon = grid_xy[:, :, 0]
     grid_lat = grid_xy[:, :, 1]
     grid_values = interior_mask.astype(float)
@@ -62,20 +71,28 @@ def main():
 
     grid_cmap = ListedColormap([GRID_COLOR])
     grid_legend = mlines.Line2D(
-        [], [], color=GRID_COLOR, marker="s", linestyle="None",
-        markersize=LEGEND_MARKER_SIZE, label="Sea surface grid",
+        [],
+        [],
+        color=GRID_COLOR,
+        marker="s",
+        linestyle="None",
+        markersize=LEGEND_MARKER_SIZE,
+        label="Sea surface grid",
     )
     mesh_legend = mlines.Line2D(
-        [], [], color=MESH_COLOR, marker="o", linestyle="None",
-        markersize=LEGEND_MARKER_SIZE, label="Mesh nodes",
+        [],
+        [],
+        color=MESH_COLOR,
+        marker="o",
+        linestyle="None",
+        markersize=LEGEND_MARKER_SIZE,
+        label="Mesh nodes",
     )
 
     os.makedirs(SAVE_DIR, exist_ok=True)
 
     for graph_name in GRAPH_NAMES:
-        graph_dir_path = os.path.join(
-            datastore.root_path, "graphs", graph_name
-        )
+        graph_dir_path = os.path.join(datastore.root_path, "graphs", graph_name)
         mesh_pos_list = torch.load(
             os.path.join(graph_dir_path, "mesh_features.pt"),
             map_location="cpu",
@@ -89,7 +106,13 @@ def main():
             mesh_features_to_lon_lat(p.numpy()) for p in mesh_pos_list
         ]
 
-        for box_label, (lon_min, lon_max, lat_min, lat_max, legend_loc) in COORD_BOXES.items():
+        for box_label, (
+            lon_min,
+            lon_max,
+            lat_min,
+            lat_max,
+            legend_loc,
+        ) in COORD_BOXES.items():
             for mesh_level in MESH_LEVELS_TO_PLOT:
                 if mesh_level >= n_levels:
                     print(
@@ -138,7 +161,7 @@ def main():
                 )
 
                 #  if box_label == "full_domain":
-                    #  plt.show()
+                #  plt.show()
 
                 base_name = f"{graph_name}_{box_label}_level{mesh_level}"
                 for ext in ("pdf", "png"):

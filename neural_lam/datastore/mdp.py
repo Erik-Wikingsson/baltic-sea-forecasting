@@ -77,9 +77,7 @@ class MDPDatastore(BaseRegularGridDatastore):
 
         self._available_splits = list(self._ds.splits.split_name.values)
         all_splits = ["train", "val", "test"]
-        missing = [
-            s for s in all_splits if s not in self._available_splits
-        ]
+        missing = [s for s in all_splits if s not in self._available_splits]
         if missing:
             warnings.warn(
                 f"Splits {missing} not found in datastore "
@@ -155,9 +153,7 @@ class MDPDatastore(BaseRegularGridDatastore):
         """
         if self.is_forecast:
             da_dt = self._ds["lead_time"].diff("lead_time")
-            total_sec = (
-                da_dt.dt.total_seconds().isel(lead_time=0).astype(int)
-            )
+            total_sec = da_dt.dt.total_seconds().isel(lead_time=0).astype(int)
             return (total_sec // 3600).item()
         da_dt = self._ds["time"].diff("time")
         total_sec = da_dt.dt.total_seconds().isel(time=0).astype(int)
@@ -302,9 +298,7 @@ class MDPDatastore(BaseRegularGridDatastore):
                 .item()
             )
             if "init_time" in da_category.dims:
-                da_category = da_category.sel(
-                    init_time=slice(t_start, t_end)
-                )
+                da_category = da_category.sel(init_time=slice(t_start, t_end))
             else:
                 da_category = da_category.sel(time=slice(t_start, t_end))
 

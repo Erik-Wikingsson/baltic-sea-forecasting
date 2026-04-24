@@ -8,7 +8,7 @@ import torch
 from matplotlib.colors import ListedColormap
 from tueplots import fonts
 
-# Local
+# First-party
 from neural_lam.config import load_config_and_datastores
 
 CONFIG_PATH = "configs/graph_rework_example/baltic_graph_rework.yaml"
@@ -18,11 +18,11 @@ SAVE_DIR = "plots/graph_2d_baltic"
 # Coordinate boxes in projected CRS (metres):
 # label -> (x_min, x_max, y_min, y_max, legend_loc)
 COORD_BOXES = {
-    "full_domain":        ( -900_000,  650_000, -770_000,  750_000, "upper left"),
-    "orust":              ( -525_000, -460_000, -201_000, -137_000, "upper right"),
-    "braviken":           ( -227_000, -147_000, -197_000, -125_000, "lower left"),
-    "aland":              (  -47_000,  113_000,  -28_000,   83_000, "upper left"),
-    "turku_archipelago":  (   60_000,  192_000,  -24_000,   74_000, "upper right"),
+    "full_domain": (-900_000, 650_000, -770_000, 750_000, "upper left"),
+    "orust": (-525_000, -460_000, -201_000, -137_000, "upper right"),
+    "braviken": (-227_000, -147_000, -197_000, -125_000, "lower left"),
+    "aland": (-47_000, 113_000, -28_000, 83_000, "upper left"),
+    "turku_archipelago": (60_000, 192_000, -24_000, 74_000, "upper right"),
 }
 
 MESH_LEVELS_TO_PLOT = [0, 2]
@@ -37,7 +37,7 @@ plt.rcParams.update(fonts.neurips2024())
 
 
 def main():
-    """Plot graph structure in 2D projected coordinates using matplotlib/cartopy."""
+    """Plot graph structure in 2D proj coordinates using matplotlib/cartopy"""
     _, datastore, *_ = load_config_and_datastores(config_path=CONFIG_PATH)
 
     crs = datastore.coords_projection
@@ -45,7 +45,9 @@ def main():
     interior_mask = datastore.get_mask(
         surface=True, stacked=False, invert=False
     )  # (N_x, N_y)
-    grid_xy = datastore.get_projected_xy("state", stacked=False)  # (N_x, N_y, 2)
+    grid_xy = datastore.get_projected_xy(
+        "state", stacked=False
+    )  # (N_x, N_y, 2)
     grid_x = grid_xy[:, :, 0]
     grid_y = grid_xy[:, :, 1]
     grid_values = interior_mask.astype(float)
@@ -53,20 +55,28 @@ def main():
 
     grid_cmap = ListedColormap([GRID_COLOR])
     grid_legend = mlines.Line2D(
-        [], [], color=GRID_COLOR, marker="s", linestyle="None",
-        markersize=LEGEND_MARKER_SIZE, label="Sea surface grid",
+        [],
+        [],
+        color=GRID_COLOR,
+        marker="s",
+        linestyle="None",
+        markersize=LEGEND_MARKER_SIZE,
+        label="Sea surface grid",
     )
     mesh_legend = mlines.Line2D(
-        [], [], color=MESH_COLOR, marker="o", linestyle="None",
-        markersize=LEGEND_MARKER_SIZE, label="Mesh nodes",
+        [],
+        [],
+        color=MESH_COLOR,
+        marker="o",
+        linestyle="None",
+        markersize=LEGEND_MARKER_SIZE,
+        label="Mesh nodes",
     )
 
     os.makedirs(SAVE_DIR, exist_ok=True)
 
     for graph_name in GRAPH_NAMES:
-        graph_dir_path = os.path.join(
-            datastore.root_path, "graphs", graph_name
-        )
+        graph_dir_path = os.path.join(datastore.root_path, "graphs", graph_name)
         mesh_pos_list = torch.load(
             os.path.join(graph_dir_path, "mesh_features.pt"),
             map_location="cpu",
@@ -77,7 +87,13 @@ def main():
 
         n_levels = len(mesh_pos_list)
 
-        for box_label, (x_min, x_max, y_min, y_max, legend_loc) in COORD_BOXES.items():
+        for box_label, (
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+            legend_loc,
+        ) in COORD_BOXES.items():
             for mesh_level in MESH_LEVELS_TO_PLOT:
                 if mesh_level >= n_levels:
                     print(
@@ -120,12 +136,12 @@ def main():
                 legend = ax.legend(
                     handles=[grid_legend, mesh_legend],
                     loc=legend_loc,
-                    #markerscale=5,
+                    # markerscale=5,
                     fontsize=30,
                 )
 
                 #  if box_label == "full_domain":
-                    #  plt.show()
+                #  plt.show()
 
                 base_name = f"{graph_name}_{box_label}_level{mesh_level}"
                 for ext in ("pdf", "png"):

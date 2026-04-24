@@ -112,7 +112,8 @@ class WeatherDataset(torch.utils.data.Dataset):
         self.use_atmosphere_g2m = use_atmosphere_g2m
         self.density_channel = density_channel
         self.statistics_datastore = (
-            statistics_datastore if statistics_datastore is not None
+            statistics_datastore
+            if statistics_datastore is not None
             else datastore
         )
         self.statistics_datastore_boundary = (
@@ -248,24 +249,25 @@ class WeatherDataset(torch.utils.data.Dataset):
 
             if self.da_forcing is not None:
                 self.ds_forcing_stats = (
-                    self.statistics_datastore
-                    .get_standardization_dataarray(category="forcing")
+                    self.statistics_datastore.get_standardization_dataarray(
+                        category="forcing"
+                    )
                 )
                 self.da_forcing_mean = self.ds_forcing_stats.forcing_mean
                 self.da_forcing_std = self.ds_forcing_stats.forcing_std
 
             if self.da_boundary_forcing is not None:
-                self.ds_boundary_stats = (
-                    self.statistics_datastore_boundary
-                    .get_standardization_dataarray(category="forcing")
+                sdb = self.statistics_datastore_boundary
+                self.ds_boundary_stats = sdb.get_standardization_dataarray(
+                    category="forcing"
                 )
                 self.da_boundary_mean = self.ds_boundary_stats.forcing_mean
                 self.da_boundary_std = self.ds_boundary_stats.forcing_std
 
             if self.da_atmosphere_forcing is not None:
-                self.ds_atmosphere_stats = (
-                    self.statistics_datastore_atmosphere
-                    .get_standardization_dataarray(category="forcing")
+                sda = self.statistics_datastore_atmosphere
+                self.ds_atmosphere_stats = sda.get_standardization_dataarray(
+                    category="forcing"
                 )
                 self.da_atmosphere_mean = self.ds_atmosphere_stats.forcing_mean
                 self.da_atmosphere_std = self.ds_atmosphere_stats.forcing_std
@@ -358,12 +360,8 @@ class WeatherDataset(torch.utils.data.Dataset):
             )
             # create a new time dimension so that the produced sample has a
             # `time` dimension, similarly to the analysis only data
-            da_sliced["time"] = (
-                da_sliced.init_time + da_sliced.lead_time
-            )
-            da_sliced = da_sliced.swap_dims(
-                {"lead_time": "time"}
-            )
+            da_sliced["time"] = da_sliced.init_time + da_sliced.lead_time
+            da_sliced = da_sliced.swap_dims({"lead_time": "time"})
         else:
             # For analysis data we slice the time dimension directly. The offset
             # is only relevant for the very first (and last) samples in the
@@ -461,17 +459,13 @@ class WeatherDataset(torch.utils.data.Dataset):
                     if num_past_steps > 0:
                         da_past = da_forcing.isel(
                             init_time=idx,
-                            lead_time=slice(
-                                start_idx, current_idx
-                            ),
+                            lead_time=slice(start_idx, current_idx),
                         )
                         parts.append(da_past)
                     if num_future_steps > 0:
                         da_future = da_forcing.isel(
                             init_time=idx,
-                            lead_time=slice(
-                                current_idx + 1, end_idx + 1
-                            ),
+                            lead_time=slice(current_idx + 1, end_idx + 1),
                         )
                         parts.append(da_future)
                     da_sliced = (
@@ -480,9 +474,7 @@ class WeatherDataset(torch.utils.data.Dataset):
                         else parts[0]
                     )
 
-                da_sliced = da_sliced.rename(
-                    {"lead_time": "window"}
-                )
+                da_sliced = da_sliced.rename({"lead_time": "window"})
 
                 # Assign the 'window' coordinate to be relative positions
                 da_sliced = da_sliced.assign_coords(

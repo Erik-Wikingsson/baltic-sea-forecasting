@@ -32,7 +32,11 @@ class EDM(ARProbModel):
         **kwargs,
     ):
         super().__init__(
-            args, config, datastore, datastore_boundary, datastore_atmosphere,
+            args,
+            config,
+            datastore,
+            datastore_boundary,
+            datastore_atmosphere,
             **kwargs,
         )
 

@@ -31,7 +31,11 @@ class GraphCRPS(ARProbModel):
         **kwargs,
     ):
         super().__init__(
-            args, config, datastore, datastore_boundary, datastore_atmosphere,
+            args,
+            config,
+            datastore,
+            datastore_boundary,
+            datastore_atmosphere,
             **kwargs,
         )
         self.val_metrics.update(

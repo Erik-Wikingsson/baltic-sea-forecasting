@@ -261,8 +261,7 @@ def load_config_and_datastores(
     # When not specified, statistics are loaded from the main datastores.
     if config.statistics_datastore is not None:
         stats_ds_config_path = (
-            Path(config_path).parent
-            / config.statistics_datastore.config_path
+            Path(config_path).parent / config.statistics_datastore.config_path
         )
         statistics_datastore = init_datastore(
             datastore_kind=config.statistics_datastore.kind,

@@ -496,6 +496,21 @@ def main(input_args=None):
         "(default: False)",
     )
     parser.add_argument(
+        "--save_forecasts",
+        action="store_true",
+        help="Save the full test set (all init_times) ensemble forecasts "
+        "and targets to a single zarr store, appended along init_time "
+        "one batch at a time (default: False)",
+    )
+    parser.add_argument(
+        "--forecasts_zarr_path",
+        type=str,
+        default=None,
+        help="Path to the zarr store used by --save_forecasts. "
+        "If not provided, defaults to "
+        "{logger.save_dir}/ensemble_forecasts.zarr",
+    )
+    parser.add_argument(
         "--scheduler",
         type=str,
         default=None,
@@ -506,15 +521,7 @@ def main(input_args=None):
             "deterministic",
             "finetune_deterministic",
         ],
-        help="Multi-phase training scheduler. "
-        "'pretrain': 100 ep kl_beta=0, 300 ep kl_beta=0.1 (cosine LR). "
-        "'finetune': 20 ep linear warmup, 80 ep ar=1 kl_beta=0.1, 20 ep ar=2, "
-        "20 ep crps=1e4 (cosine LR). "
-        "'probabilistic': 100 ep kl_beta=0, 200 ep kl_beta=0.1, 25 ep ar=2, "
-        "25 ep crps=1e5 (cosine LR). "
-        "'deterministic': 175 ep ar=1, 25 ep ar=2 (cosine LR). "
-        "Overrides --epochs, --kl_beta, --crps_weight, "
-        "--ar_steps_train when set. (default: None)",
+        help="Multi-phase training scheduler.",
     )
 
     args = parser.parse_args(input_args)
@@ -749,7 +756,7 @@ def main(input_args=None):
         )
 
     elif args.scheduler == "pretrain":
-        total_epochs = 100 + 200 + 50
+        total_epochs = 100 + 200 + 25
         _add_cosine_lr(model, total_epochs)
 
         # Phase 1: 100 epochs, kl_beta=0, ar=1
@@ -769,11 +776,11 @@ def main(input_args=None):
             model, data_module, 300, strategy, ckpt_path=last_ckpt
         )
 
-        # Phase 3: 50 epochs, kl_beta=0.1, ar=2
+        # Phase 3: 25 epochs, kl_beta=0.1, ar=2
         data_module.ar_steps_train = 2
         strategy = "ddp"
-        print("[pretrain] Phase 3/3: 50 epochs, ar=2, kl_beta=0.1")
-        _run_phase(model, data_module, 350, strategy, ckpt_path=last_ckpt)
+        print("[pretrain] Phase 3/3: 25 epochs, ar=2, kl_beta=0.1")
+        _run_phase(model, data_module, 325, strategy, ckpt_path=last_ckpt)
 
     elif args.scheduler == "finetune":
         prior_done = 325

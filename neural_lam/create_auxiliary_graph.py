@@ -367,36 +367,21 @@ def _plot_auxiliary_graph(graph_dir_path: str, grid_xy: np.ndarray):
                 )
                 if ei.size == 0:
                     continue
-                n_fine = int(ei[0].max()) + 1
-                n_coarse = int(ei[1].max()) + 1
-                fine_xy = (
-                    _mesh_features_to_lon_lat(mesh_features_list[level_i])
-                    if level_i < len(mesh_features_list)
-                    else mesh_xy
+                fine_xy = _mesh_features_to_lon_lat(mesh_features_list[level_i])
+                coarse_xy = _mesh_features_to_lon_lat(
+                    mesh_features_list[level_i + 1]
                 )
-                coarse_xy = (
-                    _mesh_features_to_lon_lat(mesh_features_list[level_i + 1])
-                    if level_i + 1 < len(mesh_features_list)
-                    else mesh_xy
-                )
-                if n_fine > fine_xy.shape[0] or n_coarse > coarse_xy.shape[0]:
-                    fine_xy = mesh_xy
-                    coarse_xy = mesh_xy
-                pos_updown = np.concatenate(
-                    [fine_xy[:n_fine], coarse_xy[:n_coarse]], axis=0
-                )
-                ei_plot = ei.copy().astype(np.int64)
-                ei_plot[1] += n_fine
+                pos_updown = np.concatenate([fine_xy, coarse_xy], axis=0)
                 g = pyg.data.Data(
                     pos=torch.from_numpy(pos_updown).float(),
-                    edge_index=torch.from_numpy(ei_plot),
+                    edge_index=torch.from_numpy(ei),
                 )
                 label = (
                     f"{title_up} {level_i} to {level_i + 1}"
                     if "up" in prefix
                     else f"{title_up} {level_i + 1} -> {level_i}"
                 )
-                vis.plot_graph(g, label, graph_dir_path)
+                vis.plot_graph(g, label, graph_dir_path, reindex_edges=False)
         except FileNotFoundError:
             pass
 
@@ -539,9 +524,7 @@ def cli(input_args=None):
     )
     args = parser.parse_args(input_args)
 
-    _, datastore, *_ = load_config_and_datastores(
-        config_path=args.config_path
-    )
+    _, datastore, *_ = load_config_and_datastores(config_path=args.config_path)
     sea_xy, land_xy = load_grid_from_datastore(datastore)
     root = datastore.root_path
     graph_dir_path_original = os.path.join(root, "graphs", args.name_original)

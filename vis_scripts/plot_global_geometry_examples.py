@@ -14,15 +14,20 @@ from tueplots import fonts
 from neural_lam.config import load_config_and_datastores
 
 CONFIG_PATH = "configs/global_data_small/global_ocean_1_4.yaml"
-GRAPH_NAMES = ["global_cluster_1_4_deg_20_refinement_3_levels"]
+GRAPH_DIR_TO_NAME = {
+    "global_cluster_1_4_deg_20_refinement_3_levels": "cluster",
+    "global_hierarchical_1_4_deg_6_splits_3_levels": "hierarchical",
+}
 SAVE_DIR = "plots/graph_2d_global"
 
 # Coordinate boxes in lon/lat degrees: label ->
 # (lon_min, lon_max, lat_min, lat_max, legend_loc)
 COORD_BOXES = {
     "full_domain": (-180, 180, -90, 90, "lower left"),
-    "baltic": (3, 31, 50, 68, "lower right"),
+    "baltic": (3, 31, 53, 66, "lower right"),
     "indonesia": (92, 154, -17, 19, "upper right"),
+    "northern_red_sea": (28, 44, 10, 33, "lower left"),
+    "gulf_of_california": (-117, -105, 22, 33, "upper right"),
 }
 
 MESH_LEVELS_TO_PLOT = [0, 2]
@@ -91,7 +96,7 @@ def main():
 
     os.makedirs(SAVE_DIR, exist_ok=True)
 
-    for graph_name in GRAPH_NAMES:
+    for graph_name, graph_short_name in GRAPH_DIR_TO_NAME.items():
         graph_dir_path = os.path.join(datastore.root_path, "graphs", graph_name)
         mesh_pos_list = torch.load(
             os.path.join(graph_dir_path, "mesh_features.pt"),
@@ -163,7 +168,7 @@ def main():
                 #  if box_label == "full_domain":
                 #  plt.show()
 
-                base_name = f"{graph_name}_{box_label}_level{mesh_level}"
+                base_name = f"{graph_short_name}_{box_label}_level{mesh_level}"
                 for ext in ("pdf", "png"):
                     fig.savefig(
                         os.path.join(SAVE_DIR, f"{base_name}_legend.{ext}"),

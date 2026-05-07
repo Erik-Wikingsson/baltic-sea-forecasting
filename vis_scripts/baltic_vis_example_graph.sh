@@ -20,4 +20,3 @@ python -m neural_lam.plot_graph_3d\
     --mesh_level_dist 0.02\
     --mesh_node_size 3\
     --mesh_edge_width 0.8\
-

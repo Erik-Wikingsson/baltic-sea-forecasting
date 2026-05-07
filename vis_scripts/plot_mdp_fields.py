@@ -1,7 +1,9 @@
 """Plot all fields from global ocean MDP config zarr in Robinson projection."""
 
+# Standard library
 import os
 
+# Third-party
 import cartopy.crs as ccrs
 import cmocean
 import matplotlib
@@ -9,6 +11,7 @@ import numpy as np
 import xarray as xr
 
 matplotlib.use("Agg")
+# Third-party
 import matplotlib.pyplot as plt  # noqa: E402
 
 ZARR_PATH = "configs/global_data_small/global_ocean_1_4_mdp_config.zarr"
@@ -30,9 +33,17 @@ def get_cmap_vrange(name, valid_data):
         v = np.percentile(np.abs(valid_data), 99)
         return cmocean.cm.balance, -v, v
     elif "thetao" in name:
-        return cmocean.cm.thermal, np.percentile(valid_data, 2), np.percentile(valid_data, 98)
+        return (
+            cmocean.cm.thermal,
+            np.percentile(valid_data, 2),
+            np.percentile(valid_data, 98),
+        )
     elif name.startswith("so_"):
-        return cmocean.cm.haline, np.percentile(valid_data, 2), np.percentile(valid_data, 98)
+        return (
+            cmocean.cm.haline,
+            np.percentile(valid_data, 2),
+            np.percentile(valid_data, 98),
+        )
     elif "siconc" in name:
         return cmocean.cm.ice, 0.0, 1.0
     elif "sithick" in name:
@@ -42,7 +53,11 @@ def get_cmap_vrange(name, valid_data):
     elif "coast_dist" in name:
         return "viridis", 0.0, np.percentile(valid_data, 99)
     else:
-        return "viridis", np.percentile(valid_data, 2), np.percentile(valid_data, 98)
+        return (
+            "viridis",
+            np.percentile(valid_data, 2),
+            np.percentile(valid_data, 98),
+        )
 
 
 def save_field(lon_2d, lat_2d, data_2d, name):
@@ -103,13 +118,23 @@ def main():
     mask_arr = ds["mask"].values  # (27, 979200)
 
     for feat in ds["state_feature"].values:
-        data = ds["state"].sel(state_feature=feat).isel(time=0).values.astype(float)
+        data = (
+            ds["state"]
+            .sel(state_feature=feat)
+            .isel(time=0)
+            .values.astype(float)
+        )
         feat_idx = list(ds["mask_feature"].values).index(feat)
         data[mask_arr[feat_idx] == 0] = np.nan
         save_field(lon_2d, lat_2d, flat_to_2d(data), f"state_{feat}")
 
     for feat in ds["forcing_feature"].values:
-        data = ds["forcing"].sel(forcing_feature=feat).isel(time=0).values.astype(float)
+        data = (
+            ds["forcing"]
+            .sel(forcing_feature=feat)
+            .isel(time=0)
+            .values.astype(float)
+        )
         save_field(lon_2d, lat_2d, flat_to_2d(data), f"forcing_{feat}")
 
     for feat in ds["static_feature"].values:

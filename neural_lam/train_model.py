@@ -843,7 +843,7 @@ def main(input_args=None):
         data_module.ar_steps_train = 2
         print(
             "[finetune] Phase 4/4: 5 ep, ar=2, kl_beta=0.1, "
-            "crps_weight=1e4, strategy=ddp"
+            "crps_weight=1e6, strategy=ddp"
         )
         _run_phase(
             model,

@@ -9,17 +9,23 @@ create a 6-panel figure:
 Run with the `baltic` conda environment.
 """
 
+# Standard library
 import os
-import zarr
-import numpy as np
+
+# Third-party
 import matplotlib
+import numpy as np
+import zarr
+
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import cmocean
+# Third-party
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+import cmocean
+import matplotlib.pyplot as plt
 from pyproj import CRS, Transformer
 
+# First-party
 from neural_lam.config import load_config_and_datastores
 
 # ---------------------------------------------------------------------------
@@ -31,7 +37,7 @@ SC_PATH = "data/seacast_baltic_example_fc.zarr"
 RA_PATH = "data/cmems_baltic_analysis_2024_plot.zarr"
 OUT_DIR = "plots/regional_fields"
 
-MEMBER_IDX = 0          # which ensemble member to show
+MEMBER_IDX = 0  # which ensemble member to show
 LEAD_DAYS_PLOT = [5, 10]  # lead times to plot
 MISSING = -999.0
 FONTSIZE = 9
@@ -39,30 +45,83 @@ TITLE_FS = 9
 
 # Coordinate boxes in Lambert Conformal Conic projection (metres)
 COORD_BOXES = {
-    "full_domain":       (-900_000, 650_000, -770_000, 750_000),
-    "orust":             (-525_000, -460_000, -201_000, -137_000),
-    "braviken":          (-227_000, -147_000, -197_000, -125_000),
-    "aland":             ( -47_000,  113_000,  -28_000,  83_000),
-    "turku_archipelago": (  60_000,  192_000,  -24_000,  74_000),
+    "full_domain": (-900_000, 650_000, -770_000, 750_000),
+    "orust": (-525_000, -460_000, -201_000, -137_000),
+    "braviken": (-227_000, -147_000, -197_000, -125_000),
+    "aland": (-47_000, 113_000, -28_000, 83_000),
+    "turku_archipelago": (60_000, 192_000, -24_000, 74_000),
 }
 
 FEATURE_CFG = {
-    "sla":     dict(base_var="sla",     depth=None, cmap=cmocean.cm.balance,
-                    units="m",   long_name="Sea Level Anomaly",     symmetric=True),
-    "siconc":  dict(base_var="siconc",  depth=None, cmap=cmocean.cm.ice,
-                    units="",    long_name="Sea Ice Concentration", symmetric=False,
-                    vmin=0.0, vmax=1.0),
-    "sithick": dict(base_var="sithick", depth=None, cmap=cmocean.cm.ice,
-                    units="m",   long_name="Sea Ice Thickness",     symmetric=False),
+    "sla": dict(
+        base_var="sla",
+        depth=None,
+        cmap=cmocean.cm.balance,
+        units="m",
+        long_name="Sea Level Anomaly",
+        symmetric=True,
+    ),
+    "siconc": dict(
+        base_var="siconc",
+        depth=None,
+        cmap=cmocean.cm.ice,
+        units="",
+        long_name="Sea Ice Concentration",
+        symmetric=False,
+        vmin=0.0,
+        vmax=1.0,
+    ),
+    "sithick": dict(
+        base_var="sithick",
+        depth=None,
+        cmap=cmocean.cm.ice,
+        units="m",
+        long_name="Sea Ice Thickness",
+        symmetric=False,
+    ),
 }
 for base_var, kw in [
-    ("thetao", dict(cmap=cmocean.cm.thermal, units="°C",  long_name="Potential Temperature", symmetric=False)),
-    ("so",     dict(cmap=cmocean.cm.haline,  units="PSU", long_name="Salinity",              symmetric=False)),
-    ("uo",     dict(cmap=cmocean.cm.balance, units="m/s", long_name="Eastward Current",      symmetric=True)),
-    ("vo",     dict(cmap=cmocean.cm.balance, units="m/s", long_name="Northward Current",     symmetric=True)),
+    (
+        "thetao",
+        dict(
+            cmap=cmocean.cm.thermal,
+            units="°C",
+            long_name="Potential Temperature",
+            symmetric=False,
+        ),
+    ),
+    (
+        "so",
+        dict(
+            cmap=cmocean.cm.haline,
+            units="PSU",
+            long_name="Salinity",
+            symmetric=False,
+        ),
+    ),
+    (
+        "uo",
+        dict(
+            cmap=cmocean.cm.balance,
+            units="m/s",
+            long_name="Eastward Current",
+            symmetric=True,
+        ),
+    ),
+    (
+        "vo",
+        dict(
+            cmap=cmocean.cm.balance,
+            units="m/s",
+            long_name="Northward Current",
+            symmetric=True,
+        ),
+    ),
 ]:
     for depth in [1, 9, 28, 47, 91]:
-        FEATURE_CFG[f"{base_var}_{depth}m"] = dict(base_var=base_var, depth=depth, **kw)
+        FEATURE_CFG[f"{base_var}_{depth}m"] = dict(
+            base_var=base_var, depth=depth, **kw
+        )
 
 # ---------------------------------------------------------------------------
 # Load data
@@ -72,17 +131,19 @@ fc = zarr.open(FC_PATH)
 sc = zarr.open(SC_PATH)
 ra = zarr.open(RA_PATH)
 
-features    = [str(f) for f in fc["state_feature"][:]]
+features = [str(f) for f in fc["state_feature"][:]]
 sc_features = [str(f) for f in sc["state_feature"][:]]
-lead_days   = fc["lead_time"][:]   # [1 2 3 ... 10]
-n_lt        = len(lead_days)
+lead_days = fc["lead_time"][:]  # [1 2 3 ... 10]
+n_lt = len(lead_days)
 
 ra_depth = ra["depth"][:]
-DEPTH_IDX = {d: int(np.argmin(np.abs(ra_depth - d))) for d in [1, 9, 28, 47, 91]}
+DEPTH_IDX = {
+    d: int(np.argmin(np.abs(ra_depth - d))) for d in [1, 9, 28, 47, 91]
+}
 
-fc_lat = fc["latitude"][:]   # (738,)
+fc_lat = fc["latitude"][:]  # (738,)
 fc_lon = fc["longitude"][:]  # (763,)
-ra_lat = ra["latitude"][:]   # (738,)
+ra_lat = ra["latitude"][:]  # (738,)
 ra_lon = ra["longitude"][:]  # (762,)
 
 # ---------------------------------------------------------------------------
@@ -101,6 +162,7 @@ grid_y = grid_xy[:, :, 1]
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def box_latlon(x_min, x_max, y_min, y_max, pad=0.1):
     """Convert projected box corners to (lon_min, lon_max, lat_min, lat_max)."""
@@ -123,14 +185,14 @@ def load_forecast_lt(feat_idx, lt_idx):
     """Return (n_ens, n_lat, n_lon) for a single lead time."""
     # fc["prediction"]: (n_ens, n_lt, n_feat, n_lon, n_lat)
     data = fc["prediction"][:, lt_idx, feat_idx, :, :]  # (n_ens, n_lon, n_lat)
-    return np.transpose(data.astype(float), (0, 2, 1))   # (n_ens, n_lat, n_lon)
+    return np.transpose(data.astype(float), (0, 2, 1))  # (n_ens, n_lat, n_lon)
 
 
 def load_seacast_lt(feature, lt_idx):
     """Return (n_lat, n_lon) for a single lead time."""
     sc_feat_idx = sc_features.index(feature)
     data = sc["prediction"][lt_idx, sc_feat_idx, :, :]  # (n_lon, n_lat)
-    return np.transpose(data.astype(float))              # (n_lat, n_lon)
+    return np.transpose(data.astype(float))  # (n_lat, n_lon)
 
 
 def load_reanalysis_lt(base_var, depth, lt_idx):
@@ -147,11 +209,13 @@ def load_reanalysis_lt(base_var, depth, lt_idx):
 def field_vrange(fc_slice, ra_slice, sc_slice, symmetric, cfg):
     if "vmin" in cfg:
         return cfg["vmin"], cfg["vmax"]
-    merged = np.concatenate([
-        fc_slice[np.isfinite(fc_slice)].ravel(),
-        ra_slice[np.isfinite(ra_slice)].ravel(),
-        sc_slice[np.isfinite(sc_slice)].ravel(),
-    ])
+    merged = np.concatenate(
+        [
+            fc_slice[np.isfinite(fc_slice)].ravel(),
+            ra_slice[np.isfinite(ra_slice)].ravel(),
+            sc_slice[np.isfinite(sc_slice)].ravel(),
+        ]
+    )
     if len(merged) == 0:
         return 0, 1
     if symmetric:
@@ -179,8 +243,10 @@ def add_map_features(ax):
 # Main plot function
 # ---------------------------------------------------------------------------
 
-def make_plot(feature, feat_idx, cfg, region_name, x_min, x_max, y_min, y_max,
-              lead_day):
+
+def make_plot(
+    feature, feat_idx, cfg, region_name, x_min, x_max, y_min, y_max, lead_day
+):
     lt_idx = int(np.where(lead_days == lead_day)[0][0])
 
     lon_min, lon_max, lat_min, lat_max = box_latlon(x_min, x_max, y_min, y_max)
@@ -192,18 +258,18 @@ def make_plot(feature, feat_idx, cfg, region_name, x_min, x_max, y_min, y_max,
 
     # Load and slice
     base_var = cfg["base_var"]
-    depth    = cfg["depth"]
+    depth = cfg["depth"]
 
-    fc_data = load_forecast_lt(feat_idx, lt_idx)     # (n_ens, 738, 763)
-    sc_data = load_seacast_lt(feature, lt_idx)        # (738, 763)
+    fc_data = load_forecast_lt(feat_idx, lt_idx)  # (n_ens, 738, 763)
+    sc_data = load_seacast_lt(feature, lt_idx)  # (738, 763)
     ra_data = load_reanalysis_lt(base_var, depth, lt_idx)  # (738, 762)
 
     # Slices
-    fc_s  = fc_data[:, lat0:lat1, lon0_fc:lon1_fc]   # (n_ens, n_lat_r, n_lon_r)
-    sc_s  = sc_data[lat0:lat1, lon0_fc:lon1_fc]
-    ra_s  = ra_data[lat0:lat1, lon0_ra:lon1_ra]
-    em_s  = np.nanmean(fc_s, axis=0)                  # (n_lat_r, n_lon_r)
-    mb_s  = fc_s[MEMBER_IDX]
+    fc_s = fc_data[:, lat0:lat1, lon0_fc:lon1_fc]  # (n_ens, n_lat_r, n_lon_r)
+    sc_s = sc_data[lat0:lat1, lon0_fc:lon1_fc]
+    ra_s = ra_data[lat0:lat1, lon0_ra:lon1_ra]
+    em_s = np.nanmean(fc_s, axis=0)  # (n_lat_r, n_lon_r)
+    mb_s = fc_s[MEMBER_IDX]
 
     # Align RA with FC lon for difference (trim to min width)
     n_lon_fc = lon1_fc - lon0_fc
@@ -213,12 +279,12 @@ def make_plot(feature, feat_idx, cfg, region_name, x_min, x_max, y_min, y_max,
     sc_aligned = sc_s[:, :n_lon]
     ra_aligned = ra_s[:, :n_lon]
     diff_njord = ra_aligned - em_aligned
-    diff_sc    = ra_aligned - sc_aligned
+    diff_sc = ra_aligned - sc_aligned
 
     # Coordinate meshgrids for pcolormesh
     lat_r = fc_lat[lat0:lat1]
     lon_r_fc = fc_lon[lon0_fc:lon1_fc]
-    lon_r_ra = ra_lon[lon0_ra:lon0_ra + n_lon]
+    lon_r_ra = ra_lon[lon0_ra : lon0_ra + n_lon]
 
     lon2d_fc, lat2d_fc = np.meshgrid(lon_r_fc, lat_r)
     lon2d_ra, lat2d_ra = np.meshgrid(lon_r_ra, lat_r)
@@ -229,9 +295,9 @@ def make_plot(feature, feat_idx, cfg, region_name, x_min, x_max, y_min, y_max,
     dv_min, dv_max = -max(abs(dv[0]), abs(dv[1])), max(abs(dv[0]), abs(dv[1]))
 
     cmap_field = cfg["cmap"]
-    cmap_diff  = cmocean.cm.balance
-    unit_str   = f" ({cfg['units']})" if cfg["units"] else ""
-    depth_str  = f" at {depth} m" if depth is not None else ""
+    cmap_diff = cmocean.cm.balance
+    unit_str = f" ({cfg['units']})" if cfg["units"] else ""
+    depth_str = f" at {depth} m" if depth is not None else ""
 
     # Extent for cartopy axes
     extent = [lon_min, lon_max, lat_min, lat_max]
@@ -242,22 +308,27 @@ def make_plot(feature, feat_idx, cfg, region_name, x_min, x_max, y_min, y_max,
     # -------------------------------------------------------------------
     fig = plt.figure(figsize=(12, 7))
     gs = fig.add_gridspec(
-        2, 4,
+        2,
+        4,
         width_ratios=[1, 1, 1, 0.045],
-        wspace=0.04, hspace=0.18,
-        left=0.02, right=0.94, top=0.88, bottom=0.04,
+        wspace=0.04,
+        hspace=0.18,
+        left=0.02,
+        right=0.94,
+        top=0.88,
+        bottom=0.04,
     )
 
     # Row 0: GT, Njord mean, SeaCast, field cbar
-    ax_gt  = fig.add_subplot(gs[0, 0], projection=proj)
-    ax_em  = fig.add_subplot(gs[0, 1], projection=proj)
-    ax_sc  = fig.add_subplot(gs[0, 2], projection=proj)
+    ax_gt = fig.add_subplot(gs[0, 0], projection=proj)
+    ax_em = fig.add_subplot(gs[0, 1], projection=proj)
+    ax_sc = fig.add_subplot(gs[0, 2], projection=proj)
     ax_cb1 = fig.add_subplot(gs[0, 3])
 
     # Row 1: Njord member, Diff Njord, Diff SC, diff cbar
-    ax_mb  = fig.add_subplot(gs[1, 0], projection=proj)
-    ax_dn  = fig.add_subplot(gs[1, 1], projection=proj)
-    ax_ds  = fig.add_subplot(gs[1, 2], projection=proj)
+    ax_mb = fig.add_subplot(gs[1, 0], projection=proj)
+    ax_dn = fig.add_subplot(gs[1, 1], projection=proj)
+    ax_ds = fig.add_subplot(gs[1, 2], projection=proj)
     ax_cb2 = fig.add_subplot(gs[1, 3])
 
     kw_pc = dict(transform=proj, zorder=3)
@@ -269,12 +340,36 @@ def make_plot(feature, feat_idx, cfg, region_name, x_min, x_max, y_min, y_max,
     def pmesh(ax, lon2d, lat2d, data, **kwargs):
         return ax.pcolormesh(lon2d, lat2d, data, **kw_pc, **kwargs)
 
-    im_gt = pmesh(ax_gt, lon2d_ra, lat2d_ra, ra_s,  cmap=cmap_field, vmin=vmin, vmax=vmax)
-    pmesh(ax_em, lon2d_fc, lat2d_fc, em_s,  cmap=cmap_field, vmin=vmin, vmax=vmax)
-    pmesh(ax_sc, lon2d_fc, lat2d_fc, sc_s,  cmap=cmap_field, vmin=vmin, vmax=vmax)
-    pmesh(ax_mb, lon2d_fc, lat2d_fc, mb_s,  cmap=cmap_field, vmin=vmin, vmax=vmax)
-    im_dn = pmesh(ax_dn, lon2d_ra, lat2d_ra, diff_njord, cmap=cmap_diff, vmin=dv_min, vmax=dv_max)
-    pmesh(ax_ds, lon2d_ra, lat2d_ra, diff_sc,    cmap=cmap_diff, vmin=dv_min, vmax=dv_max)
+    im_gt = pmesh(
+        ax_gt, lon2d_ra, lat2d_ra, ra_s, cmap=cmap_field, vmin=vmin, vmax=vmax
+    )
+    pmesh(
+        ax_em, lon2d_fc, lat2d_fc, em_s, cmap=cmap_field, vmin=vmin, vmax=vmax
+    )
+    pmesh(
+        ax_sc, lon2d_fc, lat2d_fc, sc_s, cmap=cmap_field, vmin=vmin, vmax=vmax
+    )
+    pmesh(
+        ax_mb, lon2d_fc, lat2d_fc, mb_s, cmap=cmap_field, vmin=vmin, vmax=vmax
+    )
+    im_dn = pmesh(
+        ax_dn,
+        lon2d_ra,
+        lat2d_ra,
+        diff_njord,
+        cmap=cmap_diff,
+        vmin=dv_min,
+        vmax=dv_max,
+    )
+    pmesh(
+        ax_ds,
+        lon2d_ra,
+        lat2d_ra,
+        diff_sc,
+        cmap=cmap_diff,
+        vmin=dv_min,
+        vmax=dv_max,
+    )
 
     # Colorbars
     cb1 = fig.colorbar(im_gt, cax=ax_cb1)
@@ -286,17 +381,18 @@ def make_plot(feature, feat_idx, cfg, region_name, x_min, x_max, y_min, y_max,
     cb2.ax.tick_params(labelsize=FONTSIZE - 1)
 
     # Titles
-    ax_gt.set_title("Analysis (GT)",             fontsize=TITLE_FS, pad=3)
-    ax_em.set_title("Njord Ens. Mean",           fontsize=TITLE_FS, pad=3)
-    ax_sc.set_title("SeaCast",                   fontsize=TITLE_FS, pad=3)
+    ax_gt.set_title("Analysis (GT)", fontsize=TITLE_FS, pad=3)
+    ax_em.set_title("Njord Ens. Mean", fontsize=TITLE_FS, pad=3)
+    ax_sc.set_title("SeaCast", fontsize=TITLE_FS, pad=3)
     ax_mb.set_title(f"Njord Member {MEMBER_IDX + 1}", fontsize=TITLE_FS, pad=3)
-    ax_dn.set_title("GT − Njord Mean",           fontsize=TITLE_FS, pad=3)
-    ax_ds.set_title("GT − SeaCast",              fontsize=TITLE_FS, pad=3)
+    ax_dn.set_title("GT − Njord Mean", fontsize=TITLE_FS, pad=3)
+    ax_ds.set_title("GT − SeaCast", fontsize=TITLE_FS, pad=3)
 
     fig.suptitle(
         f"{cfg['long_name']}{depth_str}  ·  {region_name.replace('_', ' ').title()}"
         f"  ·  Lead time +{lead_day} days",
-        fontsize=TITLE_FS + 2, y=0.96,
+        fontsize=TITLE_FS + 2,
+        y=0.96,
     )
 
     # Save
@@ -324,8 +420,14 @@ if __name__ == "__main__":
         for region_name, (x_min, x_max, y_min, y_max) in COORD_BOXES.items():
             for lead_day in LEAD_DAYS_PLOT:
                 make_plot(
-                    feature, feat_idx, cfg,
-                    region_name, x_min, x_max, y_min, y_max,
+                    feature,
+                    feat_idx,
+                    cfg,
+                    region_name,
+                    x_min,
+                    x_max,
+                    y_min,
+                    y_max,
                     lead_day,
                 )
 

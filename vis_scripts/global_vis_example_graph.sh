@@ -22,4 +22,3 @@ python -m neural_lam.plot_global_graph_3d\
     --mesh_height 0.1\
     --mesh_node_size 5\
     --mesh_edge_width 1.8\
-

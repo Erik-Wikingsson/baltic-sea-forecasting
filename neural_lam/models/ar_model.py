@@ -640,14 +640,109 @@ class ARModel(pl.LightningModule):
         )
         return da
 
-    def configure_optimizers(self):
-        opt = torch.optim.AdamW(
-            self.parameters(),
-            lr=self.args.lr,
-            betas=(0.9, 0.95),
-            weight_decay=0.1,
+    def _split_params_for_muon(self, flatten):
+        """Partition parameters into groups for the Muon optimizer.
+
+        Muon (``torch.optim.Muon``) is only used for 2D hidden weight matrices.
+        Embeddings, the final output layer (matched by name via
+        ``args.muon_exclude_patterns``) and all 1D parameters (biases, norm
+        gains) are optimized by AdamW instead. Buffers (static graph/grid
+        features, stats) are not in ``named_parameters()`` and are excluded
+        automatically.
+
+        Parameters
+        ----------
+        flatten : bool
+            If True (the ``muon_flat`` option), contiguous >2D weights (e.g. 4D
+            conv filters) are flattened to 2D and optimized by Muon. Otherwise
+            they go to AdamW.
+
+        Returns
+        -------
+        (muon_params, conv_muon_params, adamw_params) : tuple of lists
+        """
+        exclude_patterns = getattr(self.args, "muon_exclude_patterns", [])
+
+        muon_params = []
+        conv_muon_params = []
+        adamw_params = []
+
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+
+            excluded = any(pat in name for pat in exclude_patterns)
+            if excluded or param.ndim < 2:
+                adamw_params.append(param)
+            elif param.ndim == 2:
+                muon_params.append(param)
+            else:
+                # >2D (e.g. conv). Only Muon-optimize if flattening is enabled
+                # and the tensor is contiguous (required for a storage-sharing
+                # 2D view).
+                if flatten and param.is_contiguous():
+                    conv_muon_params.append(param)
+                else:
+                    if flatten:
+                        print(
+                            f"[optimizer] {name} is non-contiguous "
+                            f"{tuple(param.shape)}; routing to AdamW."
+                        )
+                    adamw_params.append(param)
+
+        def _summary(params):
+            return len(params), sum(p.numel() for p in params)
+
+        m_t, m_n = _summary(muon_params)
+        c_t, c_n = _summary(conv_muon_params)
+        a_t, a_n = _summary(adamw_params)
+        opt_name = "muon_flat" if flatten else "muon"
+        print(
+            f"[optimizer={opt_name}] "
+            f"Muon(2D): {m_t} tensors, {m_n:,} | "
+            f"Muon(conv-flat): {c_t} tensors, {c_n:,} | "
+            f"AdamW: {a_t} tensors, {a_n:,}"
         )
-        return opt
+
+        return muon_params, conv_muon_params, adamw_params
+
+    def configure_optimizers(self):
+        opt_name = getattr(self.args, "optimizer", "adamw")
+        if opt_name == "adamw":
+            opt = torch.optim.AdamW(
+                self.parameters(), lr=self.args.lr, betas=(0.9, 0.95), weight_decay=0.1
+            )
+        elif opt_name in ("muon", "muon_flat"):
+            from ..optim import MuonAuxAdam
+
+            muon_params, conv_muon_params, adamw_params = (
+                self._split_params_for_muon(flatten=(opt_name == "muon_flat"))
+            )
+            opt = MuonAuxAdam(
+                muon_params,
+                conv_muon_params,
+                adamw_params,
+                lr=self.args.lr,
+                weight_decay=self.args.muon_weight_decay,
+                momentum=self.args.muon_momentum,
+                betas=(0.9, 0.95),
+            )
+        else:
+            raise ValueError(f"Unknown --optimizer {opt_name}")
+
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt,
+            T_max=self.args.epochs,
+            eta_min=self.args.min_lr if hasattr(self.args, "min_lr") else 0.0,
+        )
+        return {
+            "optimizer": opt,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "epoch",
+                "frequency": 1,
+            },
+        }
 
     @staticmethod
     def expand_to_batch(x, batch_size):
@@ -1229,7 +1324,8 @@ class ARModel(pl.LightningModule):
             )
             os.makedirs(pdf_loss_maps_dir, exist_ok=True)
             for t_i, fig in zip(self.args.val_steps_to_log, pdf_loss_map_figs):
-                fig.savefig(os.path.join(pdf_loss_maps_dir, f"loss_t{t_i}.pdf"))
+                fig.savefig(os.path.join(
+                    pdf_loss_maps_dir, f"loss_t{t_i}.pdf"))
             # save mean spatial loss as .pt file also
             torch.save(
                 mean_spatial_loss.cpu(),
@@ -1262,7 +1358,8 @@ class ARModel(pl.LightningModule):
         if not self.restore_opt:
             opt = self.configure_optimizers()
             if isinstance(opt, dict):
-                checkpoint["optimizer_states"] = [opt["optimizer"].state_dict()]
+                checkpoint["optimizer_states"] = [
+                    opt["optimizer"].state_dict()]
                 lr_cfg = opt.get("lr_scheduler")
                 if lr_cfg is not None:
                     sched = (

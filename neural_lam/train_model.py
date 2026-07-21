@@ -14,7 +14,7 @@ from loguru import logger
 # Local
 from . import utils
 from .config import load_config_and_datastores
-from .models import EDM, FM, SI, GraphCast, GraphCRPS, GraphEFM, GraphFM
+from .models import EDM, FM, SI, GraphCast, GraphCRPS, GraphEFM, GraphFM, GraphDET
 from .weather_dataset import WeatherDataModule
 
 MODELS = {
@@ -22,6 +22,7 @@ MODELS = {
     "graph_fm": GraphFM,
     "graph_efm": GraphEFM,
     "graph_crps": GraphCRPS,
+    "graph_det": GraphDET,
     "EDM": EDM,
     "FM": FM,
     "SI": SI,
@@ -279,6 +280,12 @@ def main(input_args=None):
         default=2,
         help="Channel multiplier for noise embedding MLP",
     )
+    parser.add_argument(
+        "--deterministic_noise_value",
+        type=float,
+        default=0.,
+        help="Value for the noise parameter in the deterministisc version."
+    )
 
     # Training options
     parser.add_argument(
@@ -296,6 +303,52 @@ def main(input_args=None):
     )
     parser.add_argument(
         "--lr", type=float, default=1e-3, help="learning rate (default: 0.001)"
+    )
+    parser.add_argument(
+        "--min_lr",
+        type=float,
+        default=1e-3,
+        help="Minimum learning rate for cosine annealing (default: 1e-4)",
+    )
+    parser.add_argument(
+        "--optimizer",
+        type=str,
+        default="adamw",
+        choices=["adamw", "muon", "muon_flat"],
+        help="Optimizer to use. 'muon' applies the Muon optimizer to 2D "
+        "hidden weights (AdamW for embeddings/output/1D params); 'muon_flat' "
+        "additionally flattens 4D conv weights so Muon optimizes them too "
+        "(default: adamw)",
+    )
+    parser.add_argument(
+        "--muon_momentum",
+        type=float,
+        default=0.95,
+        help="Momentum for the Muon optimizer (default: 0.95)",
+    )
+    parser.add_argument(
+        "--muon_weight_decay",
+        type=float,
+        default=0.0,
+        help="Weight decay for the muon optimizer"
+        "(default: 0.0)",
+    )
+    parser.add_argument(
+        "--muon_exclude_patterns",
+        nargs="+",
+        default=[
+            "interior_embedder",
+            "boundary_embedder",
+            "g2m_embedder",
+            "m2g_embedder",
+            "output_map",
+            "mesh_embedders",
+            "mesh_same_embedders",
+            "mesh_up_embedders",
+            "mesh_down_embedders",
+        ],
+        help="Parameter-name substrings routed to AdamW instead of Muon "
+        "(input embeddings and final output layer)",
     )
     parser.add_argument(
         "--val_interval",
@@ -676,7 +729,8 @@ def main(input_args=None):
         extra_callbacks=None,
     ):
         """Run one training phase, return path to last checkpoint."""
-        t = _make_trainer(max_epochs, strategy, extra_callbacks=extra_callbacks)
+        t = _make_trainer(max_epochs, strategy,
+                          extra_callbacks=extra_callbacks)
         if t.global_rank == 0:
             utils.init_training_logger_metrics(
                 training_logger, val_steps=args.val_steps_to_log

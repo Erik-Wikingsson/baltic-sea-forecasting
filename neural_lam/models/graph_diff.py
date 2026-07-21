@@ -45,7 +45,10 @@ class GraphDiff(ARModel):
         self.channel_mult_noise = args.channel_mult_noise
         self.remove_cond = True if args.model == "SI" else False
 
-        num_state_vars = datastore.get_num_data_vars(category="state")
+        # Use the density-aware count set by ARModel.__init__ (includes the
+        # density channel when config.training.density_channel is set), so the
+        # output map and noise-channel input match the N+1 target/loss dims.
+        num_state_vars = self.num_state_vars
 
         # grid_dim from data + static
         (

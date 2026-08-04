@@ -246,7 +246,8 @@ def main(input_args=None):
         "--pred_residual",
         action="store_true",
         help="If the EDM model should predict residuals instead of the "
-        "next state",
+        "next state. NOTE: has no effect for graph_det, which always uses "
+        "the residual parametrization to match graph_fm",
     )
     parser.add_argument(
         "--channel_mult_noise",

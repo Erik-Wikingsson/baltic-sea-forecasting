@@ -19,6 +19,12 @@ from ..datastore import BaseDatastore
 class GraphDET(ARModel):
     """
     SeaCast with learnable layernorm.
+
+    Deterministic model that is architecturally identical to graph_fm
+    (GraphFM), with the single difference that its backbone (GraphDiff) uses
+    ConditionalLayerNorm, modulated by an embedding of a constant noise level,
+    where graph_fm uses plain nn.LayerNorm. See
+    tests/test_graph_det_fm_equivalence.py, which enforces this.
     """
 
     def __init__(
@@ -53,6 +59,10 @@ class GraphDET(ARModel):
                 f"Unknown backbone model: {args.backbone_model}"
             )
 
+        # Compute indices and define clamping functions, matching
+        # BaseGraphModel (and thereby graph_fm)
+        self.prepare_clamping_params(config, datastore)
+
     def predict_step(
         self,
         prev_state,
@@ -73,6 +83,7 @@ class GraphDET(ARModel):
         Returns:
         next_state: (B, N_grid, d_state),
             predicted weather state X_{t+1} at time t+1
+        pred_std: (B, N_grid, d_state) if output_std, else None
         """
         if prev_prev_state is not None:
             input_grid = torch.cat(
@@ -87,19 +98,34 @@ class GraphDET(ARModel):
             self.model.noise_dim,
             device=prev_state.device) * self.args.deterministic_noise_value
 
-        next_state = self.model(
+        net_output = self.model(
             input_grid,
             noise_level=z,
             cond=None,
             boundary_forcing=boundary_forcing,
             atmosphere_forcing=atmosphere_forcing,
-        )  # (B, N_grid, d_f)
+        )  # (B, N_grid, d_grid_out)
 
-        # Add residual if needed
-        if self.args.pred_residual:
-            next_state = (
-                next_state * self.diff_std
-            ) + self.diff_mean  # Unormalize residual
-            next_state = prev_state + next_state
+        # NOTE: From here on this is identical to BaseGraphModel.predict_step,
+        # so that graph_det and graph_fm differ only in the normalization
+        # layers of the backbone. --pred_residual has no effect here, the
+        # residual parametrization is always used.
+        if self.output_std:
+            pred_delta_mean, pred_std_raw = net_output.chunk(
+                2, dim=-1
+            )  # both (B, num_grid_nodes, d_f)
+            # NOTE: The predicted std. is not scaled in any way here
+            # linter for some reason does not think softplus is callable
+            # pylint: disable-next=not-callable
+            pred_std = torch.nn.functional.softplus(pred_std_raw)
+        else:
+            pred_delta_mean = net_output
+            pred_std = None
 
-        return next_state, self.per_var_std
+        # Rescale with one-step difference statistics
+        rescaled_delta_mean = pred_delta_mean * self.diff_std + self.diff_mean
+
+        # Clamp values to valid range (also add the delta to the previous state)
+        new_state = self.get_clamped_new_state(rescaled_delta_mean, prev_state)
+
+        return new_state, pred_std

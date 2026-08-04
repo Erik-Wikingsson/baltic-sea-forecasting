@@ -24,6 +24,6 @@ wandb online
 # bash training_scripts/graph_edm/graph_edm_1.sh
 # bash training_scripts/graph_crps/graph_crps_1.sh
 # bash training_scripts/graph_SI/graph_SI_1.sh
-bash training_scripts/graph_fm/graph_fm_pretrain.sh
+# bash training_scripts/graph_fm/graph_fm_pretrain.sh
 # bash training_scripts/seacast/seacast_pretrain.sh
-# bash training_scripts/seacast/seacast_pretrain_muon.sh
+bash training_scripts/seacast/seacast_pretrain_muon.sh

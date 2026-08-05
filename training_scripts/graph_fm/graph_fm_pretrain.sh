@@ -19,3 +19,8 @@ srun python -m neural_lam.train_model \
     --num_sanity_val_steps 0 \
     --num_nodes 1 \
     --optimizer "muon_flat"
+
+# Different graphs:
+# global_cluster_1_deg_20_refinement_4_levels
+# global_cluster_1_deg_15_refinement_4_levels
+# global_cluster_1_deg_10_refinement_4_levels

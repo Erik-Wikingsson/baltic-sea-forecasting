@@ -18,6 +18,7 @@ from pathlib import Path
 
 # Third-party
 import pytest
+import torch
 
 # First-party
 import neural_lam.train_model as train_model
@@ -135,13 +136,15 @@ def compare_backbones(model_fm, model_det):
 
 
 @pytest.fixture(scope="module")
-def models():
+def built_models():
+    """
+    Build one instance of each model that shares the GraphDiff/graph_fm
+    prediction head, from the config the paired training scripts use.
+    """
     if not CONFIG_PATH.exists():
         pytest.skip(f"{CONFIG_PATH} not available")
 
     parser = _build_arg_parser()
-    args_fm = parser.parse_args(COMMON_ARGS + ["--model", "graph_fm"])
-    args_det = parser.parse_args(COMMON_ARGS + ["--model", "graph_det"])
 
     (
         config,
@@ -167,10 +170,18 @@ def models():
         statistics_datastore_atmosphere=statistics_datastore_atmosphere,
     )
 
-    return (
-        train_model.MODELS["graph_fm"](args_fm, **kwargs),
-        train_model.MODELS["graph_det"](args_det, **kwargs),
-    )
+    return {
+        name: train_model.MODELS[name](
+            parser.parse_args(COMMON_ARGS + ["--model", name]), **kwargs
+        )
+        for name in ("graph_fm", "graph_det", "graph_crps")
+    }
+
+
+@pytest.fixture(scope="module")
+def models(built_models):
+    """The (graph_fm, graph_det) pair, in that order."""
+    return built_models["graph_fm"], built_models["graph_det"]
 
 
 def test_backbones_have_matching_parameters(models):
@@ -224,3 +235,50 @@ def test_only_difference_is_the_normalization(models):
         "graph_det has no noise embedding stack to drive its conditional "
         "layer norms"
     )
+
+
+CLAMP_BUFFERS = (
+    "clamp_lower_upper_idx",
+    "clamp_lower_idx",
+    "clamp_upper_idx",
+)
+
+
+def test_all_models_prepare_clamping(built_models):
+    """
+    Every model using the graph_fm prediction head must call
+    prepare_clamping_params, otherwise get_clamped_new_state has no indices to
+    work with and predictions silently escape the configured valid range
+    (e.g. siconc outside [0, 1]).
+
+    This is a guard for new models wired to the GraphDiff backbone: forgetting
+    prepare_clamping_params is exactly the bug graph_det and graph_crps had.
+    """
+    for name, model in built_models.items():
+        buffers = dict(model.named_buffers())
+        for buffer_name in CLAMP_BUFFERS:
+            assert buffer_name in buffers, (
+                f"{name} is missing buffer '{buffer_name}' - it likely never "
+                "calls prepare_clamping_params(config, datastore)"
+            )
+
+
+def test_clamping_indices_agree_across_models(built_models):
+    """
+    All these models share a config, so they must clamp exactly the same state
+    variables in the same way.
+    """
+    reference_name = "graph_fm"
+    reference = dict(built_models[reference_name].named_buffers())
+
+    for name, model in built_models.items():
+        if name == reference_name:
+            continue
+        buffers = dict(model.named_buffers())
+        for buffer_name in CLAMP_BUFFERS:
+            assert torch.equal(
+                buffers[buffer_name], reference[buffer_name]
+            ), (
+                f"{name}.{buffer_name} differs from {reference_name}: "
+                f"{buffers[buffer_name]} vs {reference[buffer_name]}"
+            )

@@ -15,6 +15,8 @@ from ..config import NeuralLAMConfig
 from ..datastore import BaseDatastore
 from .ar_prob_model import ARProbModel
 from .constant_latent_encoder import ConstantLatentEncoder
+from .graph_latent_decoder import GraphLatentDecoder
+from .graph_latent_encoder import GraphLatentEncoder
 from .hi_graph_latent_decoder import HiGraphLatentDecoder
 from .hi_graph_latent_encoder import HiGraphLatentEncoder
 
@@ -31,6 +33,7 @@ class GraphEFM(ARProbModel):
         datastore: BaseDatastore,
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
+        **kwargs,
     ):
         super().__init__(
             args,
@@ -38,7 +41,10 @@ class GraphEFM(ARProbModel):
             datastore=datastore,
             datastore_boundary=datastore_boundary,
             datastore_atmosphere=datastore_atmosphere,
+            **kwargs,
         )
+
+        self.prepare_clamping_params(config, datastore)
 
         assert (
             args.n_example_pred <= args.batch_size
@@ -71,21 +77,32 @@ class GraphEFM(ARProbModel):
 
         # Determine grid hidden dim
         if args.hidden_dim_grid is None:
-            # Same as hidden_dim
             hidden_dim_grid = args.hidden_dim
         else:
             hidden_dim_grid = args.hidden_dim_grid
 
+        # Determine edge hidden dim
+        if args.hidden_dim_edge is None:
+            hidden_dim_edge = hidden_dim_grid
+        else:
+            hidden_dim_edge = args.hidden_dim_edge
+
+        # Determine mesh node hidden dim
+        if args.hidden_dim_mesh_nodes is None:
+            hidden_dim_mesh_nodes = args.hidden_dim
+        else:
+            hidden_dim_mesh_nodes = args.hidden_dim_mesh_nodes
+
         print(
             f"Using hidden_dim_grid={hidden_dim_grid}, "
-            f"hidden_dim={args.hidden_dim}"
+            f"hidden_dim_mesh_nodes={hidden_dim_mesh_nodes}, "
+            f"hidden_dim_edge={hidden_dim_edge}, hidden_dim={args.hidden_dim}"
         )
 
         # interior_dim from data + static
         self.g2m_edges, g2m_dim = self.g2m_features.shape
         self.m2g_edges, m2g_dim = self.m2g_features.shape
 
-        # g2m_dim.shape: 3, m2g_dim.shape: 3
         print(f"g2m_dim.shape: {g2m_dim}, m2g_dim.shape: {m2g_dim}")
 
         # Define sub-models
@@ -95,11 +112,16 @@ class GraphEFM(ARProbModel):
         self.grid_mlp_blueprint_end = [hidden_dim_grid] * (
             args.hidden_layers + 1
         )
+        # For edge hidden dim
+        self.edge_mlp_blueprint_end = [hidden_dim_edge] * (
+            args.hidden_layers + 1
+        )
 
         print(
             "GraphEFM, "
             f"self.interior_dim={self.interior_input_dim}, "
-            f"self.boundary_dim={self.boundary_dim}, "
+            f"self.boundary_dim={getattr(self, 'boundary_dim', None)}, "
+            f"self.atmosphere_dim={getattr(self, 'atmosphere_dim', None)}, "
         )
 
         # Feature embedders for interior
@@ -125,10 +147,10 @@ class GraphEFM(ARProbModel):
 
         # Embedders for mesh
         self.g2m_embedder = utils.make_mlp(
-            [g2m_dim] + self.grid_mlp_blueprint_end
+            [g2m_dim] + self.edge_mlp_blueprint_end
         )
         self.m2g_embedder = utils.make_mlp(
-            [m2g_dim] + self.grid_mlp_blueprint_end
+            [m2g_dim] + self.edge_mlp_blueprint_end
         )
 
         if self.hierarchical_graph:
@@ -159,9 +181,11 @@ class GraphEFM(ARProbModel):
             mesh_down_dim = self.mesh_down_features[0].shape[1]
 
             # Separate mesh node embedders for each level
+            mesh_embedder_blueprint_0 = [hidden_dim_mesh_nodes] * (
+                args.hidden_layers + 1
+            )
             self.mesh_embedders = nn.ModuleList(
-                # Bottom mesh level is first embedded to hidden dim of grid
-                [utils.make_mlp([mesh_dim] + self.grid_mlp_blueprint_end)]
+                [utils.make_mlp([mesh_dim] + mesh_embedder_blueprint_0)]
                 + [
                     utils.make_mlp([mesh_dim] + self.mlp_blueprint_end)
                     for _ in range(num_levels - 1)
@@ -197,8 +221,25 @@ class GraphEFM(ARProbModel):
                     ]
                 )
         else:
-            raise NotImplementedError(
-                "GraphEFM currently only supports hierarchical graphs"
+            # Single-level mesh
+            num_mesh = self.mesh_static_features.shape[0]
+            print(
+                "Loaded non-hierarchical graph with structure:\n"
+                f"  mesh nodes: {num_mesh}\n"
+                f"  g2m edges: {self.g2m_edges}, m2g edges: {self.m2g_edges}, "
+                f"m2m edges: {self.m2m_features.shape[0]}"
+            )
+            mesh_dim = self.mesh_static_features.shape[1]
+            m2m_dim = self.m2m_features.shape[1]
+            mesh_embedder_blueprint = [hidden_dim_mesh_nodes] * (
+                args.hidden_layers + 1
+            )
+            self.mesh_embedder = utils.make_mlp(
+                [mesh_dim] + mesh_embedder_blueprint
+            )
+            # m2m edge dim must equal processor hidden_dim
+            self.m2m_embedder = utils.make_mlp(
+                [m2m_dim] + self.mlp_blueprint_end
             )
 
         latent_dim = (
@@ -229,21 +270,31 @@ class GraphEFM(ARProbModel):
                     self.mesh_up_edge_index,
                     args.hidden_dim,
                     hidden_dim_grid,
+                    hidden_dim_mesh_nodes,
+                    hidden_dim_edge,
                     args.prior_processor_layers,
                     hidden_layers=args.hidden_layers,
                     output_dist=args.prior_dist,
                     num_grid_con_mesh_nodes=self.num_grid_con_mesh_nodes,
                 )
             else:
-                raise NotImplementedError(
-                    "GraphEFM currently only supports hierarchical graphs, "
-                    "but the GraphEFM model was initialized with a "
-                    "non-hierarchical graph."
+                self.prior_model = GraphLatentEncoder(
+                    latent_dim,
+                    self.g2m_edge_index,
+                    self.m2m_edge_index,
+                    args.hidden_dim,
+                    args.prior_processor_layers,
+                    hidden_layers=args.hidden_layers,
+                    output_dist=args.prior_dist,
+                    hidden_dim_grid=hidden_dim_grid,
+                    hidden_dim_mesh_nodes=hidden_dim_mesh_nodes,
+                    hidden_dim_edge=hidden_dim_edge,
+                    num_grid_con_mesh_nodes=self.num_grid_con_mesh_nodes,
                 )
         else:
             self.prior_model = ConstantLatentEncoder(
                 latent_dim,
-                self.num_mesh_nodes,
+                self.num_latent_mesh_nodes,
                 output_dist=args.prior_dist,
             )
 
@@ -257,6 +308,8 @@ class GraphEFM(ARProbModel):
                 self.mesh_up_edge_index,
                 args.hidden_dim,
                 hidden_dim_grid,
+                hidden_dim_mesh_nodes,
+                hidden_dim_edge,
                 args.encoder_processor_layers,
                 hidden_layers=args.hidden_layers,
                 output_dist="diagonal",
@@ -271,8 +324,10 @@ class GraphEFM(ARProbModel):
                 self.mesh_down_edge_index,
                 args.hidden_dim,
                 hidden_dim_grid,
+                hidden_dim_mesh_nodes,
+                hidden_dim_edge,
                 latent_dim,
-                self._datastore.get_num_data_vars(category="state"),
+                self.num_state_vars,
                 args.processor_layers,
                 hidden_layers=args.hidden_layers,
                 output_std=bool(args.output_std),
@@ -280,10 +335,33 @@ class GraphEFM(ARProbModel):
                 num_interior_nodes=self.num_interior_nodes,
             )
         else:
-            raise NotImplementedError(
-                "GraphEFM currently only supports hierarchical graphs, "
-                "but the GraphEFM model was initialized with a "
-                "non-hierarchical graph."
+            self.encoder = GraphLatentEncoder(
+                latent_dim,
+                self.g2m_edge_index,
+                self.m2m_edge_index,
+                args.hidden_dim,
+                args.encoder_processor_layers,
+                hidden_layers=args.hidden_layers,
+                output_dist="diagonal",
+                hidden_dim_grid=hidden_dim_grid,
+                hidden_dim_mesh_nodes=hidden_dim_mesh_nodes,
+                hidden_dim_edge=hidden_dim_edge,
+                num_grid_con_mesh_nodes=self.num_grid_con_mesh_nodes,
+            )
+            self.decoder = GraphLatentDecoder(
+                self.g2m_edge_index,
+                self.m2m_edge_index,
+                self.m2g_edge_index,
+                args.hidden_dim,
+                latent_dim,
+                hidden_dim_grid,
+                self.num_state_vars,
+                args.processor_layers,
+                hidden_layers=args.hidden_layers,
+                output_std=bool(args.output_std),
+                hidden_dim_mesh_nodes=hidden_dim_mesh_nodes,
+                hidden_dim_edge=hidden_dim_edge,
+                num_interior_nodes=self.num_interior_nodes,
             )
 
     @property
@@ -291,9 +369,12 @@ class GraphEFM(ARProbModel):
         """
         Get the total number of mesh nodes in the used mesh graph
         """
-        num_mesh_nodes = sum(
-            node_feat.shape[0] for node_feat in self.mesh_static_features
-        )
+        if self.hierarchical_graph:
+            num_mesh_nodes = sum(
+                node_feat.shape[0] for node_feat in self.mesh_static_features
+            )
+        else:
+            num_mesh_nodes = self.mesh_static_features.shape[0]
         return num_mesh_nodes
 
     @property
@@ -302,7 +383,21 @@ class GraphEFM(ARProbModel):
         Get the total number of mesh nodes that have a connection to
         the grid (e.g. bottom level in a hierarchy)
         """
-        return self.mesh_static_features[0].shape[0]  # Bottom level
+        if self.hierarchical_graph:
+            return self.mesh_static_features[0].shape[0]  # Bottom level
+        else:
+            return self.mesh_static_features.shape[0]
+
+    @property
+    def num_latent_mesh_nodes(self):
+        """
+        Number of mesh sites for the variational latent (encoder / prior / KL).
+
+        Single lev graph: same as total mesh nodes, hierarchical: top level only
+        """
+        if self.hierarchical_graph:
+            return self.mesh_static_features[-1].shape[0]
+        return self.mesh_static_features.shape[0]
 
     def sample_next_state(self, pred_mean, pred_std):
         """
@@ -403,7 +498,8 @@ class GraphEFM(ARProbModel):
         input to the encoder, which is conditioned also on the target.
 
         prev_state: (B, num_grid_nodes, feature_dim), X_t
-        prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1}
+        prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1} (None if
+            input_steps==1)
         forcing: (B, num_grid_nodes, forcing_dim)
         boundary_forcing: (B, num_boundary_nodes, boundary_dim)
         atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_dim)
@@ -413,16 +509,16 @@ class GraphEFM(ARProbModel):
         current_emb: (B, num_grid_nodes, d_h)
         """
         batch_size = prev_state.shape[0]
-
-        # Create full interior node features of shape
-        # (B, num_interior_nodes, interior_dim)
-        interior_input_list = [
-            prev_state,
-            prev_prev_state,
-            forcing,
-            self.expand_to_batch(self.grid_static_features, batch_size),
-            current_state,
-        ]
+        interior_input_list = [prev_state]
+        if prev_prev_state is not None:
+            interior_input_list.append(prev_prev_state)
+        interior_input_list.extend(
+            [
+                forcing,
+                self.expand_to_batch(self.grid_static_features, batch_size),
+                current_state,
+            ]
+        )
         if self.concat_atmosphere:
             interior_input_list.append(atmosphere_forcing)
         interior_features = torch.cat(interior_input_list, dim=-1)
@@ -448,7 +544,8 @@ class GraphEFM(ARProbModel):
         embed all node and edge representations
 
         prev_state: (B, num_grid_nodes, feature_dim), X_t
-        prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1}
+        prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1} (None if
+            input_steps==1)
         forcing: (B, num_grid_nodes, forcing_dim)
         boundary_forcing: (B, num_boundary_nodes, boundary_dim)
         atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_dim)
@@ -459,15 +556,15 @@ class GraphEFM(ARProbModel):
         graph_embedding: dict with entries of shape (B, *, d_h)
         """
         batch_size = prev_state.shape[0]
-
-        # Create full interior node features of shape
-        # (B, num_interior_nodes, interior_dim)
-        interior_input_list = [
-            prev_state,
-            prev_prev_state,
-            forcing,
-            self.expand_to_batch(self.grid_static_features, batch_size),
-        ]
+        interior_input_list = [prev_state]
+        if prev_prev_state is not None:
+            interior_input_list.append(prev_prev_state)
+        interior_input_list.extend(
+            [
+                forcing,
+                self.expand_to_batch(self.grid_static_features, batch_size),
+            ]
+        )
         if self.concat_atmosphere:
             interior_input_list.append(atmosphere_forcing)
         interior_features = torch.cat(interior_input_list, dim=-1)
@@ -544,25 +641,28 @@ class GraphEFM(ARProbModel):
         """
         Perform forward pass and compute loss for one time step
 
-        prev_states: (B, 2, num_grid_nodes, d_features), X^{t-p}, ..., X^{t-1}
+        prev_states: (B, input_steps, num_grid_nodes, d_features)
         current_state: (B, num_grid_nodes, d_features) X^t
-        forcing_features: (B, num_grid_nodes, d_forcing) corresponding to
-            index 1 of prev_states
+        forcing_features: (B, num_grid_nodes, d_forcing)
         boundary_forcing: (B, num_boundary_nodes, d_boundary)
         atmosphere_forcing: (B, num_atmosphere_nodes, d_atmosphere)
         """
+        prev_state = prev_states[:, -1]
+        prev_prev_state = (
+            prev_states[:, 0] if prev_states.shape[1] > 1 else None
+        )
         # embed all features
         grid_prev_emb, grid_prev_interior_emb, graph_emb = self.embedd_all(
-            prev_states[:, 1],
-            prev_states[:, 0],
+            prev_state,
+            prev_prev_state,
             forcing_features,
             boundary_forcing,
             atmosphere_forcing,
         )
         # embed also including current grid state, for encoder
         grid_current_emb = self.embedd_current(
-            prev_states[:, 1],
-            prev_states[:, 0],
+            prev_state,
+            prev_prev_state,
             forcing_features,
             boundary_forcing,
             atmosphere_forcing,
@@ -575,7 +675,7 @@ class GraphEFM(ARProbModel):
         )  # Gaussian, (B, num_mesh_nodes, d_latent)
 
         # Compute likelihood
-        last_state = prev_states[:, -1]
+        last_state = prev_state
         likelihood_term, pred_mean, pred_std = self.estimate_likelihood(
             var_dist,
             current_state,
@@ -639,6 +739,11 @@ class GraphEFM(ARProbModel):
             graph_emb,
         )  # both (B, num_grid_nodes, d_state)
 
+        # Apply output clamping
+        # (decoder adds residual: pred_mean = prev + delta)
+        state_delta = pred_mean - last_state
+        pred_mean = self.get_clamped_new_state(state_delta, last_state)
+
         if self.output_std:
             pred_std = model_pred_std  # (B, num_grid_nodes, d_state)
         else:
@@ -652,7 +757,7 @@ class GraphEFM(ARProbModel):
             pred_mean,
             current_state,
             pred_std,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             average_grid=False,
             sum_vars=False,
         )  # (B, num_grid_nodes', d_state)
@@ -678,8 +783,12 @@ class GraphEFM(ARProbModel):
             _,
         ) = batch
 
-        prev_prev_state = init_states[:, 0]  # (B, num_grid_nodes, d_state)
-        prev_state = init_states[:, 1]  # (B, num_grid_nodes, d_state)
+        if self.input_steps == 1:
+            prev_state = init_states[:, 0]
+            prev_prev_state = None
+        else:
+            prev_prev_state = init_states[:, 0]
+            prev_state = init_states[:, 1]
         pred_steps = forcing.shape[1]
 
         loss_like_list = []
@@ -688,9 +797,13 @@ class GraphEFM(ARProbModel):
         for i in range(pred_steps):
             target_state = target_states[:, i]  # (B, num_grid_nodes, d_state)
 
-            prev_states_stacked = torch.stack(
-                (prev_prev_state, prev_state), dim=1
-            )  # (B, 2, num_grid_nodes, d_state)
+            if self.input_steps >= 2:
+                prev_states_stacked = torch.stack(
+                    (prev_prev_state, prev_state), dim=1
+                )  # (B, 2, num_grid_nodes, d_state)
+            else:
+                prev_states_stacked = prev_state.unsqueeze(1)
+                # (B, 1, num_grid_nodes, d_state)
 
             (
                 loss_like_term,
@@ -714,9 +827,13 @@ class GraphEFM(ARProbModel):
             # Get predicted next state (sample or mean)
             predicted_state = self.sample_next_state(pred_mean, pred_std)
 
+            # Apply density thresholding to the state fed back as input
+            feedback_state = self.apply_density_threshold(predicted_state)
+
             # Update conditioning states
-            prev_prev_state = prev_state
-            prev_state = predicted_state
+            if self.input_steps >= 2:
+                prev_prev_state = prev_state
+            prev_state = feedback_state
 
         # Compute final ELBO and loss, sum over time, mean over batch
         per_sample_likelihood = torch.sum(
@@ -755,14 +872,25 @@ class GraphEFM(ARProbModel):
             )
             # (B, S=2, pred_steps, num_grid_nodes, d_f), always 2 samples
 
-            # Compute CRPS
-            crps_estimate = metrics.crps_ens(
+            # Compute almost-fair CRPS without reduction
+            crps_estimate = metrics.afcrps_ens(
                 pred_traj_means,
                 target_states,
                 pred_traj_stds,
-                mask=self.interior_mask_bool,
-            )  # (B, pred_steps)
-            crps_loss = torch.mean(crps_estimate)
+                average_grid=False,
+                sum_vars=False,
+                alpha=self.args.crps_alpha,
+            )  # (B, pred_steps, num_grid_nodes, d_f)
+
+            # Per-variable normalization and reduce
+            crps_loss = torch.mean(
+                metrics.mask_and_reduce_metric(
+                    crps_estimate / self.per_var_std,
+                    mask=self.loss_mask,
+                    average_grid=True,
+                    sum_vars=True,
+                )
+            )
 
             # Add onto loss
             loss = loss + self.crps_weight * crps_loss
@@ -785,7 +913,8 @@ class GraphEFM(ARProbModel):
         """
         Step state one step ahead using prediction model, X_{t-1}, X_t -> X_t+1
         prev_state: (B, num_interior_nodes, feature_dim), X_t
-        prev_prev_state: (B, num_interior_nodes, feature_dim), X_{t-1}
+        prev_prev_state: (B, num_interior_nodes, feature_dim), X_{t-1} (None
+            if input_steps==1)
         forcing: (B, num_interior_nodes, forcing_dim)
         boundary_forcing: (B, num_boundary_nodes, boundary_forcing_dim)
         atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
@@ -820,6 +949,11 @@ class GraphEFM(ARProbModel):
 
         # TODO: Add option for pred_residual,
         # for now it is always True in the decoder
+
+        # Apply output clamping
+        # (decoder adds residual: pred_mean = prev + delta)
+        state_delta = pred_mean - prev_state
+        pred_mean = self.get_clamped_new_state(state_delta, prev_state)
 
         return self.sample_next_state(pred_mean, pred_std), pred_std
 
@@ -897,14 +1031,18 @@ class GraphEFM(ARProbModel):
         Roll out prediction, sampling latent var. from variational
         encoder distribution
 
-        init_states: (B, 2, num_grid_nodes, d_f)
+        init_states: (B, input_steps, num_grid_nodes, d_f)
         forcing: (B, pred_steps, num_grid_nodes, d_forcing)
         boundary_forcing: (B, pred_steps, num_boundary_nodes, d_boundary)
         atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
         true_states: (B, pred_steps, num_grid_nodes, d_f)
         """
-        prev_prev_state = init_states[:, 0]
-        prev_state = init_states[:, 1]
+        if self.input_steps == 1:
+            prev_state = init_states[:, 0]
+            prev_prev_state = None
+        else:
+            prev_prev_state = init_states[:, 0]
+            prev_state = init_states[:, 1]
         prediction_list = []
         pred_std_list = []
         pred_steps = forcing.shape[1]
@@ -953,6 +1091,10 @@ class GraphEFM(ARProbModel):
                 graph_emb,
             )  # (B, num_grid_nodes, d_state)
 
+            # Apply output clamping
+            state_delta = pred_mean - prev_state
+            pred_mean = self.get_clamped_new_state(state_delta, prev_state)
+
             new_state = self.sample_next_state(pred_mean, pred_std)
             # pred_state: (B, num_grid_nodes, d_f)
             # pred_std: (B, num_grid_nodes, d_f) or None
@@ -961,9 +1103,13 @@ class GraphEFM(ARProbModel):
             if self.output_std:
                 pred_std_list.append(pred_std)
 
+            # Apply density thresholding to the state fed back as input
+            feedback_state = self.apply_density_threshold(new_state)
+
             # Update conditioning states
-            prev_prev_state = prev_state
-            prev_state = new_state
+            if self.input_steps >= 2:
+                prev_prev_state = prev_state
+            prev_state = feedback_state
 
         prediction = torch.stack(
             prediction_list, dim=1
@@ -1007,7 +1153,7 @@ class GraphEFM(ARProbModel):
             trajectories,
             target_states,
             None,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             sum_vars=False,
         )
         ens_mean = torch.mean(trajectories, dim=1)
@@ -1015,7 +1161,7 @@ class GraphEFM(ARProbModel):
             ens_mean,
             target_states,
             None,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             sum_vars=False,
         )
 
@@ -1110,17 +1256,21 @@ class GraphEFM(ARProbModel):
 
             # Sample latent variable and plot
             # embed all features
+            prev_state_0 = init_states[:, -1]
+            prev_prev_state_0 = (
+                init_states[:, 0] if init_states.shape[1] > 1 else None
+            )
             grid_prev_emb, _, graph_emb = self.embedd_all(
-                init_states[:, 1],
-                init_states[:, 0],
+                prev_state_0,
+                prev_prev_state_0,
                 forcing_features[:, 0],
                 boundary_forcing[:, 0],
                 atmosphere_forcing[:, 0],
             )  # (B, num_grid_nodes, d_h)
             # embed also including current grid state, for encoder
             grid_current_emb = self.embedd_current(
-                init_states[:, 1],
-                init_states[:, 0],
+                prev_state_0,
+                prev_prev_state_0,
                 forcing_features[:, 0],
                 boundary_forcing[:, 0],
                 atmosphere_forcing[:, 0],

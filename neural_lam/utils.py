@@ -111,6 +111,8 @@ def load_graph(graph_dir_path, datastore, device="cpu"):
         """
         Make both sender and receiver indices of edge_index start at 0
         """
+        if edge_index.numel() == 0 or edge_index.shape[1] == 0:
+            return edge_index
         return edge_index - edge_index.min(dim=1, keepdim=True)[0]
 
     # Load static node features
@@ -202,9 +204,15 @@ def load_graph(graph_dir_path, datastore, device="cpu"):
     m2g_features = loads_file("m2g_features.pt")  # (M_m2g, d_edge_f)
 
     # Normalize by dividing with longest edge (found in m2m)
+    # Skip empty levels (e.g. global cluster level with all edges filtered)
     longest_edge = max(
-        torch.max(level_features[:, 0]) for level_features in m2m_features
-    )  # Col. 0 is length
+        (
+            torch.max(level_features[:, 0]).item()
+            for level_features in m2m_features
+            if level_features.shape[0] > 0
+        ),
+        default=1.0,
+    )
 
     m2m_features = BufferList(m2m_features, persistent=False)
     m2m_features /= longest_edge
@@ -219,7 +227,8 @@ def load_graph(graph_dir_path, datastore, device="cpu"):
         len(mesh_static_features) == n_levels
     ), "Inconsistent number of levels in mesh"
 
-    mesh_lat_lon = [
+    # mesh_pos columns are (lon, lat); transform to PlateCarree gives (lon, lat)
+    mesh_lon_lat = [
         torch.tensor(
             ccrs.PlateCarree().transform_points(
                 datastore.coords_projection,
@@ -285,19 +294,37 @@ def load_graph(graph_dir_path, datastore, device="cpu"):
         "mesh_up_features": mesh_up_features,
         "mesh_down_features": mesh_down_features,
         "mesh_static_features": mesh_static_features,
-        "mesh_lat_lon": mesh_lat_lon,
+        "mesh_lon_lat": mesh_lon_lat,
     }
 
 
-def make_mlp(blueprint, layer_norm=True):
+class ConditionalLayerNorm(nn.Module):
     """
-    Create MLP from list blueprint, with
-    input dimensionality: blueprint[0]
-    output dimensionality: blueprint[-1] and
-    hidden layers of dimensions: blueprint[1], ..., blueprint[-2]
+    LayerNorm where the affine scale and offset are predicted from a
+    conditioning embedding instead of being free parameters.
+    """
 
-    if layer_norm is True, includes a LayerNorm layer at
-    the output (as used in GraphCast)
+    def __init__(self, normalized_shape, cond_dim):
+        super().__init__()
+        self.layer_norm = nn.LayerNorm(
+            normalized_shape, elementwise_affine=False
+        )
+        self.scale_layer = nn.Linear(cond_dim, normalized_shape)
+        self.offset_layer = nn.Linear(cond_dim, normalized_shape)
+
+    def forward(self, x, emb):
+        """
+        x: (..., normalized_shape)
+        emb: (..., cond_dim), conditioning embedding, broadcast against x
+        """
+        scale = self.scale_layer(emb)  # (..., normalized_shape)
+        offset = self.offset_layer(emb)  # (..., normalized_shape)
+        return self.layer_norm(x) * scale + offset
+
+
+def _mlp_layers(blueprint):
+    """
+    Build the Linear/SiLU stack of an MLP from a list blueprint.
     """
     hidden_layers = len(blueprint) - 2
     assert hidden_layers >= 0, "Invalid MLP blueprint"
@@ -308,11 +335,83 @@ def make_mlp(blueprint, layer_norm=True):
         if layer_i != hidden_layers:
             layers.append(nn.SiLU())  # Swish activation
 
-    # Optionally add layer norm to output
-    if layer_norm:
-        layers.append(nn.LayerNorm(blueprint[-1]))
+    return layers
 
-    return nn.Sequential(*layers)
+
+class MLP(nn.Sequential):
+    """
+    Plain MLP, optionally with a LayerNorm on the output.
+
+    Subclasses nn.Sequential so that parameters keep their integer-indexed
+    names ("0.weight", "2.weight", ...), and accepts (and ignores) a
+    conditioning embedding so that it is call-compatible with CondMLP.
+    """
+
+    def __init__(self, blueprint, layer_norm=True):
+        layers = _mlp_layers(blueprint)
+        if layer_norm:
+            layers.append(nn.LayerNorm(blueprint[-1]))
+        super().__init__(*layers)
+
+    # pylint: disable-next=arguments-differ
+    def forward(self, x, emb=None):
+        """
+        x: (..., blueprint[0])
+        emb: unused, present for call-compatibility with CondMLP
+        """
+        return super().forward(x)
+
+
+class CondMLP(nn.Module):
+    """
+    MLP with a ConditionalLayerNorm on the output, modulated by a
+    conditioning embedding.
+    """
+
+    def __init__(self, blueprint, layer_norm=True, cond_dim=None):
+        super().__init__()
+        assert cond_dim is not None, "CondMLP requires a cond_dim"
+
+        self.mlp_layers = nn.Sequential(*_mlp_layers(blueprint))
+
+        if layer_norm:
+            self.layer_norm = ConditionalLayerNorm(blueprint[-1], cond_dim)
+        else:
+            self.layer_norm = None
+
+    def forward(self, x, emb=None):
+        """
+        x: (..., blueprint[0])
+        emb: (..., cond_dim), conditioning embedding
+        """
+        x = self.mlp_layers(x)
+
+        if self.layer_norm is not None:
+            x = self.layer_norm(x, emb)
+
+        return x
+
+
+def make_mlp(blueprint, layer_norm=True, cond_dim=None):
+    """
+    Create MLP from list blueprint, with
+    input dimensionality: blueprint[0]
+    output dimensionality: blueprint[-1] and
+    hidden layers of dimensions: blueprint[1], ..., blueprint[-2]
+
+    if layer_norm is True, includes a LayerNorm layer at
+    the output (as used in GraphCast)
+
+    if cond_dim is not None, that output LayerNorm is a ConditionalLayerNorm
+    whose scale and offset are predicted from a conditioning embedding of
+    dimensionality cond_dim, passed as the second argument to forward.
+
+    The returned module is always called as mlp(x, emb=None).
+    """
+    if cond_dim is None:
+        return MLP(blueprint, layer_norm=layer_norm)
+
+    return CondMLP(blueprint, layer_norm=layer_norm, cond_dim=cond_dim)
 
 
 def fractional_plot_bundle(fraction):

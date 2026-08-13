@@ -1,8 +1,9 @@
 # Third-party
-import torch_geometric as pyg
+from torch import nn
 
 # First-party
-from neural_lam.interaction_net import InteractionNet, PropagationNet
+from neural_lam import utils
+from neural_lam.interaction_net import FlexibleNet
 from neural_lam.models.base_graph_latent_decoder import BaseGraphLatentDecoder
 
 
@@ -19,43 +20,76 @@ class GraphLatentDecoder(BaseGraphLatentDecoder):
         m2g_edge_index,
         hidden_dim,
         latent_dim,
-        grid_output_dim,
+        decode_dim,
+        grid_state_dim,
         processor_layers,
         hidden_layers=1,
         output_std=True,
+        hidden_dim_mesh_nodes=None,
+        hidden_dim_edge=None,
+        num_interior_nodes=None,
     ):
         super().__init__(
-            hidden_dim, latent_dim, grid_output_dim, hidden_layers, output_std
+            hidden_dim,
+            decode_dim,
+            latent_dim,
+            grid_state_dim,
+            hidden_layers,
+            output_std,
         )
 
+        hidden_dim_grid = decode_dim
+        hidden_dim_mesh_nodes = (
+            hidden_dim
+            if hidden_dim_mesh_nodes is None
+            else hidden_dim_mesh_nodes
+        )
+        hidden_dim_edge = (
+            hidden_dim_grid if hidden_dim_edge is None else hidden_dim_edge
+        )
+        if num_interior_nodes is None:
+            num_interior_nodes = int(m2g_edge_index[1].max().item() + 1)
+
         # GNN from grid to mesh
-        self.g2m_gnn = InteractionNet(
-            g2m_edge_index,
-            hidden_dim,
+        self.g2m_gnn = FlexibleNet(
+            edge_index=g2m_edge_index,
+            send_node_dim=hidden_dim_grid,
+            rec_node_dim=hidden_dim,
+            edge_dim=hidden_dim_edge,
             hidden_layers=hidden_layers,
-            update_edges=False,
+            num_rec=int(g2m_edge_index[1].max().item() + 1),
+            propagation=True,
+            aggr="mean",
+        )
+
+        self.pre_processor_proj = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_dim_grid, hidden_dim),
         )
 
         # Processor layers on mesh
-        self.processor = pyg.nn.Sequential(
-            "mesh_rep, edge_rep",
-            [
-                (
-                    InteractionNet(
-                        m2m_edge_index, hidden_dim, hidden_layers=hidden_layers
-                    ),
-                    "mesh_rep, mesh_rep, edge_rep -> mesh_rep, edge_rep",
-                )
-                for _ in range(processor_layers)
-            ],
+        self.processor = utils.make_gnn_seq(
+            m2m_edge_index,
+            processor_layers,
+            hidden_layers,
+            hidden_dim,
+        )
+
+        self.post_mesh_proj = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim_grid),
         )
 
         # GNN from mesh to grid
-        self.m2g_gnn = PropagationNet(
-            m2g_edge_index,
-            hidden_dim,
+        self.m2g_gnn = FlexibleNet(
+            edge_index=m2g_edge_index,
+            send_node_dim=hidden_dim_grid,
+            rec_node_dim=hidden_dim_grid,
+            edge_dim=hidden_dim_edge,
             hidden_layers=hidden_layers,
-            update_edges=False,
+            num_rec=num_interior_nodes,
+            propagation=False,
+            aggr="sum",
         )
 
     def combine_with_latent(
@@ -74,16 +108,11 @@ class GraphLatentDecoder(BaseGraphLatentDecoder):
         """
         mesh_rep = self.g2m_gnn(
             original_grid_rep, latent_rep, graph_emb["g2m"]
-        )  # (B, N_mesh, d_h)
-
-        # Process on mesh
-        mesh_rep, _ = self.processor(
-            mesh_rep, graph_emb["m2m"]
-        )  # (B, N_mesh, d_h)
-
-        # Back to grid
+        )  # (B, N_mesh, hidden_dim_grid)
+        mesh_rep = self.pre_processor_proj(mesh_rep)  # (B, N_mesh, hidden_dim)
+        mesh_rep, _ = self.processor(mesh_rep, graph_emb["m2m"])
+        mesh_rep = self.post_mesh_proj(mesh_rep)  # (B, N_mesh, d_h_grid)
         grid_rep = self.m2g_gnn(
             mesh_rep, residual_grid_rep, graph_emb["m2g"]
-        )  # (B, N_mesh, d_h)
-
+        )  # (B, N_grid, d_h_grid)
         return grid_rep

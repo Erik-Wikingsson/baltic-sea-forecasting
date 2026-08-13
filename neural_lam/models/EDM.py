@@ -29,9 +29,15 @@ class EDM(ARProbModel):
         datastore: BaseDatastore,
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
+        **kwargs,
     ):
         super().__init__(
-            args, config, datastore, datastore_boundary, datastore_atmosphere
+            args,
+            config,
+            datastore,
+            datastore_boundary,
+            datastore_atmosphere,
+            **kwargs,
         )
 
         # ----------------------------------------------------------------------------
@@ -124,9 +130,13 @@ class EDM(ARProbModel):
         next_state: (B, N_grid, d_state),
             predicted weather state X_{t+1} at time t+1
         """
-        input_grid = torch.cat(
-            (prev_state, prev_prev_state, forcing), dim=-1
-        )  # (B, N_grid, d_input)
+        if prev_prev_state is not None:
+            input_grid = torch.cat(
+                (prev_state, prev_prev_state, forcing), dim=-1
+            )
+        else:
+            input_grid = torch.cat((prev_state, forcing), dim=-1)
+        # (B, N_grid, d_input)
 
         latents = torch.randn_like(prev_state)  # (B, N_grid, d_state)
 
@@ -190,7 +200,7 @@ class EDM(ARProbModel):
             ens_mean,
             target_states,
             ens_std,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             sum_vars=False,
         )  # (B, pred_steps, d_f)
         self.test_metrics["ens_mae"].append(ens_maes)
@@ -198,7 +208,7 @@ class EDM(ARProbModel):
             trajectories,
             target_states,
             None,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             sum_vars=False,
         )  # (B, pred_steps, d_f)
         self.test_metrics["crps_ens"].append(crps_batch)
@@ -318,7 +328,12 @@ class EDM(ARProbModel):
             sigma_max_rho + rnd_uniform * (sigma_min_rho - sigma_max_rho)
         ) ** self.rho
 
-        input_grid = torch.cat((prev_state, prev_prev_state, forcing), dim=-1)
+        if prev_prev_state is not None:
+            input_grid = torch.cat(
+                (prev_state, prev_prev_state, forcing), dim=-1
+            )
+        else:
+            input_grid = torch.cat((prev_state, forcing), dim=-1)
 
         # Make y residual if needed
         if self.pred_residual:
@@ -359,7 +374,7 @@ class EDM(ARProbModel):
 
         loss = metrics.mask_and_reduce_metric(
             entry_mse_weighted,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             average_grid=True,
             sum_vars=True,
         )
@@ -376,14 +391,18 @@ class EDM(ARProbModel):
     ):
         """
         Roll out prediction taking multiple autoregressive steps with model
-        init_states: (B, 2, num_grid_nodes, d_f)
+        init_states: (B, input_steps, num_grid_nodes, d_f)
         forcing: (B, pred_steps, num_grid_nodes, d_static_f)
         boundary_forcing: (B, pred_steps, num_boundary_nodes, d_boundary_f)
         atmosphere_forcing:(
             B, pred_steps, num_atmosphere_nodes, d_atmosphere_f)
         """
-        prev_prev_state = init_states[:, 0]
-        prev_state = init_states[:, 1]
+        if self.input_steps == 1:
+            prev_state = init_states[:, 0]
+            prev_prev_state = None
+        else:
+            prev_prev_state = init_states[:, 0]
+            prev_state = init_states[:, 1]
         prediction_list = []
         loss_list = []
         pred_steps = forcing.shape[1]
@@ -416,7 +435,8 @@ class EDM(ARProbModel):
             loss_list.append(loss)
 
             # Update conditioning states
-            prev_prev_state = prev_state
+            if self.input_steps >= 2:
+                prev_prev_state = prev_state
             prev_state = pred_state
 
         prediction = torch.stack(
@@ -474,7 +494,7 @@ class EDM(ARProbModel):
             metrics.mse(
                 prediction,
                 target,
-                mask=self.interior_mask_bool,
+                mask=self.loss_mask,
             )
         )  # mean over unrolled times and batch
 

@@ -4,7 +4,6 @@ from typing import Union
 # Third-party
 import numpy as np
 import torch
-import torch_geometric as pyg
 from torch import nn
 from torch.nn.functional import silu
 
@@ -12,6 +11,8 @@ from torch.nn.functional import silu
 from .. import utils
 from ..config import NeuralLAMConfig
 from ..datastore import BaseDatastore
+from ..interaction_net import FlexibleNet, InteractionNet, PropagationNet
+from ..utils import make_mlp
 from .ar_model import ARModel
 
 
@@ -29,6 +30,7 @@ class GraphDiff(ARModel):
         datastore: BaseDatastore,
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
+        **kwargs,
     ):
         super().__init__(
             args,
@@ -36,14 +38,18 @@ class GraphDiff(ARModel):
             datastore=datastore,
             datastore_boundary=datastore_boundary,
             datastore_atmosphere=datastore_atmosphere,
+            **kwargs,
         )
         print("Initializing GraphDiff")
 
-        self.channel_mult_emb = 1
-        self.channel_mult_noise = 2
+        self.channel_mult_emb = args.channel_mult_emb
+        self.channel_mult_noise = args.channel_mult_noise
         self.remove_cond = True if args.model == "SI" else False
 
-        num_state_vars = datastore.get_num_data_vars(category="state")
+        # Use the density-aware count set by ARModel.__init__ (includes the
+        # density channel when config.training.density_channel is set), so the
+        # output map and noise-channel input match the N+1 target/loss dims.
+        num_state_vars = self.num_state_vars
 
         # grid_dim from data + static
         (
@@ -51,9 +57,11 @@ class GraphDiff(ARModel):
             grid_static_dim,
         ) = self.grid_static_features.shape
 
-        self.grid_output_dim = (
-            num_state_vars  # We only output the denoised state
-        )
+        # NOTE: grid_output_dim is inherited from ARModel, which sets it to
+        # num_state_vars, or 2*num_state_vars when --output_std is given. The
+        # diffusion-style users of this backbone (EDM/FM/SI/graph_crps) never
+        # pass --output_std, so for them this is num_state_vars, i.e. just the
+        # denoised state. graph_det follows graph_fm and supports both.
 
         # Add the noise channel for the diffusion process
         if args.noise_embedding != "linear":
@@ -87,6 +95,30 @@ class GraphDiff(ARModel):
             f"nodes ({self.num_grid_nodes} grid, {self.num_mesh_nodes} mesh)"
         )
 
+        # Determine grid hidden dim
+        if args.hidden_dim_grid is None:
+            hidden_dim_grid = args.hidden_dim
+        else:
+            hidden_dim_grid = args.hidden_dim_grid
+
+        # Determine edge hidden dim
+        if args.hidden_dim_edge is None:
+            hidden_dim_edge = hidden_dim_grid
+        else:
+            hidden_dim_edge = args.hidden_dim_edge
+
+        # Determine mesh node hidden dim
+        if args.hidden_dim_mesh_nodes is None:
+            hidden_dim_mesh_nodes = args.hidden_dim
+        else:
+            hidden_dim_mesh_nodes = args.hidden_dim_mesh_nodes
+
+        print(
+            f"Using hidden_dim_grid={hidden_dim_grid}, "
+            f"hidden_dim_mesh_nodes={hidden_dim_mesh_nodes}, "
+            f"hidden_dim_edge={hidden_dim_edge}, hidden_dim={args.hidden_dim}"
+        )
+
         # grid_dim from data + static
         self.g2m_edges, g2m_dim = self.g2m_features.shape
         self.m2g_edges, m2g_dim = self.m2g_features.shape
@@ -94,13 +126,18 @@ class GraphDiff(ARModel):
         # Define sub-models
         # Feature embedders for grid
         self.mlp_blueprint_end = [args.hidden_dim] * (args.hidden_layers + 1)
+        self.grid_mlp_blueprint_end = [hidden_dim_grid] * (
+            args.hidden_layers + 1
+        )
+        self.edge_mlp_blueprint_end = [hidden_dim_edge] * (
+            args.hidden_layers + 1
+        )
 
         print(f"Using noise embedding: {args.noise_embedding}")
         self.noise_level_dim = (
             self.mlp_blueprint_end[-1] * self.channel_mult_emb
         )
         if args.noise_embedding == "linear":
-            # TODO: Should expand noise dim as in the flow models
             self.noise_dim = args.noise_dim
             self.map_noise = LinearNoiseEmbedding(
                 noise_dim=self.noise_dim,
@@ -116,177 +153,250 @@ class GraphDiff(ARModel):
             )
 
         self.interior_embedder = make_mlp(
-            [self.interior_input_dim] + self.mlp_blueprint_end,
-            noise_level_dim=self.noise_level_dim,
+            [self.interior_input_dim] + self.grid_mlp_blueprint_end,
+            cond_dim=self.noise_level_dim,
         )
         if self.boundary_forced:
             self.boundary_embedder = make_mlp(
-                [self.boundary_dim] + self.mlp_blueprint_end,
-                noise_level_dim=self.noise_level_dim,
+                [self.boundary_dim] + self.grid_mlp_blueprint_end,
+                cond_dim=self.noise_level_dim,
             )
         if self.atmosphere_forced and self.use_atmosphere_g2m:
             self.atmosphere_embedder = make_mlp(
-                [self.atmosphere_dim] + self.mlp_blueprint_end,
-                noise_level_dim=self.noise_level_dim,
+                [self.atmosphere_dim] + self.grid_mlp_blueprint_end,
+                cond_dim=self.noise_level_dim,
             )
         self.g2m_embedder = make_mlp(
-            [g2m_dim] + self.mlp_blueprint_end,
-            noise_level_dim=self.noise_level_dim,
+            [g2m_dim] + self.edge_mlp_blueprint_end,
+            cond_dim=self.noise_level_dim,
         )
         self.m2g_embedder = make_mlp(
-            [m2g_dim] + self.mlp_blueprint_end,
-            noise_level_dim=self.noise_level_dim,
+            [m2g_dim] + self.edge_mlp_blueprint_end,
+            cond_dim=self.noise_level_dim,
         )
 
-        # GNNs
-        gnn_class = PropagationNet if args.vertical_propnets else InteractionNet
-        # encoder
-        self.g2m_gnn = gnn_class(
-            self.g2m_edge_index,
-            args.hidden_dim,
+        self.pre_mesh_proj = make_mlp(
+            [hidden_dim_grid] + [args.hidden_dim],
+            cond_dim=self.noise_level_dim,
+        )
+        self.post_mesh_proj = make_mlp(
+            [args.hidden_dim] + [hidden_dim_grid],
+            cond_dim=self.noise_level_dim,
+        )
+
+        self.g2m_gnn = FlexibleNet(
+            edge_index=self.g2m_edge_index,
+            send_node_dim=hidden_dim_grid,
+            rec_node_dim=hidden_dim_mesh_nodes,
+            edge_dim=hidden_dim_edge,
             hidden_layers=args.hidden_layers,
-            update_edges=False,
             num_rec=self.num_grid_connected_mesh_nodes,
-            noise_dim=self.noise_level_dim,
+            cond_dim=self.noise_level_dim,
+            propagation=True,
+            aggr="mean",
         )
         self.encoding_grid_mlp = make_mlp(
-            [args.hidden_dim] + self.mlp_blueprint_end,
-            noise_level_dim=self.noise_level_dim,
+            [hidden_dim_grid] + self.grid_mlp_blueprint_end,
+            cond_dim=self.noise_level_dim,
         )
 
         # decoder
-        self.m2g_gnn = gnn_class(
-            self.m2g_edge_index,
-            args.hidden_dim,
+        self.m2g_gnn = FlexibleNet(
+            edge_index=self.m2g_edge_index,
+            send_node_dim=hidden_dim_grid,
+            rec_node_dim=hidden_dim_grid,
+            edge_dim=hidden_dim_edge,
             hidden_layers=args.hidden_layers,
-            update_edges=False,
             num_rec=self.num_grid_nodes,
-            noise_dim=self.noise_level_dim,
+            cond_dim=self.noise_level_dim,
+            propagation=False,
+            aggr="sum",
         )
 
-        # Output mapping (hidden_dim -> output_dim)
+        # Output mapping (hidden_dim_grid -> output_dim)
+        # NOTE: cond_dim is still given, so that this shares the (conditional)
+        # MLP parameter layout with the rest of the model, even though
+        # layer_norm=False means no conditioning is actually applied here.
         self.output_map = make_mlp(
-            [args.hidden_dim] * (args.hidden_layers + 1)
+            [hidden_dim_grid] * (args.hidden_layers + 1)
             + [self.grid_output_dim],
             layer_norm=False,
+            cond_dim=self.noise_level_dim,
         )  # No layer norm on this one
 
         # ---------------------------------------------------------------------
-        # BaseHIGraphModel parameters# Track number of nodes, edges on each lvl
-        # Flatten lists for efficient embedding
-        self.num_levels = len(self.mesh_static_features)
+        # Mesh processor setup: hierarchical and single-level graphs use
+        # different processing paths.
+        if self.hierarchical:
+            self.num_levels = len(self.mesh_static_features)
 
-        # Number of mesh nodes at each level
-        self.level_mesh_sizes = [
-            mesh_feat.shape[0] for mesh_feat in self.mesh_static_features
-        ]  # Needs as python list for later
+            # Number of mesh nodes at each level
+            self.level_mesh_sizes = [
+                mesh_feat.shape[0] for mesh_feat in self.mesh_static_features
+            ]  # Needs as list for later
 
-        # Print some useful info
-        utils.rank_zero_print("Loaded hierarchical graph with structure:")
-        for level_index, level_mesh_size in enumerate(self.level_mesh_sizes):
-            same_level_edges = self.m2m_features[level_index].shape[0]
-            utils.rank_zero_print(
-                f"level {level_index} - {level_mesh_size} nodes, "
-                f"{same_level_edges} same-level edges"
+            # Print some useful info
+            utils.rank_zero_print("Loaded hierarchical graph with structure:")
+            for level_index, level_mesh_size in enumerate(
+                self.level_mesh_sizes
+            ):
+                same_level_edges = self.m2m_features[level_index].shape[0]
+                utils.rank_zero_print(
+                    f"level {level_index} - {level_mesh_size} nodes, "
+                    f"{same_level_edges} same-level edges"
+                )
+
+                if level_index < (self.num_levels - 1):
+                    up_edges = self.mesh_up_features[level_index].shape[0]
+                    down_edges = self.mesh_down_features[level_index].shape[0]
+                    utils.rank_zero_print(
+                        f"  {level_index}<->{level_index + 1}"
+                    )
+                    utils.rank_zero_print(
+                        f" - {up_edges} up edges, {down_edges} down edges"
+                    )
+
+            # Embedders
+            # Assume all levels have same static feature dimensionality
+            mesh_dim = self.mesh_static_features[0].shape[1]
+            mesh_same_dim = self.m2m_features[0].shape[1]
+            mesh_up_dim = self.mesh_up_features[0].shape[1]
+            mesh_down_dim = self.mesh_down_features[0].shape[1]
+
+            # Separate mesh node embedders for each level
+            mesh_embedder_blueprint_0 = [hidden_dim_mesh_nodes] * (
+                args.hidden_layers + 1
+            )
+            self.mesh_embedders = nn.ModuleList(
+                [
+                    make_mlp(
+                        [mesh_dim] + mesh_embedder_blueprint_0,
+                        cond_dim=self.noise_level_dim,
+                    )
+                ]
+                + [
+                    make_mlp(
+                        [mesh_dim] + self.mlp_blueprint_end,
+                        cond_dim=self.noise_level_dim,
+                    )
+                    for _ in range(self.num_levels - 1)
+                ]
+            )
+            self.mesh_same_embedders = nn.ModuleList(
+                [
+                    make_mlp(
+                        [mesh_same_dim] + self.mlp_blueprint_end,
+                        cond_dim=self.noise_level_dim,
+                    )
+                    for _ in range(self.num_levels)
+                ]
+            )
+            self.mesh_up_embedders = nn.ModuleList(
+                [
+                    make_mlp(
+                        [mesh_up_dim] + self.mlp_blueprint_end,
+                        cond_dim=self.noise_level_dim,
+                    )
+                    for _ in range(self.num_levels - 1)
+                ]
+            )
+            self.mesh_down_embedders = nn.ModuleList(
+                [
+                    make_mlp(
+                        [mesh_down_dim] + self.mlp_blueprint_end,
+                        cond_dim=self.noise_level_dim,
+                    )
+                    for _ in range(self.num_levels - 1)
+                ]
             )
 
-            if level_index < (self.num_levels - 1):
-                up_edges = self.mesh_up_features[level_index].shape[0]
-                down_edges = self.mesh_down_features[level_index].shape[0]
-                utils.rank_zero_print(f"  {level_index}<->{level_index + 1}")
-                utils.rank_zero_print(
-                    f" - {up_edges} up edges, {down_edges} down edges"
-                )
-        # Embedders
-        # Assume all levels have same static feature dimensionality
-        mesh_dim = self.mesh_static_features[0].shape[1]
-        mesh_same_dim = self.m2m_features[0].shape[1]
-        mesh_up_dim = self.mesh_up_features[0].shape[1]
-        mesh_down_dim = self.mesh_down_features[0].shape[1]
+            # Instantiate GNNs
+            # Init GNNs
+            self.mesh_init_gnns = nn.ModuleList(
+                [
+                    InteractionNet(
+                        edge_index,
+                        args.hidden_dim,
+                        hidden_layers=args.hidden_layers,
+                        cond_dim=self.noise_level_dim,
+                    )
+                    for edge_index in self.mesh_up_edge_index
+                ]
+            )
 
-        # Separate mesh node embedders for each level
-        self.mesh_embedders = nn.ModuleList(
-            [
-                make_mlp(
-                    [mesh_dim] + self.mlp_blueprint_end,
-                    noise_level_dim=self.noise_level_dim,
-                )
-                for _ in range(self.num_levels)
-            ]
-        )
-        self.mesh_same_embedders = nn.ModuleList(
-            [
-                make_mlp(
-                    [mesh_same_dim] + self.mlp_blueprint_end,
-                    noise_level_dim=self.noise_level_dim,
-                )
-                for _ in range(self.num_levels)
-            ]
-        )
-        self.mesh_up_embedders = nn.ModuleList(
-            [
-                make_mlp(
-                    [mesh_up_dim] + self.mlp_blueprint_end,
-                    noise_level_dim=self.noise_level_dim,
-                )
-                for _ in range(self.num_levels - 1)
-            ]
-        )
-        self.mesh_down_embedders = nn.ModuleList(
-            [
-                make_mlp(
-                    [mesh_down_dim] + self.mlp_blueprint_end,
-                    noise_level_dim=self.noise_level_dim,
-                )
-                for _ in range(self.num_levels - 1)
-            ]
-        )
+            # Read out GNNs
+            self.mesh_read_gnns = nn.ModuleList(
+                [
+                    InteractionNet(
+                        edge_index,
+                        args.hidden_dim,
+                        hidden_layers=args.hidden_layers,
+                        update_edges=False,
+                        cond_dim=self.noise_level_dim,
+                    )
+                    for edge_index in self.mesh_down_edge_index
+                ]
+            )
 
-        # Instantiate GNNs
-        # Init GNNs
-        self.mesh_init_gnns = nn.ModuleList(
-            [
-                InteractionNet(
-                    edge_index,
-                    args.hidden_dim,
-                    hidden_layers=args.hidden_layers,
-                    noise_dim=self.noise_level_dim,
-                )
-                for edge_index in self.mesh_up_edge_index
-            ]
-        )
+            # GraphFM-style vertical sweep processors
+            self.mesh_down_gnns = nn.ModuleList(
+                [
+                    self.make_down_gnns(args)
+                    for _ in range(args.processor_layers)
+                ]
+            )  # Nested lists (proc_steps, num_levels-1)
+            self.mesh_down_same_gnns = nn.ModuleList(
+                [
+                    self.make_same_gnns(args)
+                    for _ in range(args.processor_layers)
+                ]
+            )  # Nested lists (proc_steps, num_levels)
+            self.mesh_up_gnns = nn.ModuleList(
+                [self.make_up_gnns(args) for _ in range(args.processor_layers)]
+            )  # Nested lists (proc_steps, num_levels-1)
+            self.mesh_up_same_gnns = nn.ModuleList(
+                [
+                    self.make_same_gnns(args)
+                    for _ in range(args.processor_layers)
+                ]
+            )  # Nested lists (proc_steps, num_levels)
+        else:
+            # Single-level mesh setup (GraphCast-like processor path)
+            num_mesh = self.mesh_static_features.shape[0]
+            num_m2m_edges = self.m2m_features.shape[0]
+            utils.rank_zero_print(
+                "Loaded non-hierarchical graph with structure:"
+            )
+            utils.rank_zero_print(
+                f"  mesh nodes: {num_mesh}, same-level edges: {num_m2m_edges}"
+            )
 
-        # Read out GNNs
-        self.mesh_read_gnns = nn.ModuleList(
-            [
-                InteractionNet(
-                    edge_index,
-                    args.hidden_dim,
-                    hidden_layers=args.hidden_layers,
-                    update_edges=False,
-                    noise_dim=self.noise_level_dim,
-                )
-                for edge_index in self.mesh_down_edge_index
-            ]
-        )
+            mesh_dim = self.mesh_static_features.shape[1]
+            m2m_dim = self.m2m_features.shape[1]
+            mesh_embedder_blueprint = [hidden_dim_mesh_nodes] * (
+                args.hidden_layers + 1
+            )
 
-        # ----------------------------------------------------------------------------
-        # GraphFM specific parameters
-        # Make down GNNs, both for down edges and same level
-        self.mesh_down_gnns = nn.ModuleList(
-            [self.make_down_gnns(args) for _ in range(args.processor_layers)]
-        )  # Nested lists (proc_steps, num_levels-1)
-        self.mesh_down_same_gnns = nn.ModuleList(
-            [self.make_same_gnns(args) for _ in range(args.processor_layers)]
-        )  # Nested lists (proc_steps, num_levels)
-
-        # Make up GNNs, both for up edges and same level
-        self.mesh_up_gnns = nn.ModuleList(
-            [self.make_up_gnns(args) for _ in range(args.processor_layers)]
-        )  # Nested lists (proc_steps, num_levels-1)
-        self.mesh_up_same_gnns = nn.ModuleList(
-            [self.make_same_gnns(args) for _ in range(args.processor_layers)]
-        )  # Nested lists (proc_steps, num_levels)
+            self.mesh_embedder = make_mlp(
+                [mesh_dim] + mesh_embedder_blueprint,
+                cond_dim=self.noise_level_dim,
+            )
+            self.m2m_embedder = make_mlp(
+                [m2m_dim] + self.mlp_blueprint_end,
+                cond_dim=self.noise_level_dim,
+            )
+            self.processor_gnns = nn.ModuleList(
+                [
+                    InteractionNet(
+                        self.m2m_edge_index,
+                        args.hidden_dim,
+                        hidden_layers=args.hidden_layers,
+                        aggr=args.mesh_aggr,
+                        cond_dim=self.noise_level_dim,
+                    )
+                    for _ in range(args.processor_layers)
+                ]
+            )
 
     # ----------------------------------------------------------------------------
     @property
@@ -295,7 +405,9 @@ class GraphDiff(ARModel):
         Get the total number of mesh nodes that have a connection to
         the grid (e.g. bottom level in a hierarchy)
         """
-        return self.mesh_static_features[0].shape[0]  # Bottom level
+        if self.hierarchical:
+            return self.mesh_static_features[0].shape[0]  # Bottom level
+        return self.mesh_static_features.shape[0]
 
     def forward(
         self, x, noise_level, cond, boundary_forcing, atmosphere_forcing
@@ -413,8 +525,14 @@ class GraphDiff(ARModel):
             interior_emb, emb
         )  # (B, num_interior_nodes, d_h)
 
+        # Project up mesh rep to hidden dim of graph
+        mesh_rep = self.pre_mesh_proj(mesh_rep, emb)  # g -> m
+
         # Run processor step
-        mesh_rep = self.process_step(mesh_rep, emb)
+        mesh_rep = self.process_step(mesh_rep, emb)  # m -> m
+
+        # Project down mesh rep to hidden dim of grid
+        mesh_rep = self.post_mesh_proj(mesh_rep, emb)  # m -> g
 
         # Map back from mesh to grid
         m2g_emb_expanded = self.expand_to_batch(m2g_emb, batch_size)
@@ -436,12 +554,16 @@ class GraphDiff(ARModel):
         Compute number of mesh nodes from loaded features,
         and number of mesh nodes that should be ignored in encoding/decoding
         """
-        num_mesh_nodes = sum(
-            node_feat.shape[0] for node_feat in self.mesh_static_features
-        )
-        num_mesh_nodes_ignore = (
-            num_mesh_nodes - self.mesh_static_features[0].shape[0]
-        )
+        if self.hierarchical:
+            num_mesh_nodes = sum(
+                node_feat.shape[0] for node_feat in self.mesh_static_features
+            )
+            num_mesh_nodes_ignore = (
+                num_mesh_nodes - self.mesh_static_features[0].shape[0]
+            )
+        else:
+            num_mesh_nodes = self.mesh_static_features.shape[0]
+            num_mesh_nodes_ignore = 0
         return num_mesh_nodes, num_mesh_nodes_ignore
 
     def embedd_mesh_nodes(self, emb):
@@ -451,7 +573,9 @@ class GraphDiff(ARModel):
         processing step
         Returns tensor of shape (num_mesh_nodes[0], d_h)
         """
-        return self.mesh_embedders[0](self.mesh_static_features[0], emb)
+        if self.hierarchical:
+            return self.mesh_embedders[0](self.mesh_static_features[0], emb)
+        return self.mesh_embedder(self.mesh_static_features, emb)
 
     def process_step(self, mesh_rep, emb):
         """
@@ -461,6 +585,17 @@ class GraphDiff(ARModel):
         mesh_rep: has shape (B, num_mesh_nodes, d_h)
         Returns mesh_rep: (B, num_mesh_nodes, d_h)
         """
+        if not self.hierarchical:
+            batch_size = mesh_rep.shape[0]
+            m2m_emb = self.m2m_embedder(self.m2m_features, emb)
+            m2m_emb_expanded = self.expand_to_batch(m2m_emb, batch_size)
+
+            for gnn in self.processor_gnns:
+                mesh_rep, m2m_emb_expanded = gnn(
+                    mesh_rep, mesh_rep, m2m_emb_expanded, emb
+                )
+            return mesh_rep
+
         batch_size = mesh_rep.shape[0]
 
         # EMBED REMAINING MESH NODES (levels >= 1) -
@@ -562,7 +697,7 @@ class GraphDiff(ARModel):
                     edge_index,
                     args.hidden_dim,
                     hidden_layers=args.hidden_layers,
-                    noise_dim=self.noise_level_dim,
+                    cond_dim=self.noise_level_dim,
                 )
                 for edge_index in self.m2m_edge_index
             ]
@@ -572,14 +707,13 @@ class GraphDiff(ARModel):
         """
         Make GNNs for processing steps up through the hierarchy.
         """
-        gnn_class = PropagationNet if args.vertical_propnets else InteractionNet
         return nn.ModuleList(
             [
-                gnn_class(
+                PropagationNet(
                     edge_index,
                     args.hidden_dim,
                     hidden_layers=args.hidden_layers,
-                    noise_dim=self.noise_level_dim,
+                    cond_dim=self.noise_level_dim,
                 )
                 for edge_index in self.mesh_up_edge_index
             ]
@@ -595,7 +729,7 @@ class GraphDiff(ARModel):
                     edge_index,
                     args.hidden_dim,
                     hidden_layers=args.hidden_layers,
-                    noise_dim=self.noise_level_dim,
+                    cond_dim=self.noise_level_dim,
                 )
                 for edge_index in self.mesh_down_edge_index
             ]
@@ -768,21 +902,6 @@ class FourierEmbedding(torch.nn.Module):
         return x
 
 
-# Fourier embedding supporting (batch_size, noise_dim) input?
-# class FourierEmbedding(torch.nn.Module):
-#     def __init__(self, num_channels, scale=16):
-#         super().__init__()
-#         self.num_channels = num_channels
-#         self.scale = scale
-#
-#     def forward(self, x):
-#         noise_dim = x.shape[1]
-#         freqs = torch.randn(noise_dim, self.num_channels // 2).to(x.dtype)
-#         x = 2 * np.pi * (x @ freqs)
-#         x = torch.cat([x.cos(), x.sin()], dim=1)
-#         return x
-
-
 class NoiseLevelMLP(nn.Module):
     def __init__(self, input_dim, hidden_dim=128, output_dim=16):
         super(NoiseLevelMLP, self).__init__()
@@ -821,338 +940,3 @@ class NoiseEmbedding(nn.Module):
         )  # swap sin/cos
         noise_level_encoding = self.mlp(fourier_features)
         return noise_level_encoding
-
-
-class ConditionalLayerNorm(nn.Module):
-    def __init__(self, normalized_shape, noise_level_dim=16):
-        super(ConditionalLayerNorm, self).__init__()
-        self.layer_norm = nn.LayerNorm(
-            normalized_shape, elementwise_affine=False
-        )
-        self.scale_layer = nn.Linear(noise_level_dim, normalized_shape)
-        self.offset_layer = nn.Linear(noise_level_dim, normalized_shape)
-
-    def forward(self, x, noise_level_encoding):
-        scale = self.scale_layer(
-            noise_level_encoding
-        )  # (batch_size, normalized_shape)
-        offset = self.offset_layer(
-            noise_level_encoding
-        )  # (batch_size, normalized_shape)
-        return self.layer_norm(x) * scale + offset
-
-
-class MLP(nn.Module):
-    def __init__(self, blueprint, layer_norm, noise_level_dim=16):
-        super(MLP, self).__init__()
-        hidden_layers = len(blueprint) - 2
-        assert hidden_layers >= 0, "Invalid MLP blueprint"
-
-        layers = []
-        for layer_i, (dim1, dim2) in enumerate(
-            zip(blueprint[:-1], blueprint[1:])
-        ):
-            layers.append(nn.Linear(dim1, dim2))
-            if layer_i != hidden_layers:
-                layers.append(nn.SiLU())  # Swish activation
-
-        self.mlp_layers = nn.Sequential(*layers)
-
-        # Optionally add layer norm to output
-        if layer_norm:
-            self.layer_norm = ConditionalLayerNorm(
-                blueprint[-1], noise_level_dim
-            )  # TODO: Check if this is correct
-        else:
-            self.layer_norm = None
-
-    def forward(self, x, emb):
-        x = self.mlp_layers(x)
-
-        if self.layer_norm is not None:
-            x = self.layer_norm(x, emb)
-
-        return x
-
-
-# TODO: If we accept noise_level_dim and emb for other models as an
-# optional argument we don't need to have this here
-
-
-def make_mlp(blueprint, layer_norm=True, noise_level_dim=16):
-    """
-    Create MLP from list blueprint, with
-    input dimensionality: blueprint[0]
-    output dimensionality: blueprint[-1] and
-    hidden layers of dimensions: blueprint[1], ..., blueprint[-2]
-
-    if layer_norm is True, includes a LayerNorm layer at
-    the output (as used in GraphCast)
-    """
-
-    return MLP(blueprint, layer_norm, noise_level_dim)
-
-
-class InteractionNet(pyg.nn.MessagePassing):
-    """
-    Implementation of a generic Interaction Network,
-    from Battaglia et al. (2016)
-    """
-
-    # pylint: disable=arguments-differ
-    # Disable to override args/kwargs from superclass
-
-    def __init__(
-        self,
-        edge_index,
-        input_dim,
-        update_edges=True,
-        hidden_layers=1,
-        hidden_dim=None,
-        edge_chunk_sizes=None,
-        aggr_chunk_sizes=None,
-        num_rec=None,
-        aggr="sum",
-        noise_dim=16,
-    ):
-        """
-        Create a new InteractionNet
-
-        edge_index: (2,M), Edges in pyg format, with both sender and receiver
-            node indices starting at 0
-        input_dim: Dimensionality of input representations,
-            for both nodes and edges
-        update_edges: If new edge representations should be computed
-            and returned
-        hidden_layers: Number of hidden layers in MLPs
-        hidden_dim: Dimensionality of hidden layers, if None then same
-            as input_dim
-        edge_chunk_sizes: List of chunks sizes to split edge representation
-            into and use separate MLPs for (None = no chunking, same MLP)
-        aggr_chunk_sizes: List of chunks sizes to split aggregated node
-            representation into and use separate MLPs for
-            (None = no chunking, same MLP)
-        aggr: Message aggregation method (sum/mean)
-        num_rec: Number of receiver nodes. If None, derive from edge_index under
-            assumption that all receiver nodes have at least one incoming edge.
-        noise_dim: Dimensionality of noise level embedding
-        """
-        self.noise_level_dim = noise_dim
-        assert aggr in ("sum", "mean"), f"Unknown aggregation method: {aggr}"
-        super().__init__(aggr=aggr)
-
-        if hidden_dim is None:
-            # Default to input dim if not explicitly given
-            hidden_dim = input_dim
-
-        # Store number of receiver nodes according to edge_index
-        if num_rec is None:
-            # Derive from edge_index
-            self.num_rec = edge_index[1].max() + 1
-        else:
-            self.num_rec = num_rec
-            assert edge_index[1].max() < self.num_rec, (
-                "Given edge index has receiver node index up to "
-                f"{edge_index[1].max()}, but num_rec is just {self.num_rec}."
-            )
-
-        # any edge_index used here must start sender and rec. nodes at index 0
-        edge_index = torch.stack(
-            (edge_index[0] + self.num_rec, edge_index[1]), dim=0
-        )  # Make sender indices after rec
-
-        self.register_buffer("edge_index", edge_index, persistent=False)
-
-        # Create MLPs
-        edge_mlp_recipe = [3 * input_dim] + [hidden_dim] * (hidden_layers + 1)
-        aggr_mlp_recipe = [2 * input_dim] + [hidden_dim] * (hidden_layers + 1)
-
-        if edge_chunk_sizes is None:
-            self.edge_mlp = make_mlp(
-                edge_mlp_recipe, noise_level_dim=self.noise_level_dim
-            )
-        else:
-            self.edge_mlp = SplitMLPs(
-                [
-                    make_mlp(
-                        edge_mlp_recipe, noise_level_dim=self.noise_level_dim
-                    )
-                    for _ in edge_chunk_sizes
-                ],
-                edge_chunk_sizes,
-            )
-
-        if aggr_chunk_sizes is None:
-            self.aggr_mlp = make_mlp(
-                aggr_mlp_recipe, noise_level_dim=self.noise_level_dim
-            )
-        else:
-            self.aggr_mlp = SplitMLPs(
-                [
-                    make_mlp(
-                        aggr_mlp_recipe, noise_level_dim=self.noise_level_dim
-                    )
-                    for _ in aggr_chunk_sizes
-                ],
-                aggr_chunk_sizes,
-            )
-
-        self.update_edges = update_edges
-
-    def forward(self, send_rep, rec_rep, edge_rep, emb=None):
-        """
-        Apply interaction network to update the representations of receiver
-        nodes, and optionally the edge representations.
-
-        send_rep: (N_send, d_h), vector representations of sender nodes
-        rec_rep: (N_rec, d_h), vector representations of receiver nodes
-        edge_rep: (M, d_h), vector representations of edges used
-        emb: noise level embedding
-
-        Returns:
-        rec_rep: (N_rec, d_h), updated vector representations of receiver nodes
-        (optionally) edge_rep: (M, d_h), updated vector representations
-            of edges
-        """
-        # Always concatenate to [rec_nodes, send_nodes] for propagation,
-        # but only aggregate to rec_nodes
-        node_reps = torch.cat((rec_rep, send_rep), dim=-2)
-        edge_rep_aggr, edge_diff = self.propagate(
-            self.edge_index, x=node_reps, edge_attr=edge_rep, emb=emb
-        )
-        rec_diff = self.aggr_mlp(
-            torch.cat((rec_rep, edge_rep_aggr), dim=-1), emb
-        )
-
-        # Residual connections
-        rec_rep = rec_rep + rec_diff
-
-        if self.update_edges:
-            edge_rep = edge_rep + edge_diff
-            return rec_rep, edge_rep
-
-        return rec_rep
-
-    def message(self, x_j, x_i, edge_attr, emb):
-        """
-        Compute messages from node j to node i.
-        """
-        return self.edge_mlp(torch.cat((edge_attr, x_j, x_i), dim=-1), emb)
-
-    # pylint: disable-next=signature-differs
-    def aggregate(self, inputs, index, ptr, dim_size):
-        """
-        Overridden aggregation function to:
-        * return both aggregated and original messages,
-        * only aggregate to number of receiver nodes.
-        """
-        aggr = super().aggregate(inputs, index, ptr, self.num_rec)
-        return aggr, inputs
-
-
-class PropagationNet(InteractionNet):
-    """
-    Alternative version of InteractionNet that incentivices the propagation of
-    information from sender nodes to receivers.
-    """
-
-    def __init__(
-        self,
-        edge_index,
-        input_dim,
-        update_edges=True,
-        hidden_layers=1,
-        hidden_dim=None,
-        edge_chunk_sizes=None,
-        aggr_chunk_sizes=None,
-        aggr="sum",
-        num_rec=None,
-        noise_dim=16,
-    ):
-        # Use mean aggregation in propagation version to avoid instability
-        super().__init__(
-            edge_index,
-            input_dim,
-            update_edges=update_edges,
-            hidden_layers=hidden_layers,
-            hidden_dim=hidden_dim,
-            edge_chunk_sizes=edge_chunk_sizes,
-            aggr_chunk_sizes=aggr_chunk_sizes,
-            aggr="mean",
-            num_rec=num_rec,
-            noise_dim=noise_dim,
-        )
-
-    def forward(self, send_rep, rec_rep, edge_rep, emb=None):
-        """
-        Apply propagation network to update the representations of receiver
-        nodes, and optionally the edge representations.
-
-        send_rep: (N_send, d_h), vector representations of sender nodes
-        rec_rep: (N_rec, d_h), vector representations of receiver nodes
-        edge_rep: (M, d_h), vector representations of edges used
-
-        Returns:
-        rec_rep: (N_rec, d_h), updated vector representations of receiver nodes
-        (optionally) edge_rep: (M, d_h), updated vector representations
-            of edges
-        """
-        # Always concatenate to [rec_nodes, send_nodes] for propagation,
-        # but only aggregate to rec_nodes
-        node_reps = torch.cat((rec_rep, send_rep), dim=-2)
-        edge_rep_aggr, edge_diff = self.propagate(
-            self.edge_index, x=node_reps, edge_attr=edge_rep, emb=emb
-        )
-        rec_diff = self.aggr_mlp(
-            torch.cat((rec_rep, edge_rep_aggr), dim=-1), emb
-        )
-
-        # Residual connections
-        rec_rep = edge_rep_aggr + rec_diff  # residual is to aggregation
-
-        if self.update_edges:
-            edge_rep = edge_rep + edge_diff
-            return rec_rep, edge_rep
-
-        return rec_rep
-
-    def message(self, x_j, x_i, edge_attr, emb=0):
-        """
-        Compute messages from node j to node i.
-        """
-        # Residual connection is to sender node, propagating information to edge
-        return x_j + self.edge_mlp(
-            torch.cat((edge_attr, x_j, x_i), dim=-1), emb
-        )
-
-
-class SplitMLPs(nn.Module):
-    """
-    Module that feeds chunks of input through different MLPs.
-    Split up input along dim -2 using given chunk sizes and feeds
-    each chunk through separate MLPs.
-    """
-
-    def __init__(self, mlps, chunk_sizes):
-        super().__init__()
-        assert len(mlps) == len(
-            chunk_sizes
-        ), "Number of MLPs must match the number of chunks"
-
-        self.mlps = nn.ModuleList(mlps)
-        self.chunk_sizes = chunk_sizes
-
-    def forward(self, x):
-        """
-        Chunk up input and feed through MLPs
-
-        x: (..., N, d), where N = sum(chunk_sizes)
-
-        Returns:
-        joined_output: (..., N, d), concatenated results from the MLPs
-        """
-        chunks = torch.split(x, self.chunk_sizes, dim=-2)
-        chunk_outputs = [
-            mlp(chunk_input) for mlp, chunk_input in zip(self.mlps, chunks)
-        ]
-        return torch.cat(chunk_outputs, dim=-2)

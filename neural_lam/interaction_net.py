@@ -27,6 +27,7 @@ class InteractionNet(pyg.nn.MessagePassing):
         aggr_chunk_sizes=None,
         num_rec=None,
         aggr="sum",
+        cond_dim=None,
     ):
         """
         Create a new InteractionNet
@@ -48,6 +49,9 @@ class InteractionNet(pyg.nn.MessagePassing):
         num_rec: Number of receiver nodes. If None, derive from edge_index under
             assumption that all receiver nodes have at least one incoming edge.
         aggr: Message aggregation method (sum/mean)
+        cond_dim: Dimensionality of conditioning embedding. If not None, MLPs
+            use conditional layer norm modulated by an embedding of this
+            dimensionality, passed as the emb argument to forward.
         """
         assert aggr in ("sum", "mean"), f"Unknown aggregation method: {aggr}"
         super().__init__(aggr=aggr)
@@ -62,10 +66,6 @@ class InteractionNet(pyg.nn.MessagePassing):
             self.num_rec = edge_index[1].max() + 1
         else:
             self.num_rec = num_rec
-            assert edge_index[1].max() < self.num_rec, (
-                "Given edge index has receiver node index up to "
-                f"{edge_index[1].max()}, but num_rec is just {self.num_rec}."
-            )
 
         # any edge_index used here must start sender and rec. nodes at index 0
         edge_index = torch.stack(
@@ -79,24 +79,30 @@ class InteractionNet(pyg.nn.MessagePassing):
         aggr_mlp_recipe = [2 * input_dim] + [hidden_dim] * (hidden_layers + 1)
 
         if edge_chunk_sizes is None:
-            self.edge_mlp = utils.make_mlp(edge_mlp_recipe)
+            self.edge_mlp = utils.make_mlp(edge_mlp_recipe, cond_dim=cond_dim)
         else:
             self.edge_mlp = SplitMLPs(
-                [utils.make_mlp(edge_mlp_recipe) for _ in edge_chunk_sizes],
+                [
+                    utils.make_mlp(edge_mlp_recipe, cond_dim=cond_dim)
+                    for _ in edge_chunk_sizes
+                ],
                 edge_chunk_sizes,
             )
 
         if aggr_chunk_sizes is None:
-            self.aggr_mlp = utils.make_mlp(aggr_mlp_recipe)
+            self.aggr_mlp = utils.make_mlp(aggr_mlp_recipe, cond_dim=cond_dim)
         else:
             self.aggr_mlp = SplitMLPs(
-                [utils.make_mlp(aggr_mlp_recipe) for _ in aggr_chunk_sizes],
+                [
+                    utils.make_mlp(aggr_mlp_recipe, cond_dim=cond_dim)
+                    for _ in aggr_chunk_sizes
+                ],
                 aggr_chunk_sizes,
             )
 
         self.update_edges = update_edges
 
-    def forward(self, send_rep, rec_rep, edge_rep):
+    def forward(self, send_rep, rec_rep, edge_rep, emb=None):
         """
         Apply interaction network to update the representations of receiver
         nodes, and optionally the edge representations.
@@ -104,6 +110,8 @@ class InteractionNet(pyg.nn.MessagePassing):
         send_rep: (N_send, d_h), vector representations of sender nodes
         rec_rep: (N_rec, d_h), vector representations of receiver nodes
         edge_rep: (M, d_h), vector representations of edges used
+        emb: (..., cond_dim) conditioning embedding, only used if the net was
+            created with a cond_dim
 
         Returns:
         rec_rep: (N_rec, d_h), updated vector representations of receiver nodes
@@ -114,9 +122,11 @@ class InteractionNet(pyg.nn.MessagePassing):
         # but only aggregate to rec_nodes
         node_reps = torch.cat((rec_rep, send_rep), dim=-2)
         edge_rep_aggr, edge_diff = self.propagate(
-            self.edge_index, x=node_reps, edge_attr=edge_rep
+            self.edge_index, x=node_reps, edge_attr=edge_rep, emb=emb
         )
-        rec_diff = self.aggr_mlp(torch.cat((rec_rep, edge_rep_aggr), dim=-1))
+        rec_diff = self.aggr_mlp(
+            torch.cat((rec_rep, edge_rep_aggr), dim=-1), emb
+        )
 
         # Residual connections
         rec_rep = rec_rep + rec_diff
@@ -127,11 +137,11 @@ class InteractionNet(pyg.nn.MessagePassing):
 
         return rec_rep
 
-    def message(self, x_j, x_i, edge_attr):
+    def message(self, x_j, x_i, edge_attr, emb=None):
         """
         Compute messages from node j to node i.
         """
-        return self.edge_mlp(torch.cat((edge_attr, x_j, x_i), dim=-1))
+        return self.edge_mlp(torch.cat((edge_attr, x_j, x_i), dim=-1), emb)
 
     # pylint: disable-next=signature-differs
     def aggregate(self, inputs, index, ptr, dim_size):
@@ -161,6 +171,7 @@ class PropagationNet(InteractionNet):
         aggr_chunk_sizes=None,
         aggr="sum",
         num_rec=None,
+        cond_dim=None,
     ):
         # Use mean aggregation in propagation version to avoid instability
         super().__init__(
@@ -173,9 +184,10 @@ class PropagationNet(InteractionNet):
             aggr_chunk_sizes=aggr_chunk_sizes,
             aggr="mean",
             num_rec=num_rec,
+            cond_dim=cond_dim,
         )
 
-    def forward(self, send_rep, rec_rep, edge_rep):
+    def forward(self, send_rep, rec_rep, edge_rep, emb=None):
         """
         Apply propagation network to update the representations of receiver
         nodes, and optionally the edge representations.
@@ -193,9 +205,11 @@ class PropagationNet(InteractionNet):
         # but only aggregate to rec_nodes
         node_reps = torch.cat((rec_rep, send_rep), dim=-2)
         edge_rep_aggr, edge_diff = self.propagate(
-            self.edge_index, x=node_reps, edge_attr=edge_rep
+            self.edge_index, x=node_reps, edge_attr=edge_rep, emb=emb
         )
-        rec_diff = self.aggr_mlp(torch.cat((rec_rep, edge_rep_aggr), dim=-1))
+        rec_diff = self.aggr_mlp(
+            torch.cat((rec_rep, edge_rep_aggr), dim=-1), emb
+        )
 
         # Residual connections
         rec_rep = edge_rep_aggr + rec_diff  # residual is to aggregation
@@ -206,12 +220,111 @@ class PropagationNet(InteractionNet):
 
         return rec_rep
 
-    def message(self, x_j, x_i, edge_attr):
+    def message(self, x_j, x_i, edge_attr, emb=None):
         """
         Compute messages from node j to node i.
         """
         # Residual connection is to sender node, propagating information to edge
-        return x_j + self.edge_mlp(torch.cat((edge_attr, x_j, x_i), dim=-1))
+        return x_j + self.edge_mlp(
+            torch.cat((edge_attr, x_j, x_i), dim=-1), emb
+        )
+
+
+class FlexibleNet(pyg.nn.MessagePassing):
+    """
+    Flexible version of Interaction/Propagation Networks, allows for
+    separate sender, receiver and edge dimensions.
+    """
+
+    def __init__(
+        self,
+        edge_index,
+        send_node_dim,
+        rec_node_dim,
+        edge_dim,
+        hidden_layers=1,
+        num_rec=None,
+        propagation=True,
+        aggr="mean",
+        cond_dim=None,
+    ):
+        super().__init__(aggr=aggr)
+        self.propagation = propagation
+
+        # The output dimensionality has to be the same as receiver
+        # or sender nodes, depending on formulation
+        hidden_dim = send_node_dim if propagation else rec_node_dim
+
+        # Store number of receiver nodes according to edge_index
+        if num_rec is None:
+            # Derive from edge_index
+            self.num_rec = edge_index[1].max() + 1
+        else:
+            self.num_rec = num_rec
+
+        # any edge_index used here must start sender and rec. nodes at index 0
+        self.register_buffer("edge_index", edge_index, persistent=False)
+
+        # Create MLPs
+        edge_mlp_recipe = [send_node_dim + rec_node_dim + edge_dim] + [
+            hidden_dim
+        ] * (hidden_layers + 1)
+        aggr_mlp_recipe = [hidden_dim + rec_node_dim] + [hidden_dim] * (
+            hidden_layers + 1
+        )
+
+        self.edge_mlp = utils.make_mlp(edge_mlp_recipe, cond_dim=cond_dim)
+        self.aggr_mlp = utils.make_mlp(aggr_mlp_recipe, cond_dim=cond_dim)
+
+    def forward(self, send_rep, rec_rep, edge_rep, emb=None):
+        """
+        Apply propagation network to update the representations of receiver
+        nodes, and optionally the edge representations.
+        send_rep: (N_send, d_h), vector representations of sender nodes
+        rec_rep: (N_rec, d_h), vector representations of receiver nodes
+        edge_rep: (M, d_h), vector representations of edges used
+        emb: (..., cond_dim) conditioning embedding, only used if the net was
+            created with a cond_dim
+        Returns:
+        rec_rep: (N_rec, d_h), updated vector representations of receiver nodes
+        """
+        edge_rep_aggr = self.propagate(
+            self.edge_index,
+            send_rep=send_rep,
+            rec_rep=rec_rep,
+            edge_attr=edge_rep,
+            dim_size=self.num_rec,
+            emb=emb,
+        )
+        rec_diff = self.aggr_mlp(
+            torch.cat((rec_rep, edge_rep_aggr), dim=-1), emb
+        )
+
+        # Residual connections
+        if self.propagation:
+            rec_rep = edge_rep_aggr + rec_diff  # residual is to aggregation
+        else:
+            rec_rep = (
+                rec_rep + rec_diff
+            )  # residual is to previous rec representation
+
+        return rec_rep
+
+    def message(self, send_rep_j, rec_rep_i, edge_attr, emb=None):
+        """
+        Compute messages from node j to node i.
+        send_rep_j contains sender representations for each edge
+        rec_rep_i contains receiver representations for each edge
+        """
+        mlp_output = self.edge_mlp(
+            torch.cat((edge_attr, send_rep_j, rec_rep_i), dim=-1), emb
+        )
+        if self.propagation:
+            # Residual connection is to sender node,
+            # propagating information to edge
+            return send_rep_j + mlp_output
+        else:
+            return mlp_output
 
 
 class SplitMLPs(nn.Module):
@@ -230,17 +343,18 @@ class SplitMLPs(nn.Module):
         self.mlps = nn.ModuleList(mlps)
         self.chunk_sizes = chunk_sizes
 
-    def forward(self, x):
+    def forward(self, x, emb=None):
         """
         Chunk up input and feed through MLPs
 
         x: (..., N, d), where N = sum(chunk_sizes)
+        emb: (..., cond_dim) conditioning embedding, passed on to the MLPs
 
         Returns:
         joined_output: (..., N, d), concatenated results from the MLPs
         """
         chunks = torch.split(x, self.chunk_sizes, dim=-2)
         chunk_outputs = [
-            mlp(chunk_input) for mlp, chunk_input in zip(self.mlps, chunks)
+            mlp(chunk_input, emb) for mlp, chunk_input in zip(self.mlps, chunks)
         ]
         return torch.cat(chunk_outputs, dim=-2)

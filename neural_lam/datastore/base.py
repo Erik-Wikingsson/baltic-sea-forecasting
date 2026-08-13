@@ -30,7 +30,7 @@ class BaseDatastore(abc.ABC):
     # Forecast vs analysis data
     If the datastore is used to represent forecast rather than analysis data,
     then the `is_forecast` attribute should be set to True, and returned data
-    from `get_dataarray` is assumed to have `analysis_time` and `forecast_time`
+    from `get_dataarray` is assumed to have `init_time` and `lead_time`
     dimensions (rather than just `time`).
 
     # Ensemble vs deterministic data
@@ -232,9 +232,9 @@ class BaseDatastore(abc.ABC):
         data being loaded.
 
         For categories of data that have a time dimension (i.e. not static
-        data), the dataarray is expected additionally have `(analysis_time,
-        elapsed_forecast_duration)` dimensions if `is_forecast` is True, or
-        `(time)` if `is_forecast` is False.
+        data), the dataarray is expected additionally have `(init_time,
+        lead_time)` dimensions if `is_forecast` is True, or `(time)` if
+        `is_forecast` is False.
 
         If the data is ensemble data, the dataarray is expected to have an
         additional `ensemble_member` dimension.
@@ -385,9 +385,7 @@ class BaseDatastore(abc.ABC):
             if (category != "static") and (category != "mask"):
                 # static data does not vary in time
                 if self.is_forecast:
-                    dim_order.extend(
-                        ["analysis_time", "elapsed_forecast_duration"]
-                    )
+                    dim_order.extend(["init_time", "lead_time"])
                 elif not self.is_forecast:
                     dim_order.append("time")
 

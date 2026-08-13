@@ -1,5 +1,6 @@
 # Third-party
 import numpy as np
+import scipy.spatial
 import torch
 import torch_geometric as pyg
 import torch_geometric.transforms as pygt
@@ -7,8 +8,6 @@ from sklearn.cluster import KMeans
 
 # Local
 from . import utils as gutils
-
-BASE_MAX_EDGE_LEN = 20000  # m
 
 
 def build_graph_from_node_pos(node_pos):
@@ -33,6 +32,7 @@ def build_cluster_mesh_graph(
     limit_mesh_levels=None,
     mesh_plot_function=None,
     random_state=42,
+    max_edge_len=20000,
 ):
     possible_mesh_levels = np.floor(
         np.log(xy.shape[0] / grid_to_first_mesh_refinement)
@@ -67,18 +67,16 @@ def build_cluster_mesh_graph(
             random_state=random_state,
         )
 
-        closest_cluster_index = mesh_ref_model.fit_predict(
-            prev_level_pos,
-        )
+        mesh_ref_model.fit(prev_level_pos)
 
         # m2m
         level_graph = build_graph_from_node_pos(mesh_ref_model.cluster_centers_)
         # Filter out edges crossing land
-        max_edge_len = BASE_MAX_EDGE_LEN * (
+        max_edge_len_level = max_edge_len * (
             mesh_refinement_factor ** (0.5 * level_i)
         )
         gutils.filter_edges_land(
-            level_graph, xy, xy_land, max_edge_len=max_edge_len
+            level_graph, xy, xy_land, max_edge_len=max_edge_len_level
         )
         gutils.add_edge_features_pyg(level_graph)
         mesh_level_graphs.append(level_graph)
@@ -87,12 +85,17 @@ def build_cluster_mesh_graph(
             mesh_plot_function(level_graph, f"Mesh graph, level {level_i}")
 
         if level_i > 0:
-            # up
+            # Build up/down after filtering: coarse -> nearest fine (xy)
+            coarse_pos = mesh_level_graphs[level_i - 1].pos.numpy()
+            fine_pos = level_graph.pos.numpy()
+            n_prev = coarse_pos.shape[0]
+            kdt_fine = scipy.spatial.cKDTree(fine_pos)
+            _, coarse_to_fine = kdt_fine.query(coarse_pos, k=1)
+            coarse_to_fine = np.asarray(coarse_to_fine, dtype=np.int64).ravel()
             up_edge_index = torch.stack(
                 (
-                    torch.arange(prev_level_pos.shape[0], dtype=torch.long),
-                    prev_level_pos.shape[0]
-                    + torch.tensor(closest_cluster_index, dtype=torch.long),
+                    torch.arange(n_prev, dtype=torch.long),
+                    torch.from_numpy(coarse_to_fine) + n_prev,
                 ),
                 dim=0,
             )
@@ -109,17 +112,12 @@ def build_cluster_mesh_graph(
             gutils.add_edge_features_pyg(up_graph)
             mesh_up_graphs.append(up_graph)
 
-            # down, reverse up edges
-            reversed_up_edge_index = torch.stack(
-                (
-                    up_edge_index[1],
-                    up_edge_index[0],
-                ),
-                dim=0,
+            down_edge_index = torch.stack(
+                (up_edge_index[1], up_edge_index[0]), dim=0
             )
             down_graph = pyg.data.Data(
-                edge_index=reversed_up_edge_index,
-                pos=up_graph.pos,  # same node indices, keep pos as is
+                edge_index=down_edge_index,
+                pos=up_graph.pos,
             )
             gutils.add_edge_features_pyg(down_graph)
             mesh_down_graphs.append(down_graph)

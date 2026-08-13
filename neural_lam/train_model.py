@@ -14,16 +14,17 @@ from loguru import logger
 # Local
 from . import utils
 from .config import load_config_and_datastores
-from .models import CRPS, EDM, FM, SI, GraphCast, GraphEFM, GraphFM
+from .models import EDM, FM, SI, GraphCast, GraphCRPS, GraphEFM, GraphFM, GraphDET
 from .weather_dataset import WeatherDataModule
 
 MODELS = {
     "graphcast": GraphCast,
     "graph_fm": GraphFM,
     "graph_efm": GraphEFM,
+    "graph_crps": GraphCRPS,
+    "graph_det": GraphDET,
     "EDM": EDM,
     "FM": FM,
-    "crps": CRPS,
     "SI": SI,
 }
 
@@ -115,8 +116,26 @@ def main(input_args=None):
         "--hidden_dim_grid",
         type=int,
         help=(
-            "(For Graph-EFM) Dimensionality of hidden representations related "
+            "Dimensionality of hidden representations related "
             "to grid nodes (default: None, use same as hidden_dim)."
+        ),
+    )
+    parser.add_argument(
+        "--hidden_dim_edge",
+        type=int,
+        help=(
+            "Dimensionality of hidden representations related to edge nodes "
+            "(edge encodings and in edge-level MLPs)"
+            "(default: None, use same as hidden_dim_grid)"
+        ),
+    )
+    parser.add_argument(
+        "--hidden_dim_mesh_nodes",
+        type=int,
+        help=(
+            "Dimensionality of hidden representations related to mesh nodes "
+            "(mesh encodings and in mesh-level MLPs)"
+            "(default: None, use same as hidden_dim)"
         ),
     )
     parser.add_argument(
@@ -179,14 +198,6 @@ def main(input_args=None):
         help="If the prior should be learned as a mapping from previous state "
         "and forcing, otherwise static with mean 0 (default: 1 (yes))",
     )
-    parser.add_argument(
-        "--vertical_propnets",
-        type=int,
-        default=1,
-        help="If PropagationNets should be used for all vertical message "
-        "passing (g2m, m2g, up in hierarchy), in deterministic models."
-        "(default: 1 (yes))",
-    )
 
     # EDM options
     parser.add_argument(
@@ -235,16 +246,22 @@ def main(input_args=None):
         "--pred_residual",
         action="store_true",
         help="If the EDM model should predict residuals instead of the "
-        "next state",
+        "next state. NOTE: has no effect for graph_det or graph_crps, which "
+        "always use the residual parametrization to match graph_fm",
+    )
+    parser.add_argument(
+        "--channel_mult_noise",
+        type=int,
+        default=2,
+        help="Channel multiplier for noise MLP (default: 2)",
     )
 
     # Graph-CRPS options
     parser.add_argument(
         "--noise_embedding",
         type=str,
-        default="fourier",
-        help="Type of encoder to use in edm model (positional/fourier)"
-        "(default: 'fourier')",
+        default="linear",
+        help="Type of encoder to use (default: 'linear')",
     )
     parser.add_argument(
         "--noise_dim",
@@ -257,6 +274,18 @@ def main(input_args=None):
         type=float,
         default=0.95,
         help="Alpha parameter for the Almost Fair CRPS (default: 0.95)",
+    )
+    parser.add_argument(
+        "--channel_mult_emb",
+        type=int,
+        default=2,
+        help="Channel multiplier for noise embedding MLP",
+    )
+    parser.add_argument(
+        "--deterministic_noise_value",
+        type=float,
+        default=0.,
+        help="Value for the noise parameter in the deterministisc version."
     )
 
     # Training options
@@ -275,6 +304,52 @@ def main(input_args=None):
     )
     parser.add_argument(
         "--lr", type=float, default=1e-3, help="learning rate (default: 0.001)"
+    )
+    parser.add_argument(
+        "--min_lr",
+        type=float,
+        default=1e-3,
+        help="Minimum learning rate for cosine annealing (default: 1e-4)",
+    )
+    parser.add_argument(
+        "--optimizer",
+        type=str,
+        default="adamw",
+        choices=["adamw", "muon", "muon_flat"],
+        help="Optimizer to use. 'muon' applies the Muon optimizer to 2D "
+        "hidden weights (AdamW for embeddings/output/1D params); 'muon_flat' "
+        "additionally flattens 4D conv weights so Muon optimizes them too "
+        "(default: adamw)",
+    )
+    parser.add_argument(
+        "--muon_momentum",
+        type=float,
+        default=0.95,
+        help="Momentum for the Muon optimizer (default: 0.95)",
+    )
+    parser.add_argument(
+        "--muon_weight_decay",
+        type=float,
+        default=0.0,
+        help="Weight decay for the muon optimizer"
+        "(default: 0.0)",
+    )
+    parser.add_argument(
+        "--muon_exclude_patterns",
+        nargs="+",
+        default=[
+            "interior_embedder",
+            "boundary_embedder",
+            "g2m_embedder",
+            "m2g_embedder",
+            "output_map",
+            "mesh_embedders",
+            "mesh_same_embedders",
+            "mesh_up_embedders",
+            "mesh_down_embedders",
+        ],
+        help="Parameter-name substrings routed to AdamW instead of Muon "
+        "(input embeddings and final output layer)",
     )
     parser.add_argument(
         "--val_interval",
@@ -333,6 +408,13 @@ def main(input_args=None):
         "(default: 10)",
     )
     parser.add_argument(
+        "--input_steps",
+        type=int,
+        default=2,
+        choices=[1, 2],
+        help="Number of state steps as input (default: 1)",
+    )
+    parser.add_argument(
         "--n_example_pred",
         type=int,
         default=1,
@@ -389,43 +471,65 @@ def main(input_args=None):
             validation step (e.g. '{"1": [1, 2], "3": [3, 4]}')""",
     )
     parser.add_argument(
+        "--current_forcing_step",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Include current time t in forcing window (default: 1).",
+    )
+    parser.add_argument(
         "--num_past_forcing_steps",
         type=int,
-        default=1,
-        help="Number of past time steps to use as input for forcing data",
+        default=2,
+        help="Number of past time steps to use as input for forcing data "
+        "(default: 2).",
     )
     parser.add_argument(
         "--num_future_forcing_steps",
         type=int,
-        default=1,
+        default=0,
         help="Number of future time steps to use as input for forcing data",
+    )
+    parser.add_argument(
+        "--current_boundary_step",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Include current time t in boundary window (default: 1).",
     )
     parser.add_argument(
         "--num_past_boundary_steps",
         type=int,
-        default=1,
-        help="Number of past time steps to use as boundary input (default: 1)",
+        default=2,
+        help="Number of past time steps to use as boundary input (default: 2).",
     )
     parser.add_argument(
         "--num_future_boundary_steps",
         type=int,
-        default=1,
+        default=0,
         help="Number of future time steps to use as atmosphere input "
-        "(default: 1)",
+        "(default: 0)",
+    )
+    parser.add_argument(
+        "--current_atmosphere_step",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Include current time t in atmosphere window (default: 1).",
     )
     parser.add_argument(
         "--num_past_atmosphere_steps",
         type=int,
-        default=1,
+        default=2,
         help="Number of past time steps to use as atmosphere input "
-        "(default: 1)",
+        "(default: 2).",
     )
     parser.add_argument(
         "--num_future_atmosphere_steps",
         type=int,
-        default=1,
+        default=0,
         help="Number of future time steps to use as boundary input "
-        "(default: 1)",
+        "(default: 0)",
     )
     parser.add_argument(
         "--use_atmosphere_g2m",
@@ -438,6 +542,40 @@ def main(input_args=None):
         type=int,
         default=5,
         help="Number of ensemble members during evaluation (default: 5)",
+    )
+    parser.add_argument(
+        "--save_ensemble_zarr",
+        action="store_true",
+        help="Save full ensemble forecasts to zarr during test "
+        "(default: False)",
+    )
+    parser.add_argument(
+        "--save_forecasts",
+        action="store_true",
+        help="Save the full test set (all init_times) ensemble forecasts "
+        "and targets to a single zarr store, appended along init_time "
+        "one batch at a time (default: False)",
+    )
+    parser.add_argument(
+        "--forecasts_zarr_path",
+        type=str,
+        default=None,
+        help="Path to the zarr store used by --save_forecasts. "
+        "If not provided, defaults to "
+        "{logger.save_dir}/ensemble_forecasts.zarr",
+    )
+    parser.add_argument(
+        "--scheduler",
+        type=str,
+        default=None,
+        choices=[
+            "pretrain",
+            "finetune",
+            "probabilistic",
+            "deterministic",
+            "finetune_deterministic",
+        ],
+        help="Multi-phase training scheduler.",
     )
 
     args = parser.parse_args(input_args)
@@ -466,20 +604,33 @@ def main(input_args=None):
     seed.seed_everything(args.seed)
 
     # Load neural-lam configuration and datastore to use
-    config, datastore, datastore_boundary, datastore_atmosphere = (
-        load_config_and_datastores(config_path=args.config_path)
-    )
+    (
+        config,
+        datastore,
+        datastore_boundary,
+        datastore_atmosphere,
+        statistics_datastore,
+        statistics_datastore_boundary,
+        statistics_datastore_atmosphere,
+    ) = load_config_and_datastores(config_path=args.config_path)
 
     # Create datamodule
     data_module = WeatherDataModule(
         datastore=datastore,
         datastore_boundary=datastore_boundary,
         datastore_atmosphere=datastore_atmosphere,
+        statistics_datastore=statistics_datastore,
+        statistics_datastore_boundary=statistics_datastore_boundary,
+        statistics_datastore_atmosphere=statistics_datastore_atmosphere,
         ar_steps_train=args.ar_steps_train,
         ar_steps_eval=args.ar_steps_eval,
+        input_steps=args.input_steps,
         standardize=True,
         num_past_forcing_steps=args.num_past_forcing_steps,
         num_future_forcing_steps=args.num_future_forcing_steps,
+        current_forcing_step=bool(args.current_forcing_step),
+        current_boundary_step=bool(args.current_boundary_step),
+        current_atmosphere_step=bool(args.current_atmosphere_step),
         num_past_boundary_steps=args.num_past_boundary_steps,
         num_future_boundary_steps=args.num_future_boundary_steps,
         num_past_atmosphere_steps=args.num_past_atmosphere_steps,
@@ -487,6 +638,7 @@ def main(input_args=None):
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         use_atmosphere_g2m=args.use_atmosphere_g2m,
+        density_channel=getattr(config.training, "density_channel", None),
     )
 
     # Instantiate model + trainer
@@ -515,6 +667,9 @@ def main(input_args=None):
         datastore=datastore,
         datastore_boundary=datastore_boundary,
         datastore_atmosphere=datastore_atmosphere,
+        statistics_datastore=statistics_datastore,
+        statistics_datastore_boundary=statistics_datastore_boundary,
+        statistics_datastore_atmosphere=statistics_datastore_atmosphere,
     )
 
     if args.eval:
@@ -542,42 +697,317 @@ def main(input_args=None):
         )
     )
 
-    # Training strategy
-    # If doing pure autoencoder training (kl_beta = 0), the prior network is not
-    # used at all in producing the loss. This is desired, but DDP complains.
-    strategy = "ddp" if args.kl_beta > 0 else "ddp_find_unused_parameters_true"
-
     # To enable no validation during training, set val_interval to None
     if args.val_interval == 0:
         args.val_interval = None
 
-    trainer = pl.Trainer(
-        max_epochs=args.epochs,
-        deterministic=True,
-        strategy=strategy,
-        accelerator=device_name,
-        num_nodes=args.num_nodes,
-        devices=devices,
-        logger=training_logger,
-        log_every_n_steps=1,
-        callbacks=callbacks,
-        check_val_every_n_epoch=args.val_interval,
-        precision=args.precision,
-        num_sanity_val_steps=args.num_sanity_val_steps,
-    )
+    def _make_trainer(max_epochs, strategy, extra_callbacks=None):
+        """Build a pl.Trainer with the given max_epochs and strategy."""
+        cbs = list(callbacks)
+        if extra_callbacks:
+            cbs.extend(extra_callbacks)
+        return pl.Trainer(
+            max_epochs=max_epochs,
+            deterministic=True,
+            strategy=strategy,
+            accelerator=device_name,
+            num_nodes=args.num_nodes,
+            devices=devices,
+            logger=training_logger,
+            log_every_n_steps=1,
+            callbacks=cbs,
+            check_val_every_n_epoch=args.val_interval,
+            precision=args.precision,
+            num_sanity_val_steps=args.num_sanity_val_steps,
+        )
 
-    # Only init once, on rank 0 only
-    if trainer.global_rank == 0:
-        utils.init_training_logger_metrics(
-            training_logger, val_steps=args.val_steps_to_log
-        )  # Do after initializing logger
+    def _run_phase(
+        model,
+        data_module,
+        max_epochs,
+        strategy,
+        ckpt_path=None,
+        extra_callbacks=None,
+    ):
+        """Run one training phase, return path to last checkpoint."""
+        t = _make_trainer(max_epochs, strategy,
+                          extra_callbacks=extra_callbacks)
+        if t.global_rank == 0:
+            utils.init_training_logger_metrics(
+                training_logger, val_steps=args.val_steps_to_log
+            )
+        t.fit(model=model, datamodule=data_module, ckpt_path=ckpt_path)
+        return t.checkpoint_callback.last_model_path
+
+    def _add_cosine_lr(model, max_epochs):
+        """Attach a CosineAnnealingLR scheduler to the model."""
+        _orig_configure = model.configure_optimizers
+
+        def configure_optimizers_with_cosine(self_ref=model):
+            opt = _orig_configure()
+            if isinstance(opt, dict):
+                optimizer = opt["optimizer"]
+            else:
+                optimizer = opt
+            sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=max_epochs, eta_min=1e-5
+            )
+            return {"optimizer": optimizer, "lr_scheduler": sched}
+
+        model.configure_optimizers = configure_optimizers_with_cosine
+
+    def _add_finetune_sequential_lr(
+        model,
+        warmup_epochs,
+        finetune_epochs,
+        initial_lr,
+        lr,
+        eta_min,
+    ):
+        """Linear LR warmup then cosine decay over finetune_epochs."""
+        _orig_configure = model.configure_optimizers
+
+        def configure_optimizers_finetune(self_ref=model):
+            opt = _orig_configure()
+            if isinstance(opt, dict):
+                optimizer = opt["optimizer"]
+            else:
+                optimizer = opt
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = lr
+            linear_warmup = torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=initial_lr / lr,
+                end_factor=1.0,
+                total_iters=warmup_epochs,
+            )
+            cosine_annealing = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=finetune_epochs - warmup_epochs,
+                eta_min=eta_min,
+            )
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer,
+                schedulers=[linear_warmup, cosine_annealing],
+                milestones=[warmup_epochs],
+            )
+            return {"optimizer": optimizer, "lr_scheduler": scheduler}
+
+        model.configure_optimizers = configure_optimizers_finetune
+
     if args.eval:
+        strategy = (
+            "ddp" if args.kl_beta > 0 else "ddp_find_unused_parameters_true"
+        )
+        trainer = _make_trainer(args.epochs, strategy)
+        if trainer.global_rank == 0:
+            utils.init_training_logger_metrics(
+                training_logger, val_steps=args.val_steps_to_log
+            )
         trainer.test(
             model=model,
             datamodule=data_module,
             ckpt_path=args.load,
         )
+
+    elif args.scheduler == "pretrain":
+        total_epochs = 100 + 200 + 25
+        _add_cosine_lr(model, total_epochs)
+
+        # Phase 1: 100 epochs, kl_beta=0, ar=1
+        model.kl_beta = 0.0
+        data_module.ar_steps_train = 1
+        strategy = "ddp_find_unused_parameters_true"
+        print("[pretrain] Phase 1/3: 100 epochs, ar=1, kl_beta=0")
+        last_ckpt = _run_phase(
+            model, data_module, 100, strategy, ckpt_path=args.load
+        )
+
+        # Phase 2: 200 epochs, kl_beta=0.1, ar=1
+        model.kl_beta = 0.1
+        strategy = "ddp"
+        print("[pretrain] Phase 2/3: 200 epochs, ar=1, kl_beta=0.1")
+        last_ckpt = _run_phase(
+            model, data_module, 300, strategy, ckpt_path=last_ckpt
+        )
+
+        # Phase 3: 25 epochs, kl_beta=0.1, ar=2
+        data_module.ar_steps_train = 2
+        strategy = "ddp"
+        print("[pretrain] Phase 3/3: 25 epochs, ar=2, kl_beta=0.1")
+        _run_phase(model, data_module, 325, strategy, ckpt_path=last_ckpt)
+
+    elif args.scheduler == "finetune":
+        prior_done = 325
+        warmup_epochs = 5
+        finetune_epochs = 165
+        _add_finetune_sequential_lr(
+            model,
+            warmup_epochs=warmup_epochs,
+            finetune_epochs=finetune_epochs,
+            initial_lr=1e-5,
+            lr=1e-4,
+            eta_min=1e-5,
+        )
+
+        # Phase 1: 5 epochs warmup, kl_beta=0, ar=1
+        model.kl_beta = 0.0
+        model.crps_weight = 0.0
+        data_module.ar_steps_train = 1
+        print(
+            "[finetune] Phase 1/4: 5 ep warmup, ar=1, kl_beta=0, "
+            "strategy=ddp_find_unused_parameters_true"
+        )
+        last_ckpt = _run_phase(
+            model,
+            data_module,
+            prior_done + warmup_epochs,
+            "ddp_find_unused_parameters_true",
+            ckpt_path=args.load,
+        )
+
+        # Phase 2: 150 epochs, kl_beta=0.1, ar=1
+        model.kl_beta = 0.1
+        model.crps_weight = 0.0
+        data_module.ar_steps_train = 1
+        print("[finetune] Phase 2/4: 150 ep, ar=1, kl_beta=0.1, strategy=ddp")
+        last_ckpt = _run_phase(
+            model,
+            data_module,
+            prior_done + 155,
+            "ddp",
+            ckpt_path=last_ckpt,
+        )
+
+        # Phase 3: 5 epochs, kl_beta=0.1, ar=2
+        model.kl_beta = 0.1
+        model.crps_weight = 0.0
+        data_module.ar_steps_train = 2
+        print("[finetune] Phase 3/4: 5 ep, ar=2, kl_beta=0.1, strategy=ddp")
+        last_ckpt = _run_phase(
+            model,
+            data_module,
+            prior_done + 160,
+            "ddp",
+            ckpt_path=last_ckpt,
+        )
+
+        # Phase 4: 5 epochs, kl_beta=0.1, ar=2, crps_weight=1e6
+        model.kl_beta = 0.1
+        model.crps_weight = 1e6
+        data_module.ar_steps_train = 2
+        print(
+            "[finetune] Phase 4/4: 5 ep, ar=2, kl_beta=0.1, "
+            "crps_weight=1e6, strategy=ddp"
+        )
+        _run_phase(
+            model,
+            data_module,
+            prior_done + finetune_epochs,
+            "ddp",
+            ckpt_path=last_ckpt,
+        )
+
+    elif args.scheduler == "probabilistic":
+        total_epochs = 100 + 200 + 25 + 25
+        _add_cosine_lr(model, total_epochs)
+
+        model.crps_weight = 0.0
+
+        # Phase 1: 100 epochs, kl_beta=0
+        model.kl_beta = 0.0
+        data_module.ar_steps_train = 1
+        strategy = "ddp_find_unused_parameters_true"
+        print("[probabilistic] Phase 1/4: 100 epochs, kl_beta=0")
+        last_ckpt = _run_phase(
+            model, data_module, 100, strategy, ckpt_path=args.load
+        )
+
+        # Phase 2: 200 epochs, kl_beta=0.1
+        model.kl_beta = 0.1
+        strategy = "ddp"
+        print("[probabilistic] Phase 2/4: 200 epochs, kl_beta=0.1")
+        last_ckpt = _run_phase(
+            model, data_module, 300, strategy, ckpt_path=last_ckpt
+        )
+
+        # Phase 3: 25 epochs, ar=2, kl_beta=0.1
+        data_module.ar_steps_train = 2
+        print("[probabilistic] Phase 3/4: 25 epochs, ar=2, kl_beta=0.1")
+        last_ckpt = _run_phase(
+            model, data_module, 325, strategy, ckpt_path=last_ckpt
+        )
+
+        # Phase 4: 25 epochs, ar=2, kl_beta=0.1, crps_weight=1e4
+        model.crps_weight = 1e4
+        print(
+            "[probabilistic] Phase 4/4: 25 epochs, ar=2, kl_beta=0.1, "
+            "crps_weight=1e4"
+        )
+        _run_phase(model, data_module, 350, strategy, ckpt_path=last_ckpt)
+
+    elif args.scheduler == "deterministic":
+        total_epochs = 150 + 25
+        _add_cosine_lr(model, total_epochs)
+
+        strategy = "ddp"
+
+        # Phase 1: 150 epochs, ar=1
+        data_module.ar_steps_train = 1
+        print("[deterministic] Phase 1/2: 150 epochs, ar=1")
+        last_ckpt = _run_phase(
+            model, data_module, 150, strategy, ckpt_path=args.load
+        )
+
+        # Phase 2: 25 epochs, ar=2
+        data_module.ar_steps_train = 2
+        print("[deterministic] Phase 2/2: 25 epochs, ar=2")
+        _run_phase(model, data_module, 175, strategy, ckpt_path=last_ckpt)
+
+    elif args.scheduler == "finetune_deterministic":
+        prior_done = 175
+        _add_finetune_sequential_lr(
+            model,
+            warmup_epochs=5,
+            finetune_epochs=60,
+            initial_lr=1e-5,
+            lr=1e-4,
+            eta_min=1e-5,
+        )
+
+        # Phase 1
+        data_module.ar_steps_train = 1
+        print("[finetune] Phase 1/2: 50 ep, ar=1")
+        last_ckpt = _run_phase(
+            model,
+            data_module,
+            prior_done + 50,
+            "ddp",
+            ckpt_path=args.load,
+        )
+
+        # Phase 2
+        data_module.ar_steps_train = 2
+        print("[finetune] Phase 2/2: 10 ep, ar=2")
+        _run_phase(
+            model,
+            data_module,
+            prior_done + 60,
+            "ddp",
+            ckpt_path=last_ckpt,
+        )
+
     else:
+        # Default: single-phase training
+        strategy = (
+            "ddp" if args.kl_beta > 0 else "ddp_find_unused_parameters_true"
+        )
+        _add_cosine_lr(model, args.epochs)
+        trainer = _make_trainer(args.epochs, strategy)
+        if trainer.global_rank == 0:
+            utils.init_training_logger_metrics(
+                training_logger, val_steps=args.val_steps_to_log
+            )
         trainer.fit(model=model, datamodule=data_module, ckpt_path=args.load)
 
 

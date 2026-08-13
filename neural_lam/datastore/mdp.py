@@ -75,17 +75,18 @@ class MDPDatastore(BaseRegularGridDatastore):
                 var_names = self.get_vars_names(category)
                 rank_zero_print(f" {category:<8s}: {' '.join(var_names)}")
 
-        # check that all three train/val/test splits are available
-        required_splits = ["train", "val", "test"]
-        available_splits = list(self._ds.splits.split_name.values)
-        if not all(split in available_splits for split in required_splits):
-            raise ValueError(
-                f"Missing required splits: {required_splits} in available "
-                f"splits: {available_splits}"
+        self._available_splits = list(self._ds.splits.split_name.values)
+        all_splits = ["train", "val", "test"]
+        missing = [s for s in all_splits if s not in self._available_splits]
+        if missing:
+            warnings.warn(
+                f"Splits {missing} not found in datastore "
+                f"(available: {self._available_splits}). "
+                "Training/validation will not be possible without them."
             )
 
         rank_zero_print("With the following splits (over time):")
-        for split in required_splits:
+        for split in self._available_splits:
             da_split = self._ds.splits.sel(split_name=split)
             da_split_start = da_split.sel(split_part="start").load().item()
             da_split_end = da_split.sel(split_part="end").load().item()
@@ -103,6 +104,18 @@ class MDPDatastore(BaseRegularGridDatastore):
                 ), "all inputs must have the same dimension order"
 
         self.CARTESIAN_COORDS = dim_order
+
+        # Auto-detect forecast data by checking for init_time/lead_time dims
+        sample_var = next(
+            (v for v in ("state", "forcing") if v in self._ds), None
+        )
+        if sample_var is not None and "init_time" in self._ds[sample_var].dims:
+            self.is_forecast = True
+
+    @property
+    def available_splits(self) -> list:
+        """The splits available in this datastore."""
+        return list(self._available_splits)
 
     @property
     def root_path(self) -> Path:
@@ -138,6 +151,10 @@ class MDPDatastore(BaseRegularGridDatastore):
             The length of the time steps in hours.
 
         """
+        if self.is_forecast:
+            da_dt = self._ds["lead_time"].diff("lead_time")
+            total_sec = da_dt.dt.total_seconds().isel(lead_time=0).astype(int)
+            return (total_sec // 3600).item()
         da_dt = self._ds["time"].diff("time")
         total_sec = da_dt.dt.total_seconds().isel(time=0).astype(int)
         return (total_sec // 3600).item()
@@ -232,9 +249,9 @@ class MDPDatastore(BaseRegularGridDatastore):
         loaded.
 
         For categories of data that have a time dimension (i.e. not static
-        data), the dataarray will additionally have `(analysis_time,
-        elapsed_forecast_duration)` dimensions if `is_forecast` is True, or
-        `(time)` if `is_forecast` is False.
+        data), the dataarray will additionally have `(init_time, lead_time)`
+        dimensions if `is_forecast` is True, or `(time)` if `is_forecast`
+        is False.
 
         If the data is ensemble data, the dataarray will have an additional
         `ensemble_member` dimension.
@@ -262,7 +279,12 @@ class MDPDatastore(BaseRegularGridDatastore):
         # set multi-index for grid-index
         da_category = da_category.set_index(grid_index=self.CARTESIAN_COORDS)
 
-        if "time" in da_category.dims:
+        if "time" in da_category.dims or "init_time" in da_category.dims:
+            if split not in self._available_splits:
+                raise ValueError(
+                    f"Requested split '{split}' not available in datastore. "
+                    f"Available splits: {self._available_splits}"
+                )
             t_start = (
                 self._ds.splits.sel(split_name=split)
                 .sel(split_part="start")
@@ -275,7 +297,10 @@ class MDPDatastore(BaseRegularGridDatastore):
                 .load()
                 .item()
             )
-            da_category = da_category.sel(time=slice(t_start, t_end))
+            if "init_time" in da_category.dims:
+                da_category = da_category.sel(init_time=slice(t_start, t_end))
+            else:
+                da_category = da_category.sel(time=slice(t_start, t_end))
 
         dim_order = self.expected_dim_order(category=category)
         da_category = da_category.transpose(*dim_order)
@@ -334,14 +359,12 @@ class MDPDatastore(BaseRegularGridDatastore):
         """
         Return the projection of the coordinates.
 
-        NOTE: currently this expects the projection information to be in the
-        `extra` section of the configuration file, with a `projection` key
-        containing a `class_name` and `kwargs` for constructing the
-        `cartopy.crs.Projection` object. This is a temporary solution until
-        the projection information can be parsed in the produced dataset
-        itself. `mllam-data-prep` ignores the contents of the `extra` section
-        of the config file which is why we need to check that the necessary
-        parts are there.
+        If no projection is specified in the config `extra` section, returns
+        PlateCarree (lon/lat in degrees) for global lon-lat grids.
+        NOTE: when projection is specified, it is read from the `extra` section
+        of the configuration file, with a `projection` key containing a
+        `class_name` and `kwargs` for constructing the `cartopy.crs.Projection`
+        object. `mllam-data-prep` ignores the contents of the `extra` section.
 
         Returns
         -------
@@ -349,16 +372,11 @@ class MDPDatastore(BaseRegularGridDatastore):
             The projection of the coordinates.
 
         """
-        if "projection" not in self._config.extra:
-            raise ValueError(
-                "projection information not found in the configuration file "
-                f"({self._config_path}). Please add the projection information"
-                "to the `extra` section of the config, by adding a "
-                "`projection` key with the class name and kwargs of the "
-                "projection."
-            )
+        extra = getattr(self._config, "extra", None)
+        if not isinstance(extra, dict) or "projection" not in extra:
+            return ccrs.PlateCarree()
 
-        projection_info = self._config.extra["projection"]
+        projection_info = extra["projection"]
         if "class_name" not in projection_info:
             raise ValueError(
                 "class_name not found in the projection information. Please "
@@ -501,7 +519,7 @@ class MDPDatastore(BaseRegularGridDatastore):
         surface : bool
             Whether to return only surface layer.
         stacked : bool
-            Whether to stack the lat, lon coordinates.
+            Whether to stack the lon, lat (longitude, latitude) coordinates.
         invert : bool
             Whether to invert the mask.
 
@@ -510,7 +528,7 @@ class MDPDatastore(BaseRegularGridDatastore):
         np.ndarray
             The dataset mask, returned differently based on
             the values of `surface` and `stacked`:
-            - `surface=True`, `stacked=True`: (N_lon*N_lon,)
+            - `surface=True`, `stacked=True`: (N_lon*N_lat,)
             - `surface=True`, `stacked=False`: (N_lon, N_lat)
             - `surface=False`, `stacked=True`: (N_lon*N_lat, d_features)
             - `surface=False`, `stacked=False`: (N_lon, N_lat, d_features)
@@ -536,7 +554,7 @@ class MDPDatastore(BaseRegularGridDatastore):
             else:
                 da_mask = da_mask.transpose("grid_index", "mask_feature")
         else:
-            # unstack grid_index -> (lat, lon)
+            # unstack grid_index -> (longitude, latitude)
             da_mask = self.unstack_grid_coords(da_mask)
 
             # select surface
@@ -563,7 +581,7 @@ class MDPDatastore(BaseRegularGridDatastore):
         Parameters
         ----------
         stacked : bool
-            Whether to stack the lat, lon coordinates.
+            Whether to stack the lon, lat (longitude, latitude) coordinates.
         invert : bool
             Whether to invert the mask.
 
@@ -582,7 +600,7 @@ class MDPDatastore(BaseRegularGridDatastore):
             # already has grid_index dimension, return (N_grid,)
             mask_arr = da_mask
         else:
-            # unstack to (lat, lon)
+            # unstack to (longitude, latitude)
             mask_arr = self.unstack_grid_coords(da_mask)
             mask_arr = mask_arr.transpose("longitude", "latitude")
 

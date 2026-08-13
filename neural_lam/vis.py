@@ -160,7 +160,7 @@ def plot_ensemble_prediction(
     fig, axes = plt.subplots(
         3,
         3,
-        figsize=(15, 15),
+        figsize=(18, 12),
         subplot_kw={"projection": datastore.coords_projection},
     )
     axes = axes.flatten()

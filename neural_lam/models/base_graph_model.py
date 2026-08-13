@@ -8,7 +8,7 @@ import torch
 from .. import utils
 from ..config import NeuralLAMConfig
 from ..datastore import BaseDatastore
-from ..interaction_net import InteractionNet, PropagationNet
+from ..interaction_net import FlexibleNet
 from .ar_model import ARModel
 
 
@@ -25,6 +25,7 @@ class BaseGraphModel(ARModel):
         datastore: BaseDatastore,
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
+        **kwargs,
     ):
         super().__init__(
             args,
@@ -32,6 +33,7 @@ class BaseGraphModel(ARModel):
             datastore=datastore,
             datastore_boundary=datastore_boundary,
             datastore_atmosphere=datastore_atmosphere,
+            **kwargs,
         )
 
         # Load graph with static features
@@ -49,6 +51,30 @@ class BaseGraphModel(ARModel):
             else:
                 setattr(self, name, attr_value)
 
+        # Determine grid hidden dim
+        if args.hidden_dim_grid is None:
+            hidden_dim_grid = args.hidden_dim
+        else:
+            hidden_dim_grid = args.hidden_dim_grid
+
+        # Determine edge hidden dim
+        if args.hidden_dim_edge is None:
+            hidden_dim_edge = hidden_dim_grid
+        else:
+            hidden_dim_edge = args.hidden_dim_edge
+
+        # Determine mesh node hidden dim
+        if args.hidden_dim_mesh_nodes is None:
+            self.hidden_dim_mesh_nodes = args.hidden_dim
+        else:
+            self.hidden_dim_mesh_nodes = args.hidden_dim_mesh_nodes
+
+        print(
+            f"Using hidden_dim_grid={hidden_dim_grid}, "
+            f"hidden_dim_mesh_nodes={self.hidden_dim_mesh_nodes}, "
+            f"hidden_dim_edge={hidden_dim_edge}, hidden_dim={args.hidden_dim}"
+        )
+
         # grid_dim from data + static
         self.g2m_edges, g2m_dim = self.g2m_features.shape
         self.m2g_edges, m2g_dim = self.m2g_features.shape
@@ -56,46 +82,73 @@ class BaseGraphModel(ARModel):
         # Define sub-models
         # Feature embedders for grid
         self.mlp_blueprint_end = [args.hidden_dim] * (args.hidden_layers + 1)
+        # For grid hidden dim
+        self.grid_mlp_blueprint_end = [hidden_dim_grid] * (
+            args.hidden_layers + 1
+        )
+        # For edge hidden dim
+        self.edge_mlp_blueprint_end = [hidden_dim_edge] * (
+            args.hidden_layers + 1
+        )
+
+        # Grid embedders output hidden_dim_grid
         self.interior_embedder = utils.make_mlp(
-            [self.interior_input_dim] + self.mlp_blueprint_end
+            [self.interior_input_dim] + self.grid_mlp_blueprint_end
         )
         if self.boundary_forced:
             self.boundary_embedder = utils.make_mlp(
-                [self.boundary_dim] + self.mlp_blueprint_end
+                [self.boundary_dim] + self.grid_mlp_blueprint_end
             )
         if self.atmosphere_forced and self.use_atmosphere_g2m:
             self.atmosphere_embedder = utils.make_mlp(
-                [self.atmosphere_dim] + self.mlp_blueprint_end
+                [self.atmosphere_dim] + self.grid_mlp_blueprint_end
             )
-        self.g2m_embedder = utils.make_mlp([g2m_dim] + self.mlp_blueprint_end)
-        self.m2g_embedder = utils.make_mlp([m2g_dim] + self.mlp_blueprint_end)
+
+        self.pre_mesh_proj = utils.make_mlp(
+            [hidden_dim_grid] + [args.hidden_dim]
+        )
+        self.post_mesh_proj = utils.make_mlp(
+            [args.hidden_dim] + [hidden_dim_grid]
+        )
+
+        self.g2m_embedder = utils.make_mlp(
+            [g2m_dim] + self.edge_mlp_blueprint_end
+        )
+        self.m2g_embedder = utils.make_mlp(
+            [m2g_dim] + self.edge_mlp_blueprint_end
+        )
 
         # GNNs
-        gnn_class = PropagationNet if args.vertical_propnets else InteractionNet
         # encoder
-        self.g2m_gnn = gnn_class(
-            self.g2m_edge_index,
-            args.hidden_dim,
+        self.g2m_gnn = FlexibleNet(
+            edge_index=self.g2m_edge_index,
+            send_node_dim=hidden_dim_grid,
+            rec_node_dim=self.hidden_dim_mesh_nodes,
+            edge_dim=hidden_dim_edge,
             hidden_layers=args.hidden_layers,
-            update_edges=False,
             num_rec=self.num_grid_connected_mesh_nodes,
+            propagation=True,
+            aggr="mean",
         )
         self.encoding_grid_mlp = utils.make_mlp(
-            [args.hidden_dim] + self.mlp_blueprint_end
+            [hidden_dim_grid] + self.grid_mlp_blueprint_end
         )
 
         # decoder
-        self.m2g_gnn = gnn_class(
-            self.m2g_edge_index,
-            args.hidden_dim,
+        self.m2g_gnn = FlexibleNet(
+            edge_index=self.m2g_edge_index,
+            send_node_dim=hidden_dim_grid,
+            rec_node_dim=hidden_dim_grid,
+            edge_dim=hidden_dim_edge,
             hidden_layers=args.hidden_layers,
-            update_edges=False,
             num_rec=self.num_grid_nodes,
+            propagation=False,
+            aggr="sum",
         )
 
-        # Output mapping (hidden_dim -> output_dim)
+        # Output mapping (hidden_dim_grid -> output_dim)
         self.output_map = utils.make_mlp(
-            [args.hidden_dim] * (args.hidden_layers + 1)
+            [hidden_dim_grid] * (args.hidden_layers + 1)
             + [self.grid_output_dim],
             layer_norm=False,
         )  # No layer norm on this one
@@ -112,189 +165,6 @@ class BaseGraphModel(ARModel):
         raise NotImplementedError(
             "num_grid_connected_mesh_nodes not implemented"
         )
-
-    def prepare_clamping_params(
-        self, config: NeuralLAMConfig, datastore: BaseDatastore
-    ):
-        """
-        Prepare parameters for clamping predicted values to valid range
-        """
-
-        # Read configs
-        state_feature_names = datastore.get_vars_names(category="state")
-        lower_lims = config.training.output_clamping.lower
-        upper_lims = config.training.output_clamping.upper
-
-        # Check that limits in config are for valid features
-        unknown_features_lower = set(lower_lims.keys()) - set(
-            state_feature_names
-        )
-        unknown_features_upper = set(upper_lims.keys()) - set(
-            state_feature_names
-        )
-        if unknown_features_lower or unknown_features_upper:
-            raise ValueError(
-                "State feature limits were provided for unknown features: "
-                f"{unknown_features_lower.union(unknown_features_upper)}"
-            )
-
-        # Constant parameters for clamping
-        sigmoid_sharpness = 1
-        softplus_sharpness = 1
-        sigmoid_center = 0
-        softplus_center = 0
-
-        normalize_clamping_lim = (
-            lambda x, feature_idx: (x - self.state_mean[feature_idx])
-            / self.state_std[feature_idx]
-        )
-
-        # Check which clamping functions to use for each feature
-        sigmoid_lower_upper_idx = []
-        sigmoid_lower_lims = []
-        sigmoid_upper_lims = []
-
-        softplus_lower_idx = []
-        softplus_lower_lims = []
-
-        softplus_upper_idx = []
-        softplus_upper_lims = []
-
-        for feature_idx, feature in enumerate(state_feature_names):
-            if feature in lower_lims and feature in upper_lims:
-                assert (
-                    lower_lims[feature] < upper_lims[feature]
-                ), f'Invalid clamping limits for feature "{feature}",\
-                     lower: {lower_lims[feature]}, larger than\
-                     upper: {upper_lims[feature]}'
-                sigmoid_lower_upper_idx.append(feature_idx)
-                sigmoid_lower_lims.append(
-                    normalize_clamping_lim(lower_lims[feature], feature_idx)
-                )
-                sigmoid_upper_lims.append(
-                    normalize_clamping_lim(upper_lims[feature], feature_idx)
-                )
-            elif feature in lower_lims and feature not in upper_lims:
-                softplus_lower_idx.append(feature_idx)
-                softplus_lower_lims.append(
-                    normalize_clamping_lim(lower_lims[feature], feature_idx)
-                )
-            elif feature not in lower_lims and feature in upper_lims:
-                softplus_upper_idx.append(feature_idx)
-                softplus_upper_lims.append(
-                    normalize_clamping_lim(upper_lims[feature], feature_idx)
-                )
-
-        self.register_buffer(
-            "sigmoid_lower_lims", torch.tensor(sigmoid_lower_lims)
-        )
-        self.register_buffer(
-            "sigmoid_upper_lims", torch.tensor(sigmoid_upper_lims)
-        )
-        self.register_buffer(
-            "softplus_lower_lims", torch.tensor(softplus_lower_lims)
-        )
-        self.register_buffer(
-            "softplus_upper_lims", torch.tensor(softplus_upper_lims)
-        )
-
-        self.register_buffer(
-            "clamp_lower_upper_idx", torch.tensor(sigmoid_lower_upper_idx)
-        )
-        self.register_buffer(
-            "clamp_lower_idx", torch.tensor(softplus_lower_idx)
-        )
-        self.register_buffer(
-            "clamp_upper_idx", torch.tensor(softplus_upper_idx)
-        )
-
-        # Define clamping functions
-        self.clamp_lower_upper = lambda x: (
-            self.sigmoid_lower_lims
-            + (self.sigmoid_upper_lims - self.sigmoid_lower_lims)
-            * torch.sigmoid(sigmoid_sharpness * (x - sigmoid_center))
-        )
-        self.clamp_lower = lambda x: (
-            self.softplus_lower_lims
-            + torch.nn.functional.softplus(
-                x - softplus_center, beta=softplus_sharpness
-            )
-        )
-        self.clamp_upper = lambda x: (
-            self.softplus_upper_lims
-            - torch.nn.functional.softplus(
-                softplus_center - x, beta=softplus_sharpness
-            )
-        )
-
-        self.inverse_clamp_lower_upper = lambda x: (
-            sigmoid_center
-            + utils.inverse_sigmoid(
-                (x - self.sigmoid_lower_lims)
-                / (self.sigmoid_upper_lims - self.sigmoid_lower_lims)
-            )
-            / sigmoid_sharpness
-        )
-        self.inverse_clamp_lower = lambda x: (
-            utils.inverse_softplus(
-                x - self.softplus_lower_lims, beta=softplus_sharpness
-            )
-            + softplus_center
-        )
-        self.inverse_clamp_upper = lambda x: (
-            -utils.inverse_softplus(
-                self.softplus_upper_lims - x, beta=softplus_sharpness
-            )
-            + softplus_center
-        )
-
-    def get_clamped_new_state(self, state_delta, prev_state):
-        """
-        Clamp prediction to valid range supplied in config
-        Returns the clamped new state after adding delta to original state
-
-        Instead of the new state being computed as
-        $X_{t+1} = X_t + \\delta = X_t + model(\\{X_t,X_{t-1},...\\}, forcing)$
-        The clamped values will be
-        $f(f^{-1}(X_t) + model(\\{X_t, X_{t-1},... \\}, forcing))$
-        Which means the model will learn to output values in the range of the
-        inverse clamping function
-
-        state_delta: (B, num_grid_nodes, feature_dim)
-        prev_state: (B, num_grid_nodes, feature_dim)
-        """
-
-        # Assign new state, but overwrite clamped values of each type later
-        new_state = prev_state + state_delta
-
-        # Sigmoid/logistic clamps between ]a,b[
-        if self.clamp_lower_upper_idx.numel() > 0:
-            idx = self.clamp_lower_upper_idx
-
-            new_state[:, :, idx] = self.clamp_lower_upper(
-                self.inverse_clamp_lower_upper(prev_state[:, :, idx])
-                + state_delta[:, :, idx]
-            )
-
-        # Softplus clamps between ]a,infty[
-        if self.clamp_lower_idx.numel() > 0:
-            idx = self.clamp_lower_idx
-
-            new_state[:, :, idx] = self.clamp_lower(
-                self.inverse_clamp_lower(prev_state[:, :, idx])
-                + state_delta[:, :, idx]
-            )
-
-        # Softplus clamps between ]-infty,b[
-        if self.clamp_upper_idx.numel() > 0:
-            idx = self.clamp_upper_idx
-
-            new_state[:, :, idx] = self.clamp_upper(
-                self.inverse_clamp_upper(prev_state[:, :, idx])
-                + state_delta[:, :, idx]
-            )
-
-        return new_state
 
     def get_num_mesh(self):
         """
@@ -331,22 +201,23 @@ class BaseGraphModel(ARModel):
         """
         Step state one step ahead using prediction model, X_{t-1}, X_t -> X_t+1
         prev_state: (B, num_grid_nodes, feature_dim), X_t
-        prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1}
+        prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1} (None if
+            input_steps==1)
         forcing: (B, num_grid_nodes, forcing_dim)
         boundary_forcing: (B, num_boundary_nodes, boundary_forcing_dim)
         atmosphere_forcing: (B, num_atmosphere_nodes, atmosphere_forcing_dim)
         """
         batch_size = prev_state.shape[0]
-
-        # Create full interior grid input features
-        interior_input_list = [
-            prev_state,
-            prev_prev_state,
-            forcing,
-            self.expand_to_batch(self.grid_static_features, batch_size),
-        ]
+        interior_input_list = [prev_state]
+        if prev_prev_state is not None:
+            interior_input_list.append(prev_prev_state)
+        interior_input_list.extend(
+            [
+                forcing,
+                self.expand_to_batch(self.grid_static_features, batch_size),
+            ]
+        )
         if self.concat_atmosphere:
-            # Atmosphere forcing on same grid as interior (past/future steps)
             interior_input_list.append(atmosphere_forcing)
         interior_features = torch.cat(interior_input_list, dim=-1)
         # (B, num_interior_nodes, interior_input_dim)
@@ -430,8 +301,14 @@ class BaseGraphModel(ARModel):
             interior_emb
         )  # (B, num_interior_nodes, d_h)
 
+        # Project up mesh rep to hidden dim of graph
+        mesh_rep = self.pre_mesh_proj(mesh_rep)  # g -> m
+
         # Run processor step
-        mesh_rep = self.process_step(mesh_rep)
+        mesh_rep = self.process_step(mesh_rep)  # m -> m
+
+        # Project down mesh rep to hidden dim of grid
+        mesh_rep = self.post_mesh_proj(mesh_rep)  # m -> g
 
         # Map back from mesh to grid
         m2g_emb_expanded = self.expand_to_batch(m2g_emb, batch_size)

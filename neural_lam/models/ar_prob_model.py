@@ -1,9 +1,9 @@
 # Standard library
+import os
 from typing import Union
 
 # Third-party
 import matplotlib.pyplot as plt
-import numcodecs
 import numpy as np
 import torch
 import wandb
@@ -34,6 +34,7 @@ class ARProbModel(ARModel):
         datastore: BaseDatastore,
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
+        **kwargs,
     ):
         super().__init__(
             args,
@@ -41,9 +42,19 @@ class ARProbModel(ARModel):
             datastore=datastore,
             datastore_boundary=datastore_boundary,
             datastore_atmosphere=datastore_atmosphere,
+            **kwargs,
         )
 
         self.ensemble_size = args.ensemble_size
+
+        # Per-rank RNG for reproducible but distinct noise across DDP ranks.
+        self._rank = self._get_rank()
+        self._rng_generators = {}  # device -> torch.Generator
+
+        # Tracks whether the test-set ensemble zarr store has been
+        # initialized (first batch written with mode="w"); subsequent
+        # batches append along init_time.
+        self._forecasts_zarr_initialized = False
 
         self.val_metrics.update(
             {
@@ -60,6 +71,26 @@ class ARProbModel(ARModel):
                 "spread_squared": [],
             }
         )
+
+    def _get_rank(self) -> int:
+        """Current process rank (0 if not distributed) used for per-rank RNG."""
+        if (
+            torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+        ):
+            return torch.distributed.get_rank()
+        return int(os.environ.get("LOCAL_RANK", 0))
+
+    def _get_generator(self, device: torch.device) -> torch.Generator:
+        """
+        Per-rank Generator for noise sampling. Seeded with args.seed + rank so
+        each DDP rank has a different but reproducible stream.
+        """
+        if device not in self._rng_generators:
+            self._rng_generators[device] = torch.Generator(
+                device=device
+            ).manual_seed(self.args.seed + self._rank)
+        return self._rng_generators[device]
 
     def sample_trajectories(
         self,
@@ -134,7 +165,7 @@ class ARProbModel(ARModel):
             trajectories,
             target_states,
             None,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             sum_vars=False,
         )
         # (B, pred_steps, d_f)
@@ -146,7 +177,7 @@ class ARProbModel(ARModel):
             ens_mean,
             target_states,
             None,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             sum_vars=False,
         )  # (B, pred_steps, d_f)
 
@@ -172,92 +203,235 @@ class ARProbModel(ARModel):
         self.log_spsk_ratio(self.val_metrics, "val")
         super().on_validation_epoch_end()
 
-    def _save_predictions_to_zarr(
+    def _save_ensemble_example_to_zarr(
         self,
-        batch_times: torch.Tensor,
-        batch_predictions: torch.Tensor,
-        batch_idx: int,
-        zarr_output_path: str,
+        time_row: torch.Tensor,
+        trajectories_s_t_n_d: torch.Tensor,
+        target_t_n_d: torch.Tensor,
+        example_index: int,
     ):
         """
-        Save state predictions for single batch to zarr dataset. Will append to
-        existing dataset for batch_idx > 0. Resulting dataset will contain a
-        variable named `state` with coordinates (start_time,
-        elapsed_forecast_duration, grid_index, state_feature).
-        Parameters
-        ----------
-        batch_times : torch.Tensor[int]
-            The times for the batch, given as epoch time in nanoseconds. Shape
-            is (B, args.pred_steps) where B is the batch size and
-            args.pred_steps is the number of prediction steps.
-        batch_predictions : torch.Tensor[float]
-            The predictions for the batch, given as (B, args.pred_steps,
-            num_grid_nodes, d_f) where B is the batch size, args.pred_steps is
-            the number of prediction steps, num_grid_nodes is the number of
-            grid nodes, and d_f is the number of state features.
-        batch_idx : int
-            The index of the batch in the current epoch.
+        Save one example's full ensemble (all members) and target to zarr.
+
+        Writes ``example_forecasts/ensemble_example_{example_index}.zarr`` under
+        ``logger.save_dir``, next to deterministic ``example_*.zarr`` files.
+        Variables: ``prediction`` (ensemble_member, ...), ``target`` (...).
+
+        Uses ``init_time`` and ``lead_time`` (timedelta) as forecast
+        coordinates, with 1-day step size.
         """
-        # Scale predictions back to original data scale
-        batch_predictions_rescaled = (
-            batch_predictions * self.state_std + self.state_mean
+        save_dir = os.path.join(self.logger.save_dir, "example_forecasts")
+        os.makedirs(save_dir, exist_ok=True)
+        zarr_path = os.path.join(
+            save_dir, f"ensemble_example_{example_index}.zarr"
         )
 
-        # Convert predictions to DataArray using _create_dataarray_from_tensor
-        das_pred = []
-        for i in range(len(batch_times)):
-            da_pred = self._create_dataarray_from_tensor(
-                tensor=batch_predictions_rescaled[i],
-                time=batch_times[i],
+        member_das = []
+        s_count = trajectories_s_t_n_d.shape[0]
+        for s in range(s_count):
+            scaled = trajectories_s_t_n_d[s] * self.state_std + self.state_mean
+            da_m = self._create_dataarray_from_tensor(
+                tensor=scaled,
+                time=time_row,
                 split="test",
                 category="state",
             )
-            # Unstack grid coords if necessary, this also avoids the need to
-            # try to store a MultiIndex zarr dataset which is not supported by
-            # xarray
             if isinstance(self._datastore, BaseRegularGridDatastore):
-                da_pred = self._datastore.unstack_grid_coords(da_pred)
+                da_m = self._datastore.unstack_grid_coords(da_m)
 
-            # First entry in da_pred.coords["time"] is time of first prediction,
-            # so init time of forecast is one time step before
-            t0 = da_pred.coords["time"].values[0] - np.array(
-                self.step_length, dtype="timedelta64[h]"
+            t0 = da_m.coords["time"].values[0] - np.array(
+                self._datastore.step_length, dtype="timedelta64[h]"
             )
-            da_pred.coords["start_time"] = t0
-            da_pred.coords["elapsed_forecast_duration"] = da_pred.time - t0
-            da_pred = da_pred.swap_dims({"time": "elapsed_forecast_duration"})
-            da_pred.name = "state"
-            das_pred.append(da_pred)
+            da_m.coords["init_time"] = t0
+            da_m.coords["lead_time"] = da_m.time - t0
+            da_m = da_m.swap_dims({"time": "lead_time"})
+            member_das.append(da_m)
 
-        da_pred_batch = xr.concat(das_pred, dim="start_time")
+        ens_dim = xr.DataArray(
+            np.arange(s_count, dtype=np.int64),
+            dims=("ensemble_member",),
+            name="ensemble_member",
+        )
+        da_prediction = xr.concat(member_das, dim=ens_dim)
+        da_prediction.name = "prediction"
 
-        # Apply chunking start_time and elapsed_forecast_duration, but leave
-        # whole state in one chunk
-        da_pred_batch = da_pred_batch.chunk(
-            {"start_time": 1, "elapsed_forecast_duration": 1}
+        target_scaled = target_t_n_d * self.state_std + self.state_mean
+        da_target = self._create_dataarray_from_tensor(
+            tensor=target_scaled,
+            time=time_row,
+            split="test",
+            category="state",
+        )
+        if isinstance(self._datastore, BaseRegularGridDatastore):
+            da_target = self._datastore.unstack_grid_coords(da_target)
+        t0_t = da_target.coords["time"].values[0] - np.array(
+            self._datastore.step_length, dtype="timedelta64[h]"
+        )
+        da_target.coords["init_time"] = t0_t
+        da_target.coords["lead_time"] = da_target.time - t0_t
+        da_target = da_target.swap_dims({"time": "lead_time"})
+        da_target.name = "target"
+
+        ds_out = xr.Dataset({"prediction": da_prediction, "target": da_target})
+        n_feat = ds_out.sizes["state_feature"]
+        n_lon = ds_out.sizes["longitude"]
+        n_lat = ds_out.sizes["latitude"]
+        encoding = {
+            "init_time": {
+                "units": "Seconds since 1970-01-01 00:00:00",
+                "dtype": "int64",
+            },
+            "prediction": {
+                # one chunk per (ensemble_member, lead_time);
+                # all features + full spatial
+                "chunks": (1, 1, n_feat, n_lon, n_lat),
+            },
+            "target": {
+                # one chunk per lead_time; all features + full spatial
+                "chunks": (1, n_feat, n_lon, n_lat),
+            },
+        }
+
+        logger.info(f"Saving ensemble example to {zarr_path}")
+        ds_out.to_zarr(
+            zarr_path,
+            mode="w",
+            consolidated=True,
+            encoding=encoding,
         )
 
-        if batch_idx == 0:
-            logger.info(f"Saving predictions to {zarr_output_path}")
-            compressor = numcodecs.Blosc(
-                cname="zstd", clevel=9, shuffle=numcodecs.Blosc.SHUFFLE
+    def _save_ensemble_batch_to_zarr(
+        self,
+        time_rows: torch.Tensor,
+        trajectories: torch.Tensor,
+        target_states: torch.Tensor,
+        zarr_path: str,
+        first_write: bool,
+    ) -> None:
+        """
+        Append one test batch's ensemble predictions and targets to a single
+        zarr store along ``init_time``.
+
+        Shapes:
+            time_rows: (B, pred_steps)
+            trajectories: (B, S, pred_steps, num_grid_nodes, d_f)
+            target_states: (B, pred_steps, num_grid_nodes, d_f)
+
+        The store is created on the first call (``first_write=True``) with
+        mode="w" and then extended with mode="a", append_dim="init_time" on
+        subsequent calls. Intended to be invoked from rank 0 only.
+        """
+        B = trajectories.shape[0]
+        S = trajectories.shape[1]
+
+        step_dt = np.array(self._datastore.step_length, dtype="timedelta64[h]")
+
+        per_sample = []
+        for b in range(B):
+            # Prediction: one DataArray per member -> concat along
+            # ensemble_member, then expand init_time into a dim.
+            member_das = []
+            for s in range(S):
+                scaled = trajectories[b, s] * self.state_std + self.state_mean
+                da_m = self._create_dataarray_from_tensor(
+                    tensor=scaled,
+                    time=time_rows[b],
+                    split="test",
+                    category="state",
+                )
+                if isinstance(self._datastore, BaseRegularGridDatastore):
+                    da_m = self._datastore.unstack_grid_coords(da_m)
+                t0 = da_m.coords["time"].values[0] - step_dt
+                da_m.coords["init_time"] = t0
+                da_m.coords["lead_time"] = da_m.time - t0
+                da_m = da_m.swap_dims({"time": "lead_time"}).drop_vars(
+                    "time", errors="ignore"
+                )
+                member_das.append(da_m)
+
+            ens_dim = xr.DataArray(
+                np.arange(S, dtype=np.int64),
+                dims=("ensemble_member",),
+                name="ensemble_member",
             )
-            da_pred_batch.to_zarr(
-                zarr_output_path,
-                mode="w",
-                consolidated=True,
-                encoding={
-                    "start_time": {
-                        "units": "Seconds since 1970-01-01 00:00:00",
-                        "dtype": "int64",
-                    },
-                    "state": {"compressor": compressor},
+            da_pred = xr.concat(member_das, dim=ens_dim)
+            da_pred = da_pred.expand_dims("init_time")
+            da_pred.name = "prediction"
+
+            # Target: single DataArray, expand init_time into a dim.
+            target_scaled = target_states[b] * self.state_std + self.state_mean
+            da_t = self._create_dataarray_from_tensor(
+                tensor=target_scaled,
+                time=time_rows[b],
+                split="test",
+                category="state",
+            )
+            if isinstance(self._datastore, BaseRegularGridDatastore):
+                da_t = self._datastore.unstack_grid_coords(da_t)
+            t0_t = da_t.coords["time"].values[0] - step_dt
+            da_t.coords["init_time"] = t0_t
+            da_t.coords["lead_time"] = da_t.time - t0_t
+            da_t = da_t.swap_dims({"time": "lead_time"}).drop_vars(
+                "time", errors="ignore"
+            )
+            da_t = da_t.expand_dims("init_time")
+            da_t.name = "target"
+
+            per_sample.append(
+                xr.Dataset({"prediction": da_pred, "target": da_t})
+            )
+
+        ds_batch = xr.concat(per_sample, dim="init_time")
+
+        if first_write:
+            n_feat = ds_batch.sizes["state_feature"]
+            n_lon = ds_batch.sizes["longitude"]
+            n_lat = ds_batch.sizes["latitude"]
+            n_lead = ds_batch.sizes["lead_time"]
+            encoding = {
+                "init_time": {
+                    "units": "Seconds since 1970-01-01 00:00:00",
+                    "dtype": "int64",
                 },
+                "prediction": {
+                    # (init_time, ensemble_member, lead_time,
+                    #  state_feature, longitude, latitude)
+                    "chunks": (1, 1, n_lead, n_feat, n_lon, n_lat),
+                },
+                "target": {
+                    # (init_time, lead_time, state_feature,
+                    #  longitude, latitude)
+                    "chunks": (1, n_lead, n_feat, n_lon, n_lat),
+                },
+            }
+            os.makedirs(os.path.dirname(zarr_path), exist_ok=True)
+            logger.info(
+                f"Initializing test-set ensemble zarr at {zarr_path} "
+                f"(first batch with {B} init_times)"
+            )
+            ds_batch.to_zarr(
+                zarr_path, mode="w", consolidated=True, encoding=encoding
             )
         else:
-            da_pred_batch.to_zarr(
-                zarr_output_path, mode="a", append_dim="start_time"
+            logger.info(
+                f"Appending {B} init_times to test-set ensemble zarr "
+                f"at {zarr_path}"
             )
+            ds_batch.to_zarr(zarr_path, mode="a", append_dim="init_time")
+
+    def _resolve_forecasts_zarr_path(self) -> str:
+        """Path of the combined test-set ensemble zarr store."""
+        path = getattr(self.args, "forecasts_zarr_path", None)
+        if path:
+            return path
+        return os.path.join(
+            self.logger.save_dir,
+            "ensemble_forecasts.zarr",
+        )
+
+    def on_test_epoch_start(self) -> None:
+        """Reset the test-set ensemble zarr flag before a new test run."""
+        self._forecasts_zarr_initialized = False
 
     # pylint: disable-next=unused-argument
     def test_step(self, batch, batch_idx):
@@ -288,7 +462,7 @@ class ARProbModel(ARModel):
             ens_mean,
             target_states,
             ens_std,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             sum_vars=False,
         )  # (B, pred_steps, d_f)
         self.test_metrics["ens_mae"].append(ens_maes)
@@ -296,10 +470,26 @@ class ARProbModel(ARModel):
             trajectories,
             target_states,
             None,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             sum_vars=False,
         )  # (B, pred_steps, d_f)
         self.test_metrics["crps_ens"].append(crps_batch)
+
+        # Save full test-set ensemble forecasts (all batches) to a single
+        # zarr store, appended along init_time. Rank 0 only.
+        if self.trainer.is_global_zero and getattr(
+            self.args, "save_forecasts", False
+        ):
+            time = batch[-1]
+            zarr_path = self._resolve_forecasts_zarr_path()
+            self._save_ensemble_batch_to_zarr(
+                time_rows=time,
+                trajectories=trajectories,
+                target_states=target_states,
+                zarr_path=zarr_path,
+                first_write=not self._forecasts_zarr_initialized,
+            )
+            self._forecasts_zarr_initialized = True
 
         # Plot example predictions (on rank 0 only)
         if (
@@ -311,6 +501,16 @@ class ARProbModel(ARModel):
                 trajectories.shape[0],
                 self.n_example_pred - self.plotted_examples,
             )
+
+            if getattr(self.args, "save_ensemble_zarr", False):
+                time = batch[-1]
+                for i in range(n_additional_examples):
+                    self._save_ensemble_example_to_zarr(
+                        time[i],
+                        trajectories[i],
+                        target_states[i],
+                        self.plotted_examples + i + 1,
+                    )
 
             self.plot_ensemble_examples(
                 batch,
@@ -443,14 +643,37 @@ class ARProbModel(ARModel):
             if time_steps is None:
                 # If no set of time steps given, iterate over all
                 # prediction horizon time steps
-                time_steps = range(1, len(target_slice) + 1)
+                time_steps = list(range(1, len(target_slice) + 1))
+            else:
+                time_steps = list(time_steps)
+
+            # Only plot selected (variable_index -> lead steps).
+            # When empty, keep previous behavior (all vars × all steps).
+            plot_filter = getattr(self.args, "var_leads_val_plot", None) or {}
+            if plot_filter:
+                allowed_t = set(time_steps) & {
+                    s for steps in plot_filter.values() for s in steps
+                }
+                time_steps = [t for t in time_steps if t in allowed_t]
 
             plot_dict = {}
             for t_i in time_steps:
                 time_title_part = (
                     f"t={t_i} ({self._datastore.step_length*t_i} h)"
                 )
-                # Create one figure per variable at this time step
+                var_names_list = self._datastore.get_vars_names("state")
+                var_units_list = self._datastore.get_vars_units("state")
+                var_items = list(
+                    enumerate(zip(var_names_list, var_units_list, var_vranges))
+                )
+                if plot_filter:
+                    var_items = [
+                        (var_i, (var_name, var_unit, var_vrange))
+                        for var_i, (var_name, var_unit, var_vrange) in var_items
+                        if var_i in plot_filter and t_i in plot_filter[var_i]
+                    ]
+
+                # Create one figure per selected variable at this time step
                 var_figs = {
                     var_name: vis.plot_ensemble_prediction(
                         [
@@ -466,13 +689,7 @@ class ARProbModel(ARModel):
                         title=f"{var_name} ({var_unit}), {time_title_part}",
                         vrange=var_vrange,
                     )
-                    for var_i, (var_name, var_unit, var_vrange) in enumerate(
-                        zip(
-                            self._datastore.get_vars_names("state"),
-                            self._datastore.get_vars_units("state"),
-                            var_vranges,
-                        )
-                    )
+                    for var_i, (var_name, var_unit, var_vrange) in var_items
                 }
 
                 if log:
@@ -537,6 +754,11 @@ class ARProbModel(ARModel):
             ) * (
                 spread / skill
             )  # (pred_steps, d_f)
+
+            # Strip density channels before plotting/logging
+            if self.use_density:
+                spsk_ratios = spsk_ratios[:, : self._density_idx]
+
             log_dict = self.create_metric_log_dict(
                 spsk_ratios, prefix, "spsk_ratio"
             )

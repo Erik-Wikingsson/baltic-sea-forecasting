@@ -29,9 +29,15 @@ class SI(EDM):
         datastore: BaseDatastore,
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
+        **kwargs,
     ):
         super().__init__(
-            args, config, datastore, datastore_boundary, datastore_atmosphere
+            args,
+            config,
+            datastore,
+            datastore_boundary,
+            datastore_atmosphere,
+            **kwargs,
         )
         self.GT = None
         self.sampler = "euler"  # TODO: Only euler for now
@@ -146,9 +152,13 @@ class SI(EDM):
         next_state: (B, N_grid, d_state),
             predicted weather state X_{t+1} at time t+1
         """
-        input_grid = torch.cat(
-            (prev_state, prev_prev_state, forcing), dim=-1
-        )  # (B, N_grid, d_input)
+        if prev_prev_state is not None:
+            input_grid = torch.cat(
+                (prev_state, prev_prev_state, forcing), dim=-1
+            )
+        else:
+            input_grid = torch.cat((prev_state, forcing), dim=-1)
+        # (B, N_grid, d_input)
 
         # definitely_sample
         EM_args = {
@@ -199,8 +209,12 @@ class SI(EDM):
         next_state: (B, N_grid, d_state), predicted weather state X_{t+1} at t+1
         loss: (B)
         """
-
-        input_grid = torch.cat((prev_state, prev_prev_state, forcing), dim=-1)
+        if prev_prev_state is not None:
+            input_grid = torch.cat(
+                (prev_state, prev_prev_state, forcing), dim=-1
+            )
+        else:
+            input_grid = torch.cat((prev_state, forcing), dim=-1)
 
         # Prepare batch
         D = {

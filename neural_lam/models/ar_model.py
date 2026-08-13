@@ -11,7 +11,7 @@ import torch
 import xarray as xr
 
 # Local
-from .. import metrics, vis
+from .. import metrics, utils, vis
 from ..config import NeuralLAMConfig
 from ..datastore import BaseDatastore
 from ..loss_weighting import get_state_feature_weighting
@@ -34,13 +34,39 @@ class ARModel(pl.LightningModule):
         datastore: BaseDatastore,
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
+        statistics_datastore: Union[BaseDatastore, None] = None,
+        statistics_datastore_boundary: Union[BaseDatastore, None] = None,
+        statistics_datastore_atmosphere: Union[BaseDatastore, None] = None,
     ):
         super().__init__()
-        self.save_hyperparameters(ignore=["datastore"])
+        self.save_hyperparameters(
+            ignore=[
+                "datastore",
+                "statistics_datastore",
+                "statistics_datastore_boundary",
+                "statistics_datastore_atmosphere",
+            ]
+        )
         self.args = args
+        self.input_steps = args.input_steps
         self._datastore = datastore
         self._datastore_boundary = datastore_boundary
         self._datastore_atmosphere = datastore_atmosphere
+        self._statistics_datastore = (
+            statistics_datastore
+            if statistics_datastore is not None
+            else datastore
+        )
+        self._statistics_datastore_boundary = (
+            statistics_datastore_boundary
+            if statistics_datastore_boundary is not None
+            else datastore_boundary
+        )
+        self._statistics_datastore_atmosphere = (
+            statistics_datastore_atmosphere
+            if statistics_datastore_atmosphere is not None
+            else datastore_atmosphere
+        )
         self.num_state_vars = datastore.get_num_data_vars(category="state")
         num_forcing_vars = datastore.get_num_data_vars(category="forcing")
         # Load masks
@@ -52,20 +78,60 @@ class ARModel(pl.LightningModule):
         )[
             self.surface_mask
         ]  # (num_grid_nodes, d_features), 1 for non-land
-        # Load static features standardized
-        da_static_features = datastore.get_dataarray(
+
+        # Optionally build latitude-weighted grid loss mask (approx. equal-area)
+        # using cos(latitude), normalized to unit mean over interior grid.
+        xy = datastore.get_xy("state", stacked=True)  # (N_full, 2) [lon, lat]
+        xy_surface = xy[self.surface_mask]  # (num_grid_nodes, 2)
+        lat_rad = np.deg2rad(xy_surface[:, 1].astype(np.float64))
+        cos_lat = np.cos(lat_rad).astype(np.float32)
+        interior_mask_arr = self.interior_mask.astype(np.float32)
+        if getattr(config.training, "lat_weighted_loss", False):
+            # Broadcast cos(lat) over state features and zero out land points
+            loss_mask_np = interior_mask_arr * cos_lat[:, np.newaxis]
+            total_weight = loss_mask_np.sum()
+            num_active = interior_mask_arr.sum()
+            # Normalize so mean weight over active grid points is 1
+            loss_mask_np *= num_active / total_weight
+        else:
+            # Uniform weighting over interior grid points
+            loss_mask_np = interior_mask_arr
+
+        # Load static features and state stats from the statistics datastore
+        # (falls back to the main datastore when no separate one is provided)
+        da_static_features = self._statistics_datastore.get_dataarray(
             category="static", split=None, standardize=True
         )[self.surface_mask]
-        da_state_stats = datastore.get_standardization_dataarray(
-            category="state"
+        # TODO: load static features from main ds and stats from stats ds
+        # also for boundary, atmosphere (baltic sea had no grid mismatch).
+        # Here we replace 2 nans * 7 features with zero in global finetune.
+        _grid_static = torch.tensor(
+            da_static_features.values, dtype=torch.float32
+        )
+        if not torch.isfinite(_grid_static).all():
+            n_bad = int((~torch.isfinite(_grid_static)).sum().item())
+            warnings.warn(f"Replacing {n_bad} static grid values with 0")
+            _grid_static = torch.nan_to_num(_grid_static, nan=0.0)
+        da_state_stats = (
+            self._statistics_datastore.get_standardization_dataarray(
+                category="state"
+            )
         )
         num_past_forcing_steps = args.num_past_forcing_steps
         num_future_forcing_steps = args.num_future_forcing_steps
+        include_current_forcing_step = bool(
+            int(getattr(args, "current_forcing_step", 1))
+        )
+        num_forcing_steps = (
+            num_past_forcing_steps
+            + num_future_forcing_steps
+            + (1 if include_current_forcing_step else 0)
+        )
 
         # Load static features for grid/data,
         self.register_buffer(
             "grid_static_features",
-            torch.tensor(da_static_features.values, dtype=torch.float32),
+            _grid_static,
             persistent=False,
         )
 
@@ -88,12 +154,32 @@ class ARModel(pl.LightningModule):
             ),
         }
 
+        # Density channel: extend stats and store indices
+        density_cfg = getattr(config.training, "density_channel", None)
+        self.use_density = density_cfg is not None
+        if self.use_density:
+            state_feature_names = datastore.get_vars_names(category="state")
+            self._density_idx = len(state_feature_names)
+            self._associated_idxs = [
+                state_feature_names.index(v)
+                for v in density_cfg.associated_vars
+            ]
+            self.num_state_vars += 1
+            for key in state_stats:
+                state_stats[key] = torch.cat(
+                    [state_stats[key], torch.zeros(1)], dim=0
+                )
+            state_stats["state_std"][-1] = 1.0
+            state_stats["diff_std"][-1] = 1.0
+
         for key, val in state_stats.items():
             self.register_buffer(key, val, persistent=False)
 
         state_feature_weights = get_state_feature_weighting(
             config=config, datastore=datastore
         )
+        if self.use_density:
+            state_feature_weights = np.append(state_feature_weights, 1.0)
         self.feature_weights = torch.tensor(
             state_feature_weights, dtype=torch.float32
         )
@@ -123,10 +209,9 @@ class ARModel(pl.LightningModule):
         self.num_total_grid_nodes = self.num_grid_nodes
 
         self.interior_input_dim = (
-            2 * self.num_state_vars
+            self.input_steps * self.num_state_vars
             + grid_static_dim
-            + num_forcing_vars
-            * (num_past_forcing_steps + num_future_forcing_steps + 1)
+            + num_forcing_vars * num_forcing_steps
         )
 
         # If datastore_boundary is given, the model is forced from boundary
@@ -137,8 +222,10 @@ class ARModel(pl.LightningModule):
             surface_mask_boundary = datastore_boundary.get_mask(
                 surface=True, stacked=True, invert=False
             )
-            da_boundary_static_features = datastore_boundary.get_dataarray(
-                category="static", split=None, standardize=True
+            da_boundary_static_features = (
+                self._statistics_datastore_boundary.get_dataarray(
+                    category="static", split=None, standardize=True
+                )
             )[
                 surface_mask_boundary
             ]  # mask static features
@@ -163,10 +250,17 @@ class ARModel(pl.LightningModule):
 
             num_past_boundary_steps = args.num_past_boundary_steps
             num_future_boundary_steps = args.num_future_boundary_steps
+            include_current_boundary_step = bool(
+                int(getattr(args, "current_boundary_step", 1))
+            )
+            num_boundary_steps = (
+                num_past_boundary_steps
+                + num_future_boundary_steps
+                + (1 if include_current_boundary_step else 0)
+            )
             self.boundary_dim = (
                 boundary_static_dim
-                + num_boundary_forcing_vars
-                * (num_past_boundary_steps + num_future_boundary_steps + 1)
+                + num_boundary_forcing_vars * num_boundary_steps
             )
             self.num_total_grid_nodes += self.num_boundary_nodes
 
@@ -185,8 +279,16 @@ class ARModel(pl.LightningModule):
             )
             num_past_atmosphere_steps = args.num_past_atmosphere_steps
             num_future_atmosphere_steps = args.num_future_atmosphere_steps
-            atmosphere_windowed_dim = num_atmosphere_forcing_vars * (
-                num_past_atmosphere_steps + num_future_atmosphere_steps + 1
+            include_current_atmosphere_step = bool(
+                int(getattr(args, "current_atmosphere_step", 1))
+            )
+            num_atmosphere_steps = (
+                num_past_atmosphere_steps
+                + num_future_atmosphere_steps
+                + (1 if include_current_atmosphere_step else 0)
+            )
+            atmosphere_windowed_dim = (
+                num_atmosphere_forcing_vars * num_atmosphere_steps
             )
 
             if self.use_atmosphere_g2m:
@@ -195,7 +297,7 @@ class ARModel(pl.LightningModule):
                     stacked=True, invert=False
                 )
                 da_atmosphere_static_features = (
-                    datastore_atmosphere.get_dataarray(
+                    self._statistics_datastore_atmosphere.get_dataarray(
                         category="static", split=None, standardize=True
                     )[atmosphere_mask]
                 )
@@ -223,6 +325,24 @@ class ARModel(pl.LightningModule):
 
         # Instantiate loss function
         self.loss = metrics.get_metric(args.loss)
+
+        # Extend masks for density channel (surface variable, same mask as any
+        # single-level ocean variable)
+        if self.use_density:
+            density_col = loss_mask_np[:, 0:1]
+            loss_mask_np = np.concatenate([loss_mask_np, density_col], axis=1)
+            density_interior = self.interior_mask[:, 0:1]
+            self.interior_mask = np.concatenate(
+                [self.interior_mask, density_interior], axis=1
+            )
+
+        # Grid loss/metric mask (float, can encode both mask and latitude
+        # weighting). Shape (num_grid_nodes, d_features).
+        self.register_buffer(
+            "loss_mask",
+            torch.tensor(loss_mask_np, dtype=torch.float32),
+            persistent=False,
+        )
 
         self.register_buffer(
             "interior_mask_bool",
@@ -260,6 +380,212 @@ class ARModel(pl.LightningModule):
         else:
             self.unroll_ckpt_func = lambda f, *args: f(*args)
 
+    def prepare_clamping_params(
+        self, config: NeuralLAMConfig, datastore: BaseDatastore
+    ):
+        """
+        Prepare parameters for clamping predicted values to valid range.
+        Call this from subclass __init__ after super().__init__.
+        """
+        state_feature_names = datastore.get_vars_names(category="state")
+        lower_lims = config.training.output_clamping.lower
+        upper_lims = config.training.output_clamping.upper
+
+        unknown_features_lower = set(lower_lims.keys()) - set(
+            state_feature_names
+        )
+        unknown_features_upper = set(upper_lims.keys()) - set(
+            state_feature_names
+        )
+        if unknown_features_lower or unknown_features_upper:
+            raise ValueError(
+                "State feature limits were provided for unknown features: "
+                f"{unknown_features_lower.union(unknown_features_upper)}"
+            )
+
+        sigmoid_sharpness = 1
+        softplus_sharpness = 1
+        sigmoid_center = 0
+        softplus_center = 0
+
+        normalize_clamping_lim = (
+            lambda x, feature_idx: (x - self.state_mean[feature_idx])
+            / self.state_std[feature_idx]
+        )
+
+        sigmoid_lower_upper_idx = []
+        sigmoid_lower_lims = []
+        sigmoid_upper_lims = []
+
+        softplus_lower_idx = []
+        softplus_lower_lims = []
+
+        softplus_upper_idx = []
+        softplus_upper_lims = []
+
+        for feature_idx, feature in enumerate(state_feature_names):
+            if feature in lower_lims and feature in upper_lims:
+                assert lower_lims[feature] < upper_lims[feature], (
+                    f'Invalid clamping limits for feature "{feature}", '
+                    f"lower: {lower_lims[feature]}, larger than "
+                    f"upper: {upper_lims[feature]}"
+                )
+                sigmoid_lower_upper_idx.append(feature_idx)
+                sigmoid_lower_lims.append(
+                    normalize_clamping_lim(lower_lims[feature], feature_idx)
+                )
+                sigmoid_upper_lims.append(
+                    normalize_clamping_lim(upper_lims[feature], feature_idx)
+                )
+            elif feature in lower_lims and feature not in upper_lims:
+                softplus_lower_idx.append(feature_idx)
+                softplus_lower_lims.append(
+                    normalize_clamping_lim(lower_lims[feature], feature_idx)
+                )
+            elif feature not in lower_lims and feature in upper_lims:
+                softplus_upper_idx.append(feature_idx)
+                softplus_upper_lims.append(
+                    normalize_clamping_lim(upper_lims[feature], feature_idx)
+                )
+
+        self.register_buffer(
+            "sigmoid_lower_lims", torch.tensor(sigmoid_lower_lims)
+        )
+        self.register_buffer(
+            "sigmoid_upper_lims", torch.tensor(sigmoid_upper_lims)
+        )
+        self.register_buffer(
+            "softplus_lower_lims", torch.tensor(softplus_lower_lims)
+        )
+        self.register_buffer(
+            "softplus_upper_lims", torch.tensor(softplus_upper_lims)
+        )
+
+        self.register_buffer(
+            "clamp_lower_upper_idx", torch.tensor(sigmoid_lower_upper_idx)
+        )
+        self.register_buffer(
+            "clamp_lower_idx", torch.tensor(softplus_lower_idx)
+        )
+        self.register_buffer(
+            "clamp_upper_idx", torch.tensor(softplus_upper_idx)
+        )
+
+        self.clamp_lower_upper = lambda x: (
+            self.sigmoid_lower_lims
+            + (self.sigmoid_upper_lims - self.sigmoid_lower_lims)
+            * torch.sigmoid(sigmoid_sharpness * (x - sigmoid_center))
+        )
+        self.clamp_lower = lambda x: (
+            self.softplus_lower_lims
+            + torch.nn.functional.softplus(
+                x - softplus_center, beta=softplus_sharpness
+            )
+        )
+        self.clamp_upper = lambda x: (
+            self.softplus_upper_lims
+            - torch.nn.functional.softplus(
+                softplus_center - x, beta=softplus_sharpness
+            )
+        )
+
+        self.inverse_clamp_lower_upper = lambda x: (
+            sigmoid_center
+            + utils.inverse_sigmoid(
+                (x - self.sigmoid_lower_lims)
+                / (self.sigmoid_upper_lims - self.sigmoid_lower_lims)
+            )
+            / sigmoid_sharpness
+        )
+        self.inverse_clamp_lower = lambda x: (
+            utils.inverse_softplus(
+                x - self.softplus_lower_lims, beta=softplus_sharpness
+            )
+            + softplus_center
+        )
+        self.inverse_clamp_upper = lambda x: (
+            -utils.inverse_softplus(
+                self.softplus_upper_lims - x, beta=softplus_sharpness
+            )
+            + softplus_center
+        )
+
+    def apply_density_threshold(self, state):
+        """
+        Density channel thresholding for autoregressive rollout.
+
+        The predicted density channel is passed through sigmoid and thresholded
+        at 0.5.  Where density < 0.5, the density channel and all associated
+        ice variables are set to their normalized-zero values. Where density
+        >= 0.5, density is set to 1 (in normalized space).
+
+        This is applied only to the state that is fed back as input to the next
+        step, not to the state used for loss computation.
+
+        state: (B, num_grid_nodes, d_f) in standardized space
+        returns: state with density thresholding applied (same shape)
+        """
+        if not self.use_density:
+            return state
+
+        idx_d = self._density_idx
+        density_raw = state[:, :, idx_d]
+        density_sigmoid = torch.sigmoid(density_raw)
+        ice_present = density_sigmoid > 0.5
+
+        state = state.clone()
+        norm_zero = -self.state_mean / self.state_std
+        state[:, :, idx_d] = torch.where(
+            ice_present,
+            (1.0 - self.state_mean[idx_d]) / self.state_std[idx_d],
+            norm_zero[idx_d],
+        )
+        for idx_v in self._associated_idxs:
+            state[:, :, idx_v] = torch.where(
+                ice_present, state[:, :, idx_v], norm_zero[idx_v]
+            )
+        return state
+
+    def get_clamped_new_state(self, state_delta, prev_state):
+        """
+        Clamp prediction to valid range supplied in config.
+        Returns the clamped new state after adding delta to original state.
+
+        Instead of the new state being computed as
+        $X_{t+1} = X_t + delta$
+        The clamped values will be
+        $f(f^{-1}(X_t) + delta)$
+        which ensures the output stays in the valid range while remaining
+        differentiable.
+
+        state_delta: (B, num_grid_nodes, feature_dim)
+        prev_state: (B, num_grid_nodes, feature_dim)
+        """
+        new_state = prev_state + state_delta
+
+        if self.clamp_lower_upper_idx.numel() > 0:
+            idx = self.clamp_lower_upper_idx
+            new_state[:, :, idx] = self.clamp_lower_upper(
+                self.inverse_clamp_lower_upper(prev_state[:, :, idx])
+                + state_delta[:, :, idx]
+            )
+
+        if self.clamp_lower_idx.numel() > 0:
+            idx = self.clamp_lower_idx
+            new_state[:, :, idx] = self.clamp_lower(
+                self.inverse_clamp_lower(prev_state[:, :, idx])
+                + state_delta[:, :, idx]
+            )
+
+        if self.clamp_upper_idx.numel() > 0:
+            idx = self.clamp_upper_idx
+            new_state[:, :, idx] = self.clamp_upper(
+                self.inverse_clamp_upper(prev_state[:, :, idx])
+                + state_delta[:, :, idx]
+            )
+
+        return new_state
+
     def _create_dataarray_from_tensor(
         self,
         tensor: torch.Tensor,
@@ -291,27 +617,132 @@ class ARModel(pl.LightningModule):
         # TODO: creating an instance of WeatherDataset here on every call is
         # not how this should be done but whether WeatherDataset should be
         # provided to ARModel or where to put plotting still needs discussion
+        sdb = self._statistics_datastore_boundary
+        sda = self._statistics_datastore_atmosphere
         weather_dataset = WeatherDataset(
             datastore=self._datastore,
             datastore_boundary=self._datastore_boundary,
             datastore_atmosphere=self._datastore_atmosphere,
             split=split,
             use_atmosphere_g2m=getattr(self, "use_atmosphere_g2m", False),
+            statistics_datastore=self._statistics_datastore,
+            statistics_datastore_boundary=sdb,
+            statistics_datastore_atmosphere=sda,
         )
         time = time.detach().cpu()
         time = np.array(time, dtype="datetime64[ns]")
 
         tensor = tensor.detach().cpu()
+        if self.use_density and category == "state":
+            tensor = tensor[..., : self._density_idx]
         da = weather_dataset.create_dataarray_from_tensor(
             tensor=tensor, time=time, category=category
         )
         return da
 
-    def configure_optimizers(self):
-        opt = torch.optim.AdamW(
-            self.parameters(), lr=self.args.lr, betas=(0.9, 0.95)
+    def _split_params_for_muon(self, flatten):
+        """Partition parameters into groups for the Muon optimizer.
+
+        Muon (``torch.optim.Muon``) is only used for 2D hidden weight matrices.
+        Embeddings, the final output layer (matched by name via
+        ``args.muon_exclude_patterns``) and all 1D parameters (biases, norm
+        gains) are optimized by AdamW instead. Buffers (static graph/grid
+        features, stats) are not in ``named_parameters()`` and are excluded
+        automatically.
+
+        Parameters
+        ----------
+        flatten : bool
+            If True (the ``muon_flat`` option), contiguous >2D weights (e.g. 4D
+            conv filters) are flattened to 2D and optimized by Muon. Otherwise
+            they go to AdamW.
+
+        Returns
+        -------
+        (muon_params, conv_muon_params, adamw_params) : tuple of lists
+        """
+        exclude_patterns = getattr(self.args, "muon_exclude_patterns", [])
+
+        muon_params = []
+        conv_muon_params = []
+        adamw_params = []
+
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+
+            excluded = any(pat in name for pat in exclude_patterns)
+            if excluded or param.ndim < 2:
+                adamw_params.append(param)
+            elif param.ndim == 2:
+                muon_params.append(param)
+            else:
+                # >2D (e.g. conv). Only Muon-optimize if flattening is enabled
+                # and the tensor is contiguous (required for a storage-sharing
+                # 2D view).
+                if flatten and param.is_contiguous():
+                    conv_muon_params.append(param)
+                else:
+                    if flatten:
+                        print(
+                            f"[optimizer] {name} is non-contiguous "
+                            f"{tuple(param.shape)}; routing to AdamW."
+                        )
+                    adamw_params.append(param)
+
+        def _summary(params):
+            return len(params), sum(p.numel() for p in params)
+
+        m_t, m_n = _summary(muon_params)
+        c_t, c_n = _summary(conv_muon_params)
+        a_t, a_n = _summary(adamw_params)
+        opt_name = "muon_flat" if flatten else "muon"
+        print(
+            f"[optimizer={opt_name}] "
+            f"Muon(2D): {m_t} tensors, {m_n:,} | "
+            f"Muon(conv-flat): {c_t} tensors, {c_n:,} | "
+            f"AdamW: {a_t} tensors, {a_n:,}"
         )
-        return opt
+
+        return muon_params, conv_muon_params, adamw_params
+
+    def configure_optimizers(self):
+        opt_name = getattr(self.args, "optimizer", "adamw")
+        if opt_name == "adamw":
+            opt = torch.optim.AdamW(
+                self.parameters(), lr=self.args.lr, betas=(0.9, 0.95), weight_decay=0.1
+            )
+        elif opt_name in ("muon", "muon_flat"):
+            from ..optim import MuonAuxAdam
+
+            muon_params, conv_muon_params, adamw_params = (
+                self._split_params_for_muon(flatten=(opt_name == "muon_flat"))
+            )
+            opt = MuonAuxAdam(
+                muon_params,
+                conv_muon_params,
+                adamw_params,
+                lr=self.args.lr,
+                weight_decay=self.args.muon_weight_decay,
+                momentum=self.args.muon_momentum,
+                betas=(0.9, 0.95),
+            )
+        else:
+            raise ValueError(f"Unknown --optimizer {opt_name}")
+
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt,
+            T_max=self.args.epochs,
+            eta_min=self.args.min_lr if hasattr(self.args, "min_lr") else 0.0,
+        )
+        return {
+            "optimizer": opt,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "epoch",
+                "frequency": 1,
+            },
+        }
 
     @staticmethod
     def expand_to_batch(x, batch_size):
@@ -346,13 +777,17 @@ class ARModel(pl.LightningModule):
     ):
         """
         Roll out prediction taking multiple autoregressive steps with model
-        init_states: (B, 2, num_grid_nodes, d_f)
+        init_states: (B, input_steps, num_grid_nodes, d_f)
         forcing: (B, pred_steps, num_grid_nodes, d_static_f)
         boundary_forcing: (B, pred_steps, num_boundary_nodes, d_boundary_f)
         atmosphere_forcing:(B, pred_steps, num_atmosphere_nodes, d_atmosphere_f)
         """
-        prev_prev_state = init_states[:, 0]
-        prev_state = init_states[:, 1]
+        if self.input_steps == 1:
+            prev_state = init_states[:, 0]
+            prev_prev_state = None
+        else:
+            prev_prev_state = init_states[:, 0]
+            prev_state = init_states[:, 1]
         prediction_list = []
         pred_std_list = []
         pred_steps = forcing.shape[1]
@@ -385,9 +820,14 @@ class ARModel(pl.LightningModule):
             if self.output_std:
                 pred_std_list.append(pred_std)
 
+            # Apply density thresholding to the state fed back as input
+            # (raw predictions kept for loss computation)
+            feedback_state = self.apply_density_threshold(pred_state)
+
             # Update conditioning states
-            prev_prev_state = prev_state
-            prev_state = pred_state
+            if self.input_steps >= 2:
+                prev_prev_state = prev_state
+            prev_state = feedback_state
 
         prediction = torch.stack(
             prediction_list, dim=1
@@ -404,7 +844,7 @@ class ARModel(pl.LightningModule):
     def common_step(self, batch):
         """
         Predict on single batch batch consists of:
-        init_states: (B, 2, num_grid_nodes, d_features)
+        init_states: (B, input_steps, num_grid_nodes, d_features)
         target_states: (B, pred_steps, num_grid_nodes, d_features)
         forcing_features: (B, pred_steps, num_grid_nodes, d_forcing),
         boundary_forcing:
@@ -438,9 +878,7 @@ class ARModel(pl.LightningModule):
 
         # Compute loss
         batch_loss = torch.mean(
-            self.loss(
-                prediction, target, pred_std, mask=self.interior_mask_bool
-            )
+            self.loss(prediction, target, pred_std, mask=self.loss_mask)
         )  # mean over unrolled times and batch
 
         log_dict = {"train_loss": batch_loss}
@@ -474,9 +912,7 @@ class ARModel(pl.LightningModule):
         prediction, target, pred_std, _ = self.common_step(batch)
 
         time_step_loss = torch.mean(
-            self.loss(
-                prediction, target, pred_std, mask=self.interior_mask_bool
-            ),
+            self.loss(prediction, target, pred_std, mask=self.loss_mask),
             dim=0,
         )  # (time_steps-1)
         mean_loss = torch.mean(time_step_loss)
@@ -501,7 +937,7 @@ class ARModel(pl.LightningModule):
             prediction,
             target,
             pred_std,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             sum_vars=False,
         )  # (B, pred_steps, d_f)
         self.val_metrics["mse"].append(entry_mses)
@@ -528,9 +964,7 @@ class ARModel(pl.LightningModule):
         # pred_steps, num_grid_nodes, d_f) or (d_f,)
 
         time_step_loss = torch.mean(
-            self.loss(
-                prediction, target, pred_std, mask=self.interior_mask_bool
-            ),
+            self.loss(prediction, target, pred_std, mask=self.loss_mask),
             dim=0,
         )  # (time_steps-1,)
         mean_loss = torch.mean(time_step_loss)
@@ -559,7 +993,7 @@ class ARModel(pl.LightningModule):
                 prediction,
                 target,
                 pred_std,
-                mask=self.interior_mask_bool,
+                mask=self.loss_mask,
                 sum_vars=False,
             )  # (B, pred_steps, d_f)
             self.test_metrics[metric_name].append(batch_metric_vals)
@@ -576,7 +1010,7 @@ class ARModel(pl.LightningModule):
             prediction,
             target,
             pred_std,
-            mask=self.interior_mask_bool,
+            mask=self.loss_mask,
             average_grid=False,
         )  # (B, pred_steps, num_grid_nodes)
         log_spatial_losses = spatial_loss[
@@ -659,18 +1093,24 @@ class ARModel(pl.LightningModule):
             save_path = os.path.join(save_dir, example_name)
             ds_examples.to_zarr(save_path, mode="w")
 
+            plot_pred = pred_slice
+            plot_target = target_slice
+            if self.use_density:
+                plot_pred = pred_slice[..., : self._density_idx]
+                plot_target = target_slice[..., : self._density_idx]
+
             var_vmin = (
                 torch.minimum(
-                    pred_slice.flatten(0, 1).min(dim=0)[0],
-                    target_slice.flatten(0, 1).min(dim=0)[0],
+                    plot_pred.flatten(0, 1).min(dim=0)[0],
+                    plot_target.flatten(0, 1).min(dim=0)[0],
                 )
                 .cpu()
                 .numpy()
             )  # (d_f,)
             var_vmax = (
                 torch.maximum(
-                    pred_slice.flatten(0, 1).max(dim=0)[0],
-                    target_slice.flatten(0, 1).max(dim=0)[0],
+                    plot_pred.flatten(0, 1).max(dim=0)[0],
+                    plot_target.flatten(0, 1).max(dim=0)[0],
                 )
                 .cpu()
                 .numpy()
@@ -788,6 +1228,12 @@ class ARModel(pl.LightningModule):
                 metric_tensor_averaged = torch.mean(metric_tensor, dim=0)
                 # (pred_steps, d_f)
 
+                # Strip density channel before plotting/logging
+                if self.use_density:
+                    metric_tensor_averaged = metric_tensor_averaged[
+                        :, : self._density_idx
+                    ]
+
                 # Take square root after averaging to change squared metrics
                 if "mse" in metric_name:
                     metric_tensor_averaged = torch.sqrt(metric_tensor_averaged)
@@ -797,7 +1243,8 @@ class ARModel(pl.LightningModule):
                     metric_name = metric_name[: -len("_squared")]
 
                 # NOTE: we here assume rescaling for all metrics is linear
-                metric_rescaled = metric_tensor_averaged * self.state_std
+                state_std = self.state_std[: metric_tensor_averaged.shape[1]]
+                metric_rescaled = metric_tensor_averaged * state_std
                 # (pred_steps, d_f)
                 log_dict.update(
                     self.create_metric_log_dict(
@@ -877,7 +1324,8 @@ class ARModel(pl.LightningModule):
             )
             os.makedirs(pdf_loss_maps_dir, exist_ok=True)
             for t_i, fig in zip(self.args.val_steps_to_log, pdf_loss_map_figs):
-                fig.savefig(os.path.join(pdf_loss_maps_dir, f"loss_t{t_i}.pdf"))
+                fig.savefig(os.path.join(
+                    pdf_loss_maps_dir, f"loss_t{t_i}.pdf"))
             # save mean spatial loss as .pt file also
             torch.save(
                 mean_spatial_loss.cpu(),
@@ -909,4 +1357,20 @@ class ARModel(pl.LightningModule):
                 del loaded_state_dict[old_key]
         if not self.restore_opt:
             opt = self.configure_optimizers()
-            checkpoint["optimizer_states"] = [opt.state_dict()]
+            if isinstance(opt, dict):
+                checkpoint["optimizer_states"] = [
+                    opt["optimizer"].state_dict()]
+                lr_cfg = opt.get("lr_scheduler")
+                if lr_cfg is not None:
+                    sched = (
+                        lr_cfg["scheduler"]
+                        if isinstance(lr_cfg, dict) and "scheduler" in lr_cfg
+                        else lr_cfg
+                    )
+                    # Match current schedule (e.g. SequentialLR on finetune)
+                    checkpoint["lr_schedulers"] = [sched.state_dict()]
+                else:
+                    checkpoint.pop("lr_schedulers", None)
+            else:
+                checkpoint["optimizer_states"] = [opt.state_dict()]
+                checkpoint.pop("lr_schedulers", None)

@@ -2,26 +2,34 @@
 import networkx
 import numpy as np
 import scipy
+import scipy.spatial
 import torch
 import torch_geometric as pyg
 from torch_geometric.utils.convert import from_networkx
 
 
-def node_lat_lon_to_cart(node_lat_lon):
-    """Convert node positions from lat-lon to cartesian.
+def node_lon_lat_to_cart(node_xy):
+    """Convert node positions from longitude-latitude to
+    Cartesian on unit sphere.
+
+    Convention: x = longitude (column 0), y = latitude (column 1), matching
+    datastore get_xy and plotting (x-axis = lon, y-axis = lat).
 
     Parameters
     ----------
-    node_pos_lat_lon : np.ndarray
-        (N_nodes, 2) array, lat-lon coordinates.
+    node_xy : np.ndarray
+        (N_nodes, 2) array, columns [longitude, latitude] in degrees.
 
     Returns
     -------
     np.ndarray
-        (N_nodes, 3) array, cartesian coordinates.
+        (N_nodes, 3) array, Cartesian coordinates on unit sphere.
     """
-    phi_grid = np.deg2rad(node_lat_lon[:, 0])
-    theta_grid = np.deg2rad(90 - node_lat_lon[:, 1])
+    lon_rad = np.deg2rad(node_xy[:, 0])
+    lat_rad = np.deg2rad(node_xy[:, 1])
+    # theta = 90 - lat (so z = cos(theta) = sin(lat)), phi = lon
+    theta_grid = np.deg2rad(90.0) - lat_rad
+    phi_grid = lon_rad
 
     cart = np.stack(
         [
@@ -32,6 +40,90 @@ def node_lat_lon_to_cart(node_lat_lon):
         axis=-1,
     )
     return cart
+
+
+def node_cart_to_lon_lat(node_cart: np.ndarray) -> np.ndarray:
+    """Convert (N, 3) Cartesian on unit sphere to (N, 2) [longitude, latitude]
+    in degrees. Inverse of node_lon_lat_to_cart (x=lon, y=lat convention)."""
+    r = np.linalg.norm(node_cart, axis=1, keepdims=True)
+    node_cart = node_cart / (r + 1e-12)
+    lon_rad = np.arctan2(node_cart[:, 1], node_cart[:, 0])
+    lat_rad = np.arcsin(np.clip(node_cart[:, 2], -1.0, 1.0))
+    return np.stack([np.rad2deg(lon_rad), np.rad2deg(lat_rad)], axis=1).astype(
+        np.float32
+    )
+
+
+def filter_global_edges_land(
+    mesh_cart: np.ndarray,
+    mesh_edge_index: np.ndarray,
+    sea_xy: np.ndarray,
+    land_xy: np.ndarray,
+    max_chord_len: float = 0.1,
+    edges_only: bool = False,
+) -> tuple:
+    """Keep only mesh nodes over sea and/or edges whose midpoint is over sea.
+
+    Uses 3D Cartesian. When edges_only=False (default): node kept if dist to
+    nearest sea <= dist to nearest land; edge kept if both endpoints kept AND
+    edge midpoint (normalized to unit sphere) is over sea (and chord length <=
+    max_chord_len if set). When edges_only=True: no node filter, no reindexing;
+    keep only edges whose midpoint is over sea (e.g. for m2g). Chord length
+    is in [0, 2]; ~0.1 corresponds to ~5.7° great-circle arc.
+
+    Parameters
+    ----------
+    mesh_cart : (N, 3) pos on unit sphere (mesh only or mesh|grid if edges_only)
+    mesh_edge_index : (2, E) edge index [src, dst]
+    sea_xy, land_xy : (n_sea, 2), (n_land, 2) [longitude, latitude] in degrees
+    max_chord_len : if set, drop edges with chord length > this (unit sphere)
+    edges_only : if True, only filter by edge midpoint, no node filter
+
+    Returns
+    -------
+    mesh_cart_filtered : (N', 3) or unchanged pos if edges_only
+    edge_index_filtered : (2, E') reindexed into N' if not edges_only
+    """
+    sea_cart = node_lon_lat_to_cart(sea_xy)
+    land_cart = node_lon_lat_to_cart(land_xy)
+    kdt_sea = scipy.spatial.KDTree(sea_cart)
+    kdt_land = scipy.spatial.KDTree(land_cart)
+    src, dst = mesh_edge_index[0], mesh_edge_index[1]
+    chord = np.linalg.norm(mesh_cart[dst] - mesh_cart[src], axis=1)
+    length_ok = (
+        chord <= max_chord_len
+        if max_chord_len is not None
+        else np.ones(chord.shape[0], dtype=bool)
+    )
+    mid = (mesh_cart[src] + mesh_cart[dst]) / 2.0
+    norm = np.linalg.norm(mid, axis=1, keepdims=True)
+    norm = np.where(norm > 1e-12, norm, 1.0)
+    mid_unit = mid / norm
+    d_sea_mid, _ = kdt_sea.query(mid_unit, k=1)
+    d_land_mid, _ = kdt_land.query(mid_unit, k=1)
+    mid_over_sea = (d_sea_mid <= d_land_mid).ravel()
+    keep_edge_base = length_ok & mid_over_sea
+
+    if edges_only:
+        return mesh_cart, mesh_edge_index[:, keep_edge_base]
+
+    num_mesh = mesh_cart.shape[0]
+    d_sea, _ = kdt_sea.query(mesh_cart, k=1)
+    d_land, _ = kdt_land.query(mesh_cart, k=1)
+    keep_node = (d_sea <= d_land).ravel()
+    old_to_new = np.full(num_mesh, -1, dtype=np.int64)
+    new_idx = 0
+    for old_idx in range(num_mesh):
+        if keep_node[old_idx]:
+            old_to_new[old_idx] = new_idx
+            new_idx += 1
+    mesh_cart_filtered = mesh_cart[keep_node]
+    both_kept = keep_node[src] & keep_node[dst]
+    keep_edge = both_kept & keep_edge_base
+    new_src = old_to_new[src[keep_edge]]
+    new_dst = old_to_new[dst[keep_edge]]
+    edge_index_filtered = np.stack([new_src, new_dst], axis=0)
+    return mesh_cart_filtered, edge_index_filtered
 
 
 def sort_nodes_internally(nx_graph):
@@ -69,43 +161,91 @@ def add_edge_features_pyg(graph):
     graph["len"] = torch.norm(graph["vdiff"], dim=-1)
 
 
+def add_edge_features_pyg_sphere(graph):
+    """
+    Adds `len` (chord length) and `vdiff` (3D Cartesian receiver - sender)
+    from graph with `pos` (N, 2) [longitude, latitude] in degrees.
+    Use for global/spherical meshes to match GraphCast-style edge features.
+    Modifies graph in-place; leaves graph.pos unchanged (lon, lat).
+    """
+    pos_xy = (
+        graph.pos.cpu().numpy()
+        if graph.pos.is_cuda
+        else graph.pos.detach().numpy()
+    )
+    pos_3d = node_lon_lat_to_cart(pos_xy)
+    pos_3d = torch.from_numpy(pos_3d.astype(np.float32)).to(
+        device=graph.pos.device, dtype=graph.pos.dtype
+    )
+    src, dst = graph.edge_index[0], graph.edge_index[1]
+    vdiff = pos_3d[dst] - pos_3d[src]
+    graph["vdiff"] = vdiff
+    graph["len"] = torch.norm(vdiff, dim=-1)
+
+
 def filter_edges_land(
     graph: pyg.data.Data,
     sea_xy: np.ndarray,
     land_xy: np.ndarray,
     max_edge_len: float = 20000,  # in m
+    edges_only: bool = False,
 ):
     """
     Filter edge set to only keep edges not crossing land.
-    `graph` is pyg Data object with `edge_index` and `pos` attributes
+
+    Uses projected xy: node kept if dist to nearest sea <= dist
+    to nearest land; edge kept if both endpoints kept and edge midpoint is over
+    sea (and edge length < max_edge_len). When edges_only=True (e.g. m2g): no
+    node filter, no reindexing; keep only edges whose midpoint is over sea.
+
+    `graph` is pyg Data with `edge_index` and `pos` (N, 2) in same coords as
+    sea_xy, land_xy.
     """
-    # Compute (in pytorch) midpoint of each edge
+    pos_np = (
+        graph.pos.cpu().numpy()
+        if graph.pos.is_cuda
+        else graph.pos.detach().numpy()
+    )
     send_pos = graph.pos[graph.edge_index[0]]
     rec_pos = graph.pos[graph.edge_index[1]]
     midpoint_pos = (send_pos + rec_pos) / 2
     edge_len = torch.norm(rec_pos - send_pos, dim=1)
-
-    # First filter, absolute edge length
-    # NOTE: This is directly in meters
     edge_len_filter = edge_len < max_edge_len
 
-    # Second filter, middle of edge
-    # Look up (using numpy and scipy) closest gridpoint
+    kdt_sea = scipy.spatial.KDTree(sea_xy)
+    kdt_land = scipy.spatial.KDTree(land_xy)
     midpoint_pos_np = midpoint_pos.numpy()
-    grid_point_kdt = scipy.spatial.KDTree(
-        np.concatenate((sea_xy, land_xy), axis=0)
-    )
-    closest_grid_index = grid_point_kdt.query(midpoint_pos_np)[1]
-    # As sea points come first, can only check magnitude
-    # of index of closest point
-    midpoint_over_sea = closest_grid_index < sea_xy.shape[0]  # bool np array
+    d_sea_mid, _ = kdt_sea.query(midpoint_pos_np, k=1)
+    d_land_mid, _ = kdt_land.query(midpoint_pos_np, k=1)
+    midpoint_over_sea = (d_sea_mid <= d_land_mid).ravel()
     midpoint_filter = torch.tensor(midpoint_over_sea, dtype=bool)
 
-    edge_filter = edge_len_filter & midpoint_filter
-    new_edge_index = graph.edge_index[:, edge_filter]
+    if edges_only:
+        edge_filter = edge_len_filter & midpoint_filter
+        graph.edge_index = graph.edge_index[:, edge_filter]
+        return
 
-    # Change graph in-place
-    graph.edge_index = new_edge_index
+    # Node filter: keep node iff nearest sea <= nearest land
+    d_sea_node, _ = kdt_sea.query(pos_np, k=1)
+    d_land_node, _ = kdt_land.query(pos_np, k=1)
+    keep_node = (d_sea_node <= d_land_node).ravel()
+    num_nodes = pos_np.shape[0]
+    old_to_new = np.full(num_nodes, -1, dtype=np.int64)
+    new_idx = 0
+    for old_idx in range(num_nodes):
+        if keep_node[old_idx]:
+            old_to_new[old_idx] = new_idx
+            new_idx += 1
+    pos_filtered = pos_np[keep_node]
+    src, dst = graph.edge_index[0].numpy(), graph.edge_index[1].numpy()
+    both_kept = keep_node[src] & keep_node[dst]
+    keep_edge = both_kept & midpoint_filter.numpy() & edge_len_filter.numpy()
+    new_src = old_to_new[src[keep_edge]]
+    new_dst = old_to_new[dst[keep_edge]]
+    graph.pos = torch.from_numpy(pos_filtered.astype(np.float32))
+    graph.edge_index = torch.from_numpy(
+        np.stack([new_src, new_dst], axis=0).astype(np.int64)
+    )
 
 
 def _check_g2m_disconnected(
@@ -411,12 +551,14 @@ def connect_disconnected_g2m(
         new_edges.append([grid_idx, mesh_graph_idx])
 
     # Connect disconnected mesh nodes to nearest grid node
+    if len(disc_mesh) > 0:
+        grid_kdt = scipy.spatial.KDTree(pos[is_any_grid])
+        grid_indices = np.where(is_any_grid)[0]
     for mesh_graph_idx in disc_mesh:
         mesh_pos = pos[mesh_graph_idx]
-        # Find nearest grid node (any type)
-        grid_kdt = scipy.spatial.KDTree(pos[is_any_grid])
-        dist, grid_idx_in_subset = grid_kdt.query(mesh_pos, k=1)
-        grid_idx = np.where(is_any_grid)[0][grid_idx_in_subset]
+        _, grid_idx_in_subset = grid_kdt.query(mesh_pos, k=1)
+        grid_idx = int(np.asarray(grid_idx_in_subset).flat[0])
+        grid_idx = grid_indices[grid_idx]
         new_edges.append([grid_idx, mesh_graph_idx])
 
     if len(new_edges) > 0:
@@ -476,6 +618,81 @@ def connect_disconnected_m2g(
         # Update edge features
         add_edge_features_pyg(pyg_m2g)
         print(f"Connected {len(new_edges)} disconnected nodes in m2g")
+
+
+def compute_voronoi_areas_2d(xy: np.ndarray) -> np.ndarray:
+    """Compute Voronoi cell areas for 2D planar mesh nodes.
+
+    Parameters
+    ----------
+    xy : np.ndarray
+        (N, 2) array of 2D coordinates (x, y).
+
+    Returns
+    -------
+    np.ndarray
+        (N,) array of Voronoi cell areas.
+    """
+    voronoi = scipy.spatial.Voronoi(xy)
+    areas = np.zeros(xy.shape[0], dtype=np.float32)
+
+    for point_idx, region_idx in enumerate(voronoi.point_region):
+        region = voronoi.regions[region_idx]
+        if -1 in region or len(region) == 0:
+            areas[point_idx] = 0.0
+        else:
+            vertices = voronoi.vertices[region]
+            if len(vertices) >= 3:
+                # Use shoelace formula for polygon area
+                area = 0.0
+                for i in range(len(vertices)):
+                    j = (i + 1) % len(vertices)
+                    area += vertices[i][0] * vertices[j][1]
+                    area -= vertices[j][0] * vertices[i][1]
+                areas[point_idx] = abs(area) / 2.0
+            else:
+                areas[point_idx] = 0.0
+
+    # Zero out extreme outliers (=coastal points)
+    positive = areas > 0
+    med = np.median(areas[positive])
+    mad = np.median(np.abs(areas[positive] - med))
+    if mad > 0:
+        threshold = med + 10.0 * mad
+        areas[areas > threshold] = 0.0
+
+    return areas.astype(np.float32)
+
+
+def compute_voronoi_areas_spherical(cart: np.ndarray) -> np.ndarray:
+    """Compute Voronoi cell areas for 3D spherical mesh nodes on unit sphere.
+
+    Parameters
+    ----------
+    cart : np.ndarray
+        (N, 3) array of Cartesian coordinates on unit sphere.
+
+    Returns
+    -------
+    np.ndarray
+        (N,) array of Voronoi cell areas on the unit sphere.
+    """
+    # Normalize to unit sphere
+    r = np.linalg.norm(cart, axis=1, keepdims=True)
+    cart = cart / r
+
+    sv = scipy.spatial.SphericalVoronoi(cart, radius=1.0)
+    areas = sv.calculate_areas()
+
+    # Zero out extreme outliers (=coastal points)
+    positive = areas > 0
+    med = np.median(areas[positive])
+    mad = np.median(np.abs(areas[positive] - med))
+    if mad > 0:
+        threshold = med + 10.0 * mad
+        areas[areas > threshold] = 0.0
+
+    return areas.astype(np.float32)
 
 
 def print_graph_stats(save_graphs, pyg_g2m, pyg_m2g):

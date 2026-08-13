@@ -24,6 +24,7 @@ class BaseHiGraphModel(BaseGraphModel):
         datastore: BaseDatastore,
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
+        **kwargs,
     ):
         super().__init__(
             args,
@@ -31,6 +32,7 @@ class BaseHiGraphModel(BaseGraphModel):
             datastore=datastore,
             datastore_boundary=datastore_boundary,
             datastore_atmosphere=datastore_atmosphere,
+            **kwargs,
         )
 
         # Track number of nodes, edges on each level
@@ -66,10 +68,15 @@ class BaseHiGraphModel(BaseGraphModel):
         mesh_down_dim = self.mesh_down_features[0].shape[1]
 
         # Separate mesh node embedders for each level
+        hidden_dim_mesh_nodes = self.hidden_dim_mesh_nodes
+        mesh_embedder_blueprint_bottom = [hidden_dim_mesh_nodes] * (
+            args.hidden_layers + 1
+        )
         self.mesh_embedders = nn.ModuleList(
-            [
+            [utils.make_mlp([mesh_dim] + mesh_embedder_blueprint_bottom)]
+            + [
                 utils.make_mlp([mesh_dim] + self.mlp_blueprint_end)
-                for _ in range(self.num_levels)
+                for _ in range(self.num_levels - 1)
             ]
         )
         self.mesh_same_embedders = nn.ModuleList(

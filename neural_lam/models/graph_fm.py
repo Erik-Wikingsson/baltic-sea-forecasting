@@ -25,6 +25,7 @@ class GraphFM(BaseHiGraphModel):
         datastore: BaseDatastore,
         datastore_boundary: Union[BaseDatastore, None],
         datastore_atmosphere: Union[BaseDatastore, None],
+        **kwargs,
     ):
         super().__init__(
             args,
@@ -32,6 +33,7 @@ class GraphFM(BaseHiGraphModel):
             datastore=datastore,
             datastore_boundary=datastore_boundary,
             datastore_atmosphere=datastore_atmosphere,
+            **kwargs,
         )
 
         # Make down GNNs, both for down edges and same level
@@ -69,10 +71,9 @@ class GraphFM(BaseHiGraphModel):
         """
         Make GNNs for processing steps up through the hierarchy.
         """
-        gnn_class = PropagationNet if args.vertical_propnets else InteractionNet
         return nn.ModuleList(
             [
-                gnn_class(
+                PropagationNet(
                     edge_index,
                     args.hidden_dim,
                     hidden_layers=args.hidden_layers,

@@ -1,7 +1,7 @@
 # Standard library
 import dataclasses
 from pathlib import Path
-from typing import Dict, Union
+from typing import Dict, List, Union
 
 # Third-party
 import dataclass_wizard
@@ -84,6 +84,34 @@ class OutputClamping:
 
 
 @dataclasses.dataclass
+class DensityChannel:
+    """
+    Density channel for sea ice/wave variables.
+
+    A binary density channel (1 = ice present, 0 = absent) is constructed from
+    `reference_var` and appended to the state features. The model predicts the
+    density channel alongside all other variables. During autoregressive rollout
+    the predicted density is thresholded at 0.5: where density < 0.5, all
+    `associated_vars` (and the density channel itself) are set to zero, ensuring
+    clean ice-free regions without softplus drift.
+
+    Attributes
+    ----------
+    reference_var : str
+        State variable used to determine ice presence (e.g. "siconc").
+        Density = 1 where reference_var > 0 in physical space.
+    associated_vars : List[str]
+        State variables to zero out where density < 0.5 (e.g. ["siconc",
+        "sithick"]).  Should include the reference_var itself.
+    """
+
+    reference_var: str = "siconc"
+    associated_vars: List[str] = dataclasses.field(
+        default_factory=lambda: ["siconc", "sithick"]
+    )
+
+
+@dataclasses.dataclass
 class TrainingConfig:
     """
     Configuration related to training neural-lam
@@ -104,6 +132,14 @@ class TrainingConfig:
     output_clamping: OutputClamping = dataclasses.field(
         default_factory=OutputClamping
     )
+
+    density_channel: Union[DensityChannel, None] = None
+
+    # If True, weigh grid-point contributions in loss/metrics by cos(latitude)
+    # (normalized to unit mean over the interior grid), approximating equal-area
+    # weighting on the sphere. If False (default), all interior grid points are
+    # weighted uniformly in the loss.
+    lat_weighted_loss: bool = False
 
 
 @dataclasses.dataclass
@@ -129,6 +165,9 @@ class NeuralLAMConfig(dataclass_wizard.JSONWizard, dataclass_wizard.YAMLWizard):
     datastore: DatastoreSelection
     datastore_boundary: Union[DatastoreSelection, None] = None
     datastore_atmosphere: Union[DatastoreSelection, None] = None
+    statistics_datastore: Union[DatastoreSelection, None] = None
+    statistics_datastore_boundary: Union[DatastoreSelection, None] = None
+    statistics_datastore_atmosphere: Union[DatastoreSelection, None] = None
     training: TrainingConfig = dataclasses.field(default_factory=TrainingConfig)
 
     class _(dataclass_wizard.JSONWizard.Meta):
@@ -217,4 +256,50 @@ def load_config_and_datastores(
     else:
         datastore_atmosphere = None
 
-    return config, datastore, datastore_boundary, datastore_atmosphere
+    # Optional separate datastores for loading standardization statistics
+    # (e.g. training-data stats used to normalize forecast-mode data).
+    # When not specified, statistics are loaded from the main datastores.
+    if config.statistics_datastore is not None:
+        stats_ds_config_path = (
+            Path(config_path).parent / config.statistics_datastore.config_path
+        )
+        statistics_datastore = init_datastore(
+            datastore_kind=config.statistics_datastore.kind,
+            config_path=stats_ds_config_path,
+        )
+    else:
+        statistics_datastore = None
+
+    if config.statistics_datastore_boundary is not None:
+        stats_boundary_config_path = (
+            Path(config_path).parent
+            / config.statistics_datastore_boundary.config_path
+        )
+        statistics_datastore_boundary = init_datastore(
+            datastore_kind=config.statistics_datastore_boundary.kind,
+            config_path=stats_boundary_config_path,
+        )
+    else:
+        statistics_datastore_boundary = None
+
+    if config.statistics_datastore_atmosphere is not None:
+        stats_atmosphere_config_path = (
+            Path(config_path).parent
+            / config.statistics_datastore_atmosphere.config_path
+        )
+        statistics_datastore_atmosphere = init_datastore(
+            datastore_kind=config.statistics_datastore_atmosphere.kind,
+            config_path=stats_atmosphere_config_path,
+        )
+    else:
+        statistics_datastore_atmosphere = None
+
+    return (
+        config,
+        datastore,
+        datastore_boundary,
+        datastore_atmosphere,
+        statistics_datastore,
+        statistics_datastore_boundary,
+        statistics_datastore_atmosphere,
+    )

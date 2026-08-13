@@ -8,6 +8,7 @@ import networkx
 import numpy as np
 import scipy.spatial
 import torch
+from torch_geometric.data import Data
 from torch_geometric.utils import degree
 from torch_geometric.utils.convert import from_networkx
 
@@ -39,6 +40,7 @@ def create_graph(
     g2m_mean_degree: int = 0,
     connect_disconnected: bool = False,
     use_atmosphere_g2m: bool = True,
+    max_edge_len: float = 20000,
 ):
     """
     Create graph components from `xy` grid coordinates and store in
@@ -104,8 +106,8 @@ def create_graph(
     g2m_radius_atm : float
         Radius to connect atmospheric nodes within for g2m.
     mesh_node_distance: float,
-        (For hierarchical/multiscale graphs) Distance between mesh nodes,
-        in meters.
+        (For hierarchical/multiscale graphs) Distance between mesh nodes
+        in meters at the bottom mesh level.
     mesh_refinement_factor: float,
         Factor between number of mesh nodes at each level in cluster graphs.
     grid_to_first_mesh_refinement: float,
@@ -172,6 +174,7 @@ def create_graph(
                 grid_to_first_mesh_refinement=grid_to_first_mesh_refinement,
                 mesh_refinement_factor=mesh_refinement_factor,
                 mesh_plot_function=mesh_plot_func,
+                max_edge_len=max_edge_len,
             )
         )
     else:
@@ -190,10 +193,44 @@ def create_graph(
     for graph_name, graph in save_graphs.items():
         saving.save_edges_list(graph, graph_name, graph_dir_path)
 
-    # Save mesh positions
+    # Compute Voronoi cell areas for each mesh level and add to features
+    mesh_features_with_area = []
+    for level_pos in mesh_pos:
+        pos_np = (
+            level_pos.cpu().numpy()
+            if isinstance(level_pos, torch.Tensor)
+            else level_pos
+        )
+        # Compute Voronoi areas (2D planar)
+        voronoi_areas = gutils.compute_voronoi_areas_2d(pos_np)
+        # Concatenate position (x, y) with Voronoi area
+        features = np.concatenate(
+            [pos_np, voronoi_areas.reshape(-1, 1)], axis=1
+        )
+        mesh_features_with_area.append(
+            torch.from_numpy(features.astype(np.float32))
+        )
+
+    # Save mesh features (positions + Voronoi areas)
     torch.save(
-        mesh_pos, os.path.join(graph_dir_path, "mesh_features.pt")
-    )  # mesh pos, in float32
+        mesh_features_with_area,
+        os.path.join(graph_dir_path, "mesh_features.pt"),
+    )  # mesh features: (x, y, voronoi_area) in float32
+
+    # Plot Voronoi areas
+    if create_plot:
+        for level_i, g in enumerate(save_graphs["m2m"]):
+            pos_t = mesh_pos[level_i]
+            areas = mesh_features_with_area[level_i][:, 2].cpu().numpy()
+            plot_g = Data(pos=pos_t, edge_index=g.edge_index)
+            vis.plot_node_values(
+                plot_g,
+                f"Mesh Voronoi areas, level {level_i}",
+                graph_dir_path,
+                node_values=areas,
+                value_name="Voronoi area (m²)",
+            )
+            plt.show()
 
     #
     # Grid2Mesh
@@ -441,8 +478,10 @@ def create_graph(
 
     pyg_m2g = from_networkx(G_m2g)
 
-    # Remove m2g edges over land
-    gutils.filter_edges_land(pyg_m2g, xy, xy_land)
+    # Remove m2g edges over land (edges_only: no node filter, no reindex)
+    gutils.filter_edges_land(
+        pyg_m2g, xy, xy_land, max_edge_len=max_edge_len, edges_only=True
+    )
 
     # Check for disconnected nodes in m2g
     m2g_node_list = list(G_m2g.nodes)
@@ -622,18 +661,18 @@ def cli(input_args=None):
         type=float,
         default=5000.0,
         help="(For hierarchical/multiscale graphs) "
-        "Distance between mesh nodes, in meters",
+        "Distance between mesh nodes in meters at the bottom mesh level.",
     )
     parser.add_argument(
         "--mesh_refinement_factor",
         type=float,
-        default=4,
+        default=9,
         help="Factor between number of mesh nodes at each cluster mesh level.",
     )
     parser.add_argument(
         "--grid_to_first_mesh_refinement",
         type=float,
-        default=6,
+        default=9,
         help="Factor between number of grid nodes and mesh nodes at bottom "
         "level.",
     )
@@ -668,6 +707,12 @@ def cli(input_args=None):
         help="Connect remaining disconnected nodes using nearest neighbor.",
     )
     parser.add_argument(
+        "--max_edge_len",
+        type=float,
+        default=20000,
+        help="Max edge length in meters for land filtering.",
+    )
+    parser.add_argument(
         "--use_atmosphere_g2m",
         action="store_true",
         help="Atmosphere as separate grid nodes in g2m encoding (experimental)",
@@ -679,7 +724,7 @@ def cli(input_args=None):
     ), "Specify your config with --config_path"
 
     # Load neural-lam configuration and datastore to use
-    _, datastore, datastore_boundary, datastore_atmosphere = (
+    _, datastore, datastore_boundary, datastore_atmosphere, *_ = (
         load_config_and_datastores(config_path=args.config_path)
     )
 
@@ -701,6 +746,7 @@ def cli(input_args=None):
         m2g_k=args.m2g_k,
         g2m_mean_degree=args.g2m_mean_degree,
         connect_disconnected=args.connect_disconnected,
+        max_edge_len=args.max_edge_len,
         use_atmosphere_g2m=args.use_atmosphere_g2m,
     )
 

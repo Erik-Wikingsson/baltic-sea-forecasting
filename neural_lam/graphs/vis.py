@@ -13,7 +13,9 @@ from PIL import Image
 from . import utils as gutils
 
 # https://community.plotly.com/t/whats-the-efficient-way-to-create-3d-scatter-plot-for-millions-of-points/60965/4
-NODE_PLOT_LIMIT = 100000  # Limit on number of points to plot before subsampling
+NODE_PLOT_LIMIT = (
+    100_000  # Limit on number of points to plot before subsampling
+)
 
 
 def plot_graph(
@@ -29,7 +31,7 @@ def plot_graph(
 
     # Fix for re-indexed edge indices only containing mesh nodes at
     # higher levels in hierarchy
-    if reindex_edges:
+    if reindex_edges and edge_index.numel() > 0:
         edge_index = edge_index - edge_index.min()
 
     if pyg.utils.is_undirected(edge_index):
@@ -47,11 +49,10 @@ def plot_graph(
     from_pos = pos[edge_index[0]]  # (M/2, 2)
     to_pos = pos[edge_index[1]]  # (M/2, 2)
     edge_lines = np.stack((from_pos, to_pos), axis=1)
-    axis.add_collection(
-        matplotlib.collections.LineCollection(
-            edge_lines, lw=0.4, colors="black", zorder=1
-        )
+    lc = matplotlib.collections.LineCollection(
+        edge_lines, lw=0.3, colors="black", zorder=1, rasterized=True
     )
+    axis.add_collection(lc)
 
     # Plot nodes
     if order_by_degree:
@@ -62,11 +63,12 @@ def plot_graph(
         pos[:, 0],
         pos[:, 1],
         c=degrees,
-        s=3,
+        s=2,
         marker="o",
         zorder=2,
         cmap="viridis",
         clim=None,
+        rasterized=True,
     )
 
     plt.colorbar(node_scatter, aspect=50)
@@ -76,6 +78,57 @@ def plot_graph(
 
     if graph_dir_path is not None:
         plt.savefig(os.path.join(graph_dir_path, f"{title}.png"))
+    plt.close(fig)
+
+
+def plot_node_values(
+    graph,
+    title=None,
+    graph_dir_path=None,
+    node_values=None,
+    value_name="Voronoi area",
+):
+    fig, axis = plt.subplots(figsize=(8, 8), dpi=200)
+    edge_index = graph.edge_index
+    pos = graph.pos
+
+    if edge_index.numel() > 0:
+        edge_index = edge_index - edge_index.min()
+    if pyg.utils.is_undirected(edge_index):
+        edge_index = edge_index[:, edge_index[0] < edge_index[1]]
+
+    edge_index = edge_index.cpu().numpy()
+    pos = pos.cpu().numpy()
+
+    values = np.ravel(
+        node_values.cpu().numpy()
+        if hasattr(node_values, "cpu")
+        else np.asarray(node_values)
+    )
+
+    edge_lines = np.stack((pos[edge_index[0]], pos[edge_index[1]]), axis=1)
+    axis.add_collection(
+        matplotlib.collections.LineCollection(
+            edge_lines, lw=0.3, colors="black", zorder=1, rasterized=True
+        )
+    )
+
+    s = axis.scatter(
+        pos[:, 0],
+        pos[:, 1],
+        c=values,
+        s=2,
+        cmap="viridis",
+        zorder=2,
+        rasterized=True,
+    )
+    cbar = plt.colorbar(s, aspect=50)
+    cbar.set_label(value_name)
+    if title is not None:
+        axis.set_title(title)
+    if graph_dir_path is not None:
+        plt.savefig(os.path.join(graph_dir_path, f"{title}.png"))
+    plt.close(fig)
 
 
 def make_earth(radius, resolution_reduction=1.0):
@@ -133,8 +186,8 @@ def make_earth(radius, resolution_reduction=1.0):
 
 def create_edge_plot(
     edge_index,
-    from_node_lat_lon,
-    to_node_lat_lon,
+    from_node_xy,
+    to_node_xy,
     label,
     color="blue",
     width=1,
@@ -143,29 +196,27 @@ def create_edge_plot(
     pos_filter_func=None,
 ):
     """
-    Create a plotly object showing edges
+    Create a plotly object showing edges.
 
     edge_index: (2, M)
-    from_node_lat_lon: (N, 2), positions of sender nodes
-    to_node_lat_lon: (N, 2), positions of receiver nodes
+    from_node_xy: (N, 2) [longitude, latitude] in degrees (x=lon, y=lat)
+    to_node_xy: (N, 2) [longitude, latitude] in degrees
     label: str, label of plot object
     """
-    from_node_cart = (
-        gutils.node_lat_lon_to_cart(from_node_lat_lon) * from_radius
-    )
-    to_node_cart = gutils.node_lat_lon_to_cart(to_node_lat_lon) * to_radius
+    from_node_cart = gutils.node_lon_lat_to_cart(from_node_xy) * from_radius
+    to_node_cart = gutils.node_lon_lat_to_cart(to_node_xy) * to_radius
 
     edge_start = from_node_cart[edge_index[0]]  # (M, 2)
     edge_end = to_node_cart[edge_index[1]]  # (M, 2)
 
     if pos_filter_func is not None:
         # Filter edges
-        edge_start_lat_lon = from_node_lat_lon[edge_index[0]]  # (M, 2)
-        edge_end_lat_lon = to_node_lat_lon[edge_index[1]]  # (M, 2)
+        edge_start_xy = from_node_xy[edge_index[0]]  # (M, 2)
+        edge_end_xy = to_node_xy[edge_index[1]]  # (M, 2)
 
         edge_mask = np.logical_and(
-            pos_filter_func(edge_start_lat_lon),
-            pos_filter_func(edge_end_lat_lon),
+            pos_filter_func(edge_start_xy),
+            pos_filter_func(edge_end_xy),
         )
         edge_start = edge_start[edge_mask]
         edge_end = edge_end[edge_mask]
@@ -193,18 +244,18 @@ def create_edge_plot(
 
 
 def create_node_plot(
-    node_lat_lon, label, color="blue", size=1, radius=1, pos_filter_func=None
+    node_xy, label, color="blue", size=1, radius=1, pos_filter_func=None
 ):
     """
-    Create a plotly object showing nodes
+    Create a plotly object showing nodes.
 
-    node_lat_lon: (N, 2)
+    node_xy: (N, 2) [longitude, latitude] in degrees (x=lon, y=lat)
     label: str, label of plot object
     """
-    node_pos = gutils.node_lat_lon_to_cart(node_lat_lon) * radius
+    node_pos = gutils.node_lon_lat_to_cart(node_xy) * radius
     if pos_filter_func is not None:
         # Filter nodes before plotting
-        node_pos = node_pos[pos_filter_func(node_lat_lon)]
+        node_pos = node_pos[pos_filter_func(node_xy)]
 
     # Plotly 3d can not render large amounts of points in some browsers, so
     # for very large node sets we need to somehow subsample it before plotting.
@@ -295,7 +346,7 @@ def plot_disconnected_nodes(
             color="darkred",
         )
 
-    axis.legend()
+    axis.legend(loc="upper left")
     axis.set_title(title)
 
     plt.savefig(os.path.join(graph_dir_path, f"{title}.png"))

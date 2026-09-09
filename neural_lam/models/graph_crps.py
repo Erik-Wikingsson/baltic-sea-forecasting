@@ -27,6 +27,8 @@ class GraphCRPS(ARProbModel):
     previous state and clamped to the valid range.
     """
 
+    supports_distr_crps = True
+
     def __init__(
         self,
         args,

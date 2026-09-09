@@ -28,6 +28,10 @@ class ARProbModel(ARModel):
     # pylint: disable=arguments-differ
     # Disable to override args/kwargs from superclass
 
+    # Only models that actually know how to use a distributed CRPS loss should set 
+    # this True, to prevent erroneous use of custom sampler.
+    supports_distr_crps = False
+
     def __init__(
         self,
         args,
@@ -48,6 +52,10 @@ class ARProbModel(ARModel):
 
         self.ensemble_size = args.ensemble_size
         self.train_distr_crps = args.train_distr_crps
+        if self.train_distr_crps and not self.supports_distr_crps:
+            raise ValueError(
+                f"{type(self).__name__} does not support train_distr_crps."
+            )
 
         # Per-rank RNG for reproducible but distinct noise across DDP ranks.
         self._rank = self._get_rank()

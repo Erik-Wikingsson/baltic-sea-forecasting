@@ -20,6 +20,9 @@ tensors, we detach the view and mark it as a leaf (it still shares storage with
 gradient and let Muon update ``v`` in place, which writes straight back to ``p``.
 """
 
+# Standard library
+import warnings
+
 # Third-party
 import torch
 
@@ -146,12 +149,39 @@ class MuonAuxAdam(torch.optim.Optimizer):
             v.grad = None
 
     def state_dict(self):
+        # "base" holds this wrapper's own param_groups. It is what the LR
+        # scheduler writes to and what step() propagates to the sub-optimizers,
+        # so without it a resumed run would silently restart from the *initial*
+        # LR instead of the scheduled one (and, since CosineAnnealingLR.get_lr
+        # is recursive in group["lr"], stay off for the rest of training).
         return {
+            "base": super().state_dict(),
             "muon": None if self._muon is None else self._muon.state_dict(),
             "adamw": None if self._adamw is None else self._adamw.state_dict(),
         }
 
     def load_state_dict(self, state_dict):
+        base = state_dict.get("base")
+        if base is not None:
+            super().load_state_dict(base)
+        else:
+            # Checkpoint written before "base" was saved: recover the LR from a
+            # sub-optimizer. That value is one scheduler step stale (it is the
+            # LR of the last optimizer step, taken before the epoch-end
+            # scheduler.step()), but it is far closer than the initial LR.
+            for key in ("muon", "adamw"):
+                sub = state_dict.get(key)
+                if sub is not None and sub["param_groups"]:
+                    stale_lr = sub["param_groups"][0]["lr"]
+                    for group in self.param_groups:
+                        group["lr"] = stale_lr
+                    warnings.warn(
+                        "MuonAuxAdam checkpoint has no 'base' state; "
+                        f"restoring lr={stale_lr:.3e} from the {key} "
+                        "sub-optimizer (one scheduler step stale).",
+                        stacklevel=2,
+                    )
+                    break
         if self._muon is not None and state_dict.get("muon") is not None:
             self._muon.load_state_dict(state_dict["muon"])
         if self._adamw is not None and state_dict.get("adamw") is not None:

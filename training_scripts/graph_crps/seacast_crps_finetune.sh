@@ -1,5 +1,5 @@
 srun python -m neural_lam.train_model \
-    --config_path data/global_ocean_1_4.yaml \
+    --config_path data/global_ocean_1_4_density.yaml \
     --num_workers 2 \
     --precision bf16-mixed \
     --model crps \

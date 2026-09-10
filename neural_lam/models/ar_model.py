@@ -370,15 +370,31 @@ class ARModel(pl.LightningModule):
         # For storing spatial loss maps during evaluation
         self.spatial_loss_maps = []
 
-        # Whether to perform gradient checkpointing at each unroll step
-        if args.grad_checkpointing:
-            self.unroll_ckpt_func = (
-                lambda f, *args: torch.utils.checkpoint.checkpoint(
-                    f, *args, use_reentrant=False
-                )
+        # Whether to perform gradient checkpointing at each unroll step.
+        # On by default whenever more than one step is unrolled, since the
+        # stored activations then scale with the number of steps. Kept as a
+        # mutable flag so that the multi-phase schedules in train_model.py can
+        # toggle it when they change ar_steps_train between phases.
+        self.grad_checkpointing = (
+            args.grad_checkpointing or args.ar_steps_train > 1
+        )
+
+    def unroll_ckpt_func(self, func, *args):
+        """Run one unroll step, optionally with gradient checkpointing.
+
+        Checkpointing only saves memory while a graph is being built for
+        backward, so it is skipped during validation/test and under
+        torch.no_grad(), where it would only add bookkeeping overhead.
+        """
+        if (
+            self.grad_checkpointing
+            and self.training
+            and torch.is_grad_enabled()
+        ):
+            return torch.utils.checkpoint.checkpoint(
+                func, *args, use_reentrant=False
             )
-        else:
-            self.unroll_ckpt_func = lambda f, *args: f(*args)
+        return func(*args)
 
     def prepare_clamping_params(
         self, config: NeuralLAMConfig, datastore: BaseDatastore
@@ -1334,6 +1350,31 @@ class ARModel(pl.LightningModule):
 
         self.spatial_loss_maps.clear()
 
+    @staticmethod
+    def _fix_legacy_muon_lr(checkpoint):
+        """Recover the scheduled LR from old MuonAuxAdam checkpoints.
+
+        Checkpoints written before ``MuonAuxAdam.state_dict`` included its own
+        param_groups ("base") carry no scheduled LR for the wrapper, only the
+        one-step-stale LRs of the sub-optimizers. Copy the exact LR from the
+        saved scheduler into them, so that the fallback in
+        ``MuonAuxAdam.load_state_dict`` restores the right value instead of
+        continuing from the initial LR.
+        """
+        opt_states = checkpoint.get("optimizer_states") or []
+        sched_states = checkpoint.get("lr_schedulers") or []
+        for opt_state, sched_state in zip(opt_states, sched_states):
+            if not isinstance(opt_state, dict) or "base" in opt_state:
+                continue
+            last_lr = (sched_state or {}).get("_last_lr")
+            if not last_lr:
+                continue
+            for key in ("muon", "adamw"):
+                sub = opt_state.get(key)
+                if isinstance(sub, dict):
+                    for group in sub.get("param_groups", []):
+                        group["lr"] = last_lr[0]
+
     def on_load_checkpoint(self, checkpoint):
         """
         Perform any changes to state dict before loading checkpoint
@@ -1355,7 +1396,9 @@ class ARModel(pl.LightningModule):
                 )
                 loaded_state_dict[new_key] = loaded_state_dict[old_key]
                 del loaded_state_dict[old_key]
-        if not self.restore_opt:
+        if self.restore_opt:
+            self._fix_legacy_muon_lr(checkpoint)
+        else:
             opt = self.configure_optimizers()
             if isinstance(opt, dict):
                 checkpoint["optimizer_states"] = [

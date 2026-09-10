@@ -20,10 +20,21 @@ mamba activate bsf
 cd /proj/berzelius-2022-164/users/x_erila/baltic-sea-forecasting
 wandb online
 
-# bash training_scripts/graph_flow/graph_flow_1.sh
-# bash training_scripts/graph_edm/graph_edm_1.sh
-# bash training_scripts/graph_crps/graph_crps_1.sh
-# bash training_scripts/graph_SI/graph_SI_1.sh
-# bash training_scripts/graph_fm/graph_fm_pretrain.sh
-# bash training_scripts/seacast/seacast_pretrain.sh
-bash training_scripts/seacast/seacast_pretrain_muon.sh
+# The training script to run is given as the first argument, any further
+# arguments are forwarded to it and override its defaults:
+#   sbatch training_scripts/train.sh training_scripts/seacast/seacast_pretrain.sh --hidden_dim 512
+# With no arguments the default below is used.
+#
+# Alternatives:
+# training_scripts/graph_flow/graph_flow_1.sh
+# training_scripts/graph_edm/graph_edm_1.sh
+# training_scripts/graph_crps/graph_crps_1.sh
+# training_scripts/graph_SI/graph_SI_1.sh
+# training_scripts/graph_fm/graph_fm_pretrain.sh
+# training_scripts/seacast/seacast_finetune.sh
+
+TRAIN_SCRIPT="${1:-training_scripts/seacast/seacast_pretrain.sh}"
+[ $# -gt 0 ] && shift
+
+echo "Running: bash $TRAIN_SCRIPT $*"
+bash "$TRAIN_SCRIPT" "$@"

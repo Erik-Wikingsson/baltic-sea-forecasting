@@ -178,12 +178,6 @@ class ARProbModel(ARModel):
         # computing CRPS on each GPU and backpropagating locally. We need to
         # compensate with a factor 2, as the CRPS loss is averaged across the
         # 2 GPUs.
-        #
-        # NOTE: entry_crps above (pre-doubling) is algebraically identical to
-        # metrics.afcrps_ens's num_ens==2 formula
-        # (mean_mae - 0.25*(1+alpha)*|x0-x1|) - the two training paths
-        # compute the same almost-fair CRPS estimator, this factor of 2 is
-        # only a gradient-averaging correction, not a different loss.
         return 2 * entry_crps
 
     def sample_trajectories(

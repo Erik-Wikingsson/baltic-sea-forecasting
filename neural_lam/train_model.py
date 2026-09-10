@@ -276,6 +276,12 @@ def main(input_args=None):
         help="Alpha parameter for the Almost Fair CRPS (default: 0.95)",
     )
     parser.add_argument(
+        "--train_distr_crps",
+        action="store_true",
+        help="Run training using CRPS-loss distributed across multiple GPUs"
+        "(default: False)",
+    )
+    parser.add_argument(
         "--channel_mult_emb",
         type=int,
         default=2,
@@ -639,6 +645,7 @@ def main(input_args=None):
         num_workers=args.num_workers,
         use_atmosphere_g2m=args.use_atmosphere_g2m,
         density_channel=getattr(config.training, "density_channel", None),
+        train_distr_crps=args.train_distr_crps,
     )
 
     # Instantiate model + trainer
@@ -719,6 +726,7 @@ def main(input_args=None):
             check_val_every_n_epoch=args.val_interval,
             precision=args.precision,
             num_sanity_val_steps=args.num_sanity_val_steps,
+            use_distributed_sampler=not args.train_distr_crps,
         )
 
     def _run_phase(

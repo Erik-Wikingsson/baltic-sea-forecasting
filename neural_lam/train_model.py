@@ -315,10 +315,13 @@ def main(input_args=None):
         "--optimizer",
         type=str,
         default="adamw",
-        choices=["adamw", "muon", "muon_flat"],
+        choices=["adamw", "muon", "muon_flat", "soap", "soap_muon"],
         help="Optimizer to use. 'muon' applies the Muon optimizer to 2D "
         "hidden weights (AdamW for embeddings/output/1D params); 'muon_flat' "
-        "additionally flattens 4D conv weights so Muon optimizes them too "
+        "additionally flattens 4D conv weights so Muon optimizes them too; "
+        "'soap' runs Adam in the eigenbasis of Shampoo's preconditioner for "
+        "all parameters; 'soap_muon' adds Muon-style orthogonalization on "
+        "top of SOAP for the same 2D hidden weights 'muon' would take "
         "(default: adamw)",
     )
     parser.add_argument(
@@ -348,8 +351,47 @@ def main(input_args=None):
             "mesh_up_embedders",
             "mesh_down_embedders",
         ],
-        help="Parameter-name substrings routed to AdamW instead of Muon "
-        "(input embeddings and final output layer)",
+        help="Parameter-name substrings excluded from the Muon (and "
+        "SOAP-Muon) parameter group, i.e. input embeddings and the final "
+        "output layer",
+    )
+    parser.add_argument(
+        "--soap_betas",
+        type=float,
+        nargs=2,
+        default=[0.95, 0.95],
+        help="Adam betas for the soap optimizer (default: 0.95 0.95)",
+    )
+    parser.add_argument(
+        "--soap_muon_betas",
+        type=float,
+        nargs=2,
+        default=[0.95, 0.98],
+        help="Adam betas for the soap_muon optimizer (default: 0.95 0.98)",
+    )
+    parser.add_argument(
+        "--soap_weight_decay",
+        type=float,
+        default=0.0,
+        help="Weight decay for the soap and soap_muon optimizers. Matches "
+        "the muon default here; upstream SOAP uses 0.01 (default: 0.0)",
+    )
+    parser.add_argument(
+        "--soap_precondition_frequency",
+        type=int,
+        default=10,
+        help="How often (in steps) soap/soap_muon refresh the preconditioner "
+        "eigenbasis. soap_muon tolerates larger values (~40) since the "
+        "orthogonalization runs every step (default: 10)",
+    )
+    parser.add_argument(
+        "--soap_muon_disable_sqrt",
+        action="store_true",
+        help="Disable soap_muon's square-root correction after "
+        "orthogonalization (singular-value power 0 instead of 0.5). Changes "
+        "the update rule, not the cost: unlike the reference implementation "
+        "this one always orthogonalizes with Newton-Schulz, never a full SVD. "
+        "Reported to be unstable on some datasets (default: False)",
     )
     parser.add_argument(
         "--val_interval",

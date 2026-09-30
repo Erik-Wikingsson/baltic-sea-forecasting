@@ -656,22 +656,25 @@ class ARModel(pl.LightningModule):
         )
         return da
 
-    def _split_params_for_muon(self, flatten):
-        """Partition parameters into groups for the Muon optimizer.
+    def _split_params_for_muon(self, flatten, opt_name="muon"):
+        """Partition parameters into groups for the Muon-style optimizers.
 
-        Muon (``torch.optim.Muon``) is only used for 2D hidden weight matrices.
-        Embeddings, the final output layer (matched by name via
-        ``args.muon_exclude_patterns``) and all 1D parameters (biases, norm
-        gains) are optimized by AdamW instead. Buffers (static graph/grid
-        features, stats) are not in ``named_parameters()`` and are excluded
-        automatically.
+        Both ``torch.optim.Muon`` and SOAP-Muon only orthogonalize 2D hidden
+        weight matrices. Embeddings, the final output layer (matched by name
+        via ``args.muon_exclude_patterns``) and all 1D parameters (biases,
+        norm gains) go to the auxiliary group instead, which is optimized by
+        AdamW for ``muon`` and by plain SOAP for ``soap_muon``. Buffers
+        (static graph/grid features, stats) are not in ``named_parameters()``
+        and are excluded automatically.
 
         Parameters
         ----------
         flatten : bool
             If True (the ``muon_flat`` option), contiguous >2D weights (e.g. 4D
             conv filters) are flattened to 2D and optimized by Muon. Otherwise
-            they go to AdamW.
+            they go to the auxiliary group.
+        opt_name : str
+            Name of the selected optimizer, for logging only.
 
         Returns
         -------
@@ -702,7 +705,7 @@ class ARModel(pl.LightningModule):
                     if flatten:
                         print(
                             f"[optimizer] {name} is non-contiguous "
-                            f"{tuple(param.shape)}; routing to AdamW."
+                            f"{tuple(param.shape)}; routing to the aux group."
                         )
                     adamw_params.append(param)
 
@@ -712,12 +715,11 @@ class ARModel(pl.LightningModule):
         m_t, m_n = _summary(muon_params)
         c_t, c_n = _summary(conv_muon_params)
         a_t, a_n = _summary(adamw_params)
-        opt_name = "muon_flat" if flatten else "muon"
         print(
             f"[optimizer={opt_name}] "
-            f"Muon(2D): {m_t} tensors, {m_n:,} | "
-            f"Muon(conv-flat): {c_t} tensors, {c_n:,} | "
-            f"AdamW: {a_t} tensors, {a_n:,}"
+            f"orthogonalized(2D): {m_t} tensors, {m_n:,} | "
+            f"orthogonalized(conv-flat): {c_t} tensors, {c_n:,} | "
+            f"aux: {a_t} tensors, {a_n:,}"
         )
 
         return muon_params, conv_muon_params, adamw_params
@@ -732,7 +734,9 @@ class ARModel(pl.LightningModule):
             from ..optim import MuonAuxAdam
 
             muon_params, conv_muon_params, adamw_params = (
-                self._split_params_for_muon(flatten=(opt_name == "muon_flat"))
+                self._split_params_for_muon(
+                    flatten=(opt_name == "muon_flat"), opt_name=opt_name
+                )
             )
             opt = MuonAuxAdam(
                 muon_params,
@@ -742,6 +746,36 @@ class ARModel(pl.LightningModule):
                 weight_decay=self.args.muon_weight_decay,
                 momentum=self.args.muon_momentum,
                 betas=(0.9, 0.95),
+            )
+        elif opt_name == "soap":
+            from ..optim import SOAP
+
+            # SOAP preconditions parameters of any rank, so unlike Muon it
+            # needs no auxiliary optimizer and no parameter split.
+            opt = SOAP(
+                self.parameters(),
+                lr=self.args.lr,
+                betas=tuple(self.args.soap_betas),
+                weight_decay=self.args.soap_weight_decay,
+                precondition_frequency=self.args.soap_precondition_frequency,
+            )
+        elif opt_name == "soap_muon":
+            from ..optim import SoapMuon
+
+            muon_params, _, other_params = self._split_params_for_muon(
+                flatten=False, opt_name=opt_name
+            )
+            param_groups = [
+                {"params": muon_params, "orthogonalize": True},
+                {"params": other_params, "orthogonalize": False},
+            ]
+            opt = SoapMuon(
+                [g for g in param_groups if g["params"]],
+                lr=self.args.lr,
+                betas=tuple(self.args.soap_muon_betas),
+                weight_decay=self.args.soap_weight_decay,
+                precondition_frequency=self.args.soap_precondition_frequency,
+                sqrt_correction=not self.args.soap_muon_disable_sqrt,
             )
         else:
             raise ValueError(f"Unknown --optimizer {opt_name}")
@@ -1375,6 +1409,43 @@ class ARModel(pl.LightningModule):
                     for group in sub.get("param_groups", []):
                         group["lr"] = last_lr[0]
 
+    @staticmethod
+    def _check_optimizer_matches(checkpoint, current_opt):
+        """Reject ``--restore_opt`` across a change of optimizer.
+
+        Optimizer states are not interchangeable between the optimizers
+        offered by ``--optimizer``: loading one into another either raises a
+        bare ``KeyError`` deep inside ``load_state_dict`` or, when the state
+        dicts happen to have the same shape (AdamW and SOAP both keep
+        ``exp_avg``/``exp_avg_sq`` over a single group), silently restores
+        moments that mean something else.
+        """
+        saved_opt = checkpoint.get("optimizer_name")
+        if saved_opt is None:
+            # Written before optimizer_name was recorded. The wrapped
+            # Muon state is still recognizable by its sub-optimizer keys.
+            states = checkpoint.get("optimizer_states") or []
+            if not states or not isinstance(states[0], dict):
+                return
+            was_muon = "base" in states[0] or "muon" in states[0]
+            if was_muon == current_opt.startswith("muon"):
+                return
+            saved_opt = "muon/muon_flat" if was_muon else "adamw/soap"
+        elif saved_opt == current_opt:
+            return
+
+        raise ValueError(
+            f"Checkpoint was written with --optimizer {saved_opt} but this "
+            f"run uses --optimizer {current_opt}. Their states are not "
+            f"interchangeable; drop --restore_opt to start {current_opt} "
+            "from a clean state."
+        )
+
+    def on_save_checkpoint(self, checkpoint):
+        """Record which optimizer wrote the state, so that resuming into a
+        different one is caught by ``on_load_checkpoint``."""
+        checkpoint["optimizer_name"] = getattr(self.args, "optimizer", "adamw")
+
     def on_load_checkpoint(self, checkpoint):
         """
         Perform any changes to state dict before loading checkpoint
@@ -1397,6 +1468,9 @@ class ARModel(pl.LightningModule):
                 loaded_state_dict[new_key] = loaded_state_dict[old_key]
                 del loaded_state_dict[old_key]
         if self.restore_opt:
+            self._check_optimizer_matches(
+                checkpoint, getattr(self.args, "optimizer", "adamw")
+            )
             self._fix_legacy_muon_lr(checkpoint)
         else:
             opt = self.configure_optimizers()

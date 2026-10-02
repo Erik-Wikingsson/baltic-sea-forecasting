@@ -33,7 +33,7 @@ wandb online
 # training_scripts/graph_fm/graph_fm_pretrain.sh
 # training_scripts/seacast/seacast_finetune.sh
 
-TRAIN_SCRIPT="${1:-training_scripts/seacast/seacast_finetune.sh}"
+TRAIN_SCRIPT="${1:-training_scripts/seacast/seacast_pretrain.sh}"
 [ $# -gt 0 ] && shift
 
 echo "Running: bash $TRAIN_SCRIPT $*"

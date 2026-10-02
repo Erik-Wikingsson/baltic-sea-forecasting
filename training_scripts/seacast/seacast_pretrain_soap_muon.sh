@@ -18,10 +18,10 @@ srun python -m neural_lam.train_model \
     --val_steps_to_log 1 4 \
     --num_sanity_val_steps 0 \
     --num_nodes 1 \
-    --optimizer "muon_flat" \
-    --load /proj/berzelius-2022-164/users/x_erila/baltic-sea-forecasting/saved_models/train-graph_det-3x1024-09_08_08-7530/last.ckpt \
-    --restore_opt \
+    --optimizer "soap_muon" \
     "$@"
+    # --load /proj/berzelius-2022-164/users/x_erila/baltic-sea-forecasting/saved_models/train-graph_det-3x1024-09_08_08-7530/last.ckpt \
+    # --restore_opt \
 
 
 # "--hidden_dim 1024 --graph global_cluster_1_deg_15_refinement_4_levels --batch_size 1"

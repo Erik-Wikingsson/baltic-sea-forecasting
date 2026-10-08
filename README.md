@@ -1,7 +1,3 @@
-[![arXiv](https://img.shields.io/badge/arXiv-2605.15470-b31b1b.svg)](https://arxiv.org/abs/2605.15470)
-[![Linting](https://github.com/deinal/njord/actions/workflows/pre-commit.yml/badge.svg?branch=main)](https://github.com/deinal/njord/actions/workflows/pre-commit.yml)
-[![Tests](https://github.com/deinal/njord/actions/workflows/install-and-test.yml/badge.svg?branch=main)](https://github.com/deinal/njord/actions/workflows/install-and-test.yml)
-
 # Njord
 
 This repository contains graph-based neural models for ensemble ocean forecasting, for global and regional domains.
@@ -189,8 +185,6 @@ training:
 
 Optional keys `statistics_datastore`, `statistics_datastore_boundary` and `statistics_datastore_atmosphere` point at separate MDP configs whose mean/std are used for normalisation.
 That is useful when training or evaluating on forecast tensors (`init_time` × `lead_time`) while still normalising with statistics from a longer reanalysis/analysis record.
-See [`data/baltic_sea_finetune.yaml`](data/baltic_sea_finetune.yaml) (analysis along `time`) and [`data/baltic_sea_forecasts.yaml`](data/baltic_sea_forecasts.yaml) (forecasts + `statistics_*`).
-Paths inside those files are machine-specific.
 
 Ocean, atmosphere and boundary fields used here go through [mllam-data-prep](https://github.com/mllam/mllam-data-prep).
 Typical sources are Copernicus Marine ocean products, ERA5 for training-time atmosphere, and IFS/AIFS for forecast evaluation.
@@ -245,7 +239,7 @@ python -m neural_lam.create_graph \
 Global graphs (spherical k-means / icosahedral):
 
 ```bash
-python -m neural_lam.create_global_graph --config_path data/global_ocean.yaml --help
+python -m neural_lam.create_global_graph --config_path sample_data/global_ocean_1.yaml --help
 ```
 
 `python -m neural_lam.create_auxiliary_graph` rebuilds only grid–mesh edges (`g2m` / `m2g`) for a new grid while keeping an existing mesh.
@@ -315,7 +309,7 @@ python -m neural_lam.train_model --model graph_efm --graph cluster ...
 
 ### Graph-FM (`graph_fm`)
 Deterministic hierarchical GNN (SeaCast baseline), trained with weighted MSE.
-Scripts: `training_scripts/seacast/`.
+Scripts: `training_scripts/graph_fm/`.
 
 To train Graph-FM use
 ```
@@ -334,12 +328,7 @@ Checkpoint files for the paper models are available upon request.
 
 ### High Performance Computing
 
-The training script can be run on a cluster with multiple GPU-nodes.
-Neural-LAM is set up to use PyTorch Lightning's `DDP` backend.
-If the cluster has multiple nodes, set the `--num_nodes` argument accordingly (with Slurm, `--num_nodes $SLURM_JOB_NUM_NODES`).
-Example job scripts with site-specific paths are under `training_scripts/`.
-
-When using a system without Slurm, where all GPUs are visible, it is possible to select a subset with `--devices`, e.g. `--devices 0 1`.
+See [`training_scripts/README.md`](training_scripts/README.md) for how to run training jobs and sweeps on a Slurm cluster.
 
 ## Evaluate Models
 Evaluation is also done using `python -m neural_lam.train_model --config_path ...`, but using the `--eval` option.
